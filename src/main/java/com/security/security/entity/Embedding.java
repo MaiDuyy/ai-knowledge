@@ -39,6 +39,9 @@ public class Embedding {
     @Column(name = "char_count")
     private Integer charCount;
 
+    @Column(name = "chunk_title")
+    private String chunkTitle;
+
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt;

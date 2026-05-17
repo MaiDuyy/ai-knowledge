@@ -8,53 +8,63 @@ import com.security.security.repository.DocumentRepository;
 import com.security.security.repository.EmbeddingRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.ai.reader.ExtractedTextFormatter;
-import org.springframework.ai.reader.tika.TikaDocumentReader;
+import org.apache.tika.metadata.Metadata;
+import org.apache.tika.parser.AutoDetectParser;
+import org.apache.tika.parser.ParseContext;
+import org.apache.tika.sax.ToHTMLContentHandler;
+import org.jsoup.Jsoup;
+import org.jsoup.nodes.Element;
+import org.jsoup.nodes.Node;
+import org.jsoup.nodes.TextNode;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.context.event.EventListener;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.UrlResource;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
+import org.xml.sax.ContentHandler;
 
+import java.io.InputStream;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * ============================================================
- *  Spring AI ETL Pipeline  —  Semantic Chunking
- * ============================================================
- *
- *  VẤN ĐỀ với TokenTextSplitter (Spring AI mặc định):
- *   ✗ Cắt theo số token đơn thuần → không quan tâm heading, paragraph
- *   ✗ Một section bị cắt ngang giữa chừng → chunk mất ngữ nghĩa
- *   ✗ Overlap là ký tự ngẫu nhiên → gây lặp nội dung y hệt nhau
- *   ✗ Không có breadcrumb → LLM không biết chunk thuộc phần nào
- *
- *  GIẢI PHÁP — Custom Semantic Chunker thay TokenTextSplitter:
- *
- *  E   TikaDocumentReader
- *        → extract PDF/DOCX/TXT thành raw text
- *
- *  T1  cleanAndReconstruct()
- *        → xóa noise (page number, ký tự lạ)
- *        → reconstruct PDF broken lines (join dòng bị xuống hàng sai)
- *
- *  T2  semanticChunk()  ← THAY THẾ TokenTextSplitter
- *        → parseStructure(): phát hiện heading → List<Section>
- *        → chunkSection(): sliding window theo câu, TARGET=300 tokens
- *        → addBreadcrumb(): prepend "[Phần X > Mục Y]" vào mỗi chunk
- *        → Overlap là câu hoàn chỉnh, không phải ký tự ngẫu nhiên
- *
- *  L   VectorStore.add() + EmbeddingRepository.saveAll()
- *        → batch 30, lưu MariaDB + vector store
- *
- *  KẾT QUẢ:
- *   ✓ Chunk luôn bắt đầu/kết thúc ở ranh giới câu hoàn chỉnh
- *   ✓ Không bao giờ cắt ngang heading hay bảng
- *   ✓ Mỗi chunk biết nó thuộc phần nào của tài liệu (breadcrumb)
- *   ✓ Overlap là câu thật, giúp RAG có context liên tục
+ * ╔══════════════════════════════════════════════════════════════════════════╗
+ * ║          Docling-style Document ETL Pipeline  —  v3                     ║
+ * ╠══════════════════════════════════════════════════════════════════════════╣
+ * ║                                                                          ║
+ * ║  GIAI ĐOẠN 1 — INGESTION                                                ║
+ * ║    UrlResource / FileSystemResource → InputStream                       ║
+ * ║                                                                          ║
+ * ║  GIAI ĐOẠN 2 — DOM EXTRACTION  (Tika → HTML)                           ║
+ * ║    AutoDetectParser + ToHTMLContentHandler                               ║
+ * ║    → Giữ nguyên <h1-h6>, <table>, <p>, <ul>, <ol>, <pre>               ║
+ * ║    ⚠ Dùng ToHTMLContentHandler (KHÔNG phải ToXMLContentHandler vì       ║
+ * ║      ToXML sinh XHTML namespace → Jsoup parse sai tag)                  ║
+ * ║                                                                          ║
+ * ║  GIAI ĐOẠN 3 — DEDUPLICATION  (Root cause lỗi lặp đôi nội dung)       ║
+ * ║    PDF có 2 lớp text: text layer + OCR layer → Tika xuất cả 2          ║
+ * ║    → deduplicateHtmlContent(): Jaccard similarity ≥ 88% → xóa bản trùng║
+ * ║    → Đây là bước bị THIẾU trong phiên bản cũ → vì thế bị lặp           ║
+ * ║                                                                          ║
+ * ║  GIAI ĐOẠN 4 — HTML → MARKDOWN  (Jsoup DOM Traversal + Mapping Rules)  ║
+ * ║    <h1-h6> → # / ## / ###                                               ║
+ * ║    <p class="title"> → ## (PDF heading detection)                       ║
+ * ║    <table>  → | col | col | + |---|---| + escape \|                     ║
+ * ║    <ul/ol>  → - item / 1. item (nested: 2-space indent)                 ║
+ * ║    <pre>    → ``` block ```                                              ║
+ * ║    Sanitization: encoding, số trang, blank lines dư                     ║
+ * ║                                                                          ║
+ * ║  GIAI ĐOẠN 5 — SEMANTIC CHUNKING                                        ║
+ * ║    parseStructure() → heading → List<Section>                           ║
+ * ║    chunkSection()   → sliding window (TARGET=300 tok, MAX=480 tok)      ║
+ * ║    mergeOrphanChunks() → gộp chunk < 60 tok vào chunk liền kề          ║
+ * ║    addBreadcrumb()  → "[Phần X > Mục Y]" prefix                        ║
+ * ║                                                                          ║
+ * ║  GIAI ĐOẠN 6 — LOAD                                                     ║
+ * ║    VectorStore.add() + EmbeddingRepository.saveAll() (batch=30)         ║
+ * ╚══════════════════════════════════════════════════════════════════════════╝
  */
 @Component
 @Slf4j
@@ -65,56 +75,44 @@ public class DocumentProcessingListener {
     private final DocumentRepository  documentRepository;
     private final EmbeddingRepository embeddingRepository;
 
-    // ── Token budget ──────────────────────────────────────────────────────────
-    private static final int TARGET_TOKENS  = 300;   // kích thước chunk lý tưởng
-    private static final int MAX_TOKENS     = 500;   // hard ceiling
-    private static final int MIN_TOKENS     = 40;    // bỏ chunk quá nhỏ
-    private static final int OVERLAP_TOKENS = 50;    // overlap tính theo token
-    private static final double CHARS_PER_TOKEN = 3.8; // Vietnamese ~3.5, English ~4.0
+    // ── Token / Chunk budget ──────────────────────────────────────────────────
+    private static final int    TARGET_TOKENS   = 300;
+    private static final int    MAX_TOKENS      = 480;
+    private static final int    MIN_TOKENS      = 60;
+    private static final int    OVERLAP_TOKENS  = 50;
+    private static final double CHARS_PER_TOKEN = 3.8;
 
-    private static final int TARGET  = (int)(TARGET_TOKENS  * CHARS_PER_TOKEN); // ~1140
-    private static final int MAX     = (int)(MAX_TOKENS     * CHARS_PER_TOKEN); // ~1900
-    private static final int MIN     = (int)(MIN_TOKENS     * CHARS_PER_TOKEN); // ~152
-
+    private static final int TARGET = (int)(TARGET_TOKENS * CHARS_PER_TOKEN);
+    private static final int MAX    = (int)(MAX_TOKENS    * CHARS_PER_TOKEN);
+    private static final int MIN    = (int)(MIN_TOKENS    * CHARS_PER_TOKEN);
     private static final int BATCH_SIZE = 30;
 
-    // ── Heading patterns (priority: most specific first) ─────────────────────
-    // Markdown: # Title / ## Section
-    private static final Pattern P_MD  = Pattern.compile("^(#{1,4})\\s+(.+)$");
+    /** Jaccard similarity threshold cho dedup (0.0-1.0) */
+    private static final double DEDUP_THRESHOLD = 0.88;
 
-    // Vietnamese legal: Chương I, Điều 5, Mục 2, Khoản 3
+    // ── Heading patterns ──────────────────────────────────────────────────────
+    private static final Pattern P_MD  = Pattern.compile("^(#{1,4})\\s+(.+)$");
     private static final Pattern P_VN  = Pattern.compile(
             "^(CHƯƠNG|Chương|PHẦN|Phần|BÀI|Bài|MỤC|Mục|ĐIỀU|Điều|TIẾT|Tiết|KHOẢN|Khoản|ĐIỂM|Điểm)" +
                     "\\s+([\\dIVXivxA-Za-z]+\\.?)(.{0,160})$");
-
-    // English legal: Article 1, Section 2, Chapter III
     private static final Pattern P_EN  = Pattern.compile(
             "^(ARTICLE|Article|SECTION|Section|CHAPTER|Chapter|CLAUSE|Clause|PART|Part|APPENDIX|Appendix)" +
                     "\\s+([\\dIVXivx]+\\.?)(.{0,160})$");
-
-    // Numbered: "1. Title"  "1.1 Title"  "1.1.1 Title"
-    // BẮT BUỘC dấu chấm sau số, text ngắn (không phải câu văn)
     private static final Pattern P_NUM = Pattern.compile(
             "^(\\d{1,2}(\\.\\d{1,2}){0,3})\\.\\s{1,4}(\\S.{2,100})$");
-
-    // ALL-CAPS title: "NỘI DUNG"  "PHẦN MỞ ĐẦU"
     private static final Pattern P_CAP = Pattern.compile(
-            "^[A-ZÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚĂĐĨŨƠƯ][A-ZÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚĂĐĨŨƠƯ\\s\\d\\-/]{3,79}$");
+            "^[A-ZÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚĂĐĨŨƠƯ][A-ZÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚĂĐĨŨƠƯ\\s\\d\\-/&()]{3,79}$");
 
-    // Block detectors
-    private static final Pattern P_CODE  = Pattern.compile("^```.*$");
+    // ── Block / structural detectors ─────────────────────────────────────────
+    private static final Pattern P_CODE  = Pattern.compile("^```.*$", Pattern.DOTALL);
     private static final Pattern P_TROW  = Pattern.compile("^\\|.+\\|\\s*$");
     private static final Pattern P_TSEP  = Pattern.compile("^[|\\-:\\s]{3,}$");
     private static final Pattern P_BULL  = Pattern.compile("^([\\-*•]|\\d+[.)]) .+");
     private static final Pattern P_BLANK = Pattern.compile("^\\s*$");
+    private static final Pattern P_SENT  = Pattern.compile(
+            "(?<!(?:TS|PGS|GS|ThS|BS|KS|CN|Mr|Mrs|Ms|Dr|Prof|vs|etc|e\\.g|i\\.e|v\\.v|v\\.d|\\d))" +
+                    "[.!?](?=[\\s\"']|$)");
 
-    // Sentence boundary — tránh false positive với viết tắt TS., v.v., 1.2
-    private static final Pattern P_SENT = Pattern.compile(
-            "(?<!" +
-                    "(?:TS|PGS|GS|ThS|BS|KS|CN|Mr|Mrs|Ms|Dr|Prof|vs|etc|e\\.g|i\\.e|v\\.v|v\\.d|\\d)" +
-                    ")[.!?](?=[\\s\"']|$)");
-
-    // ── Internal types ────────────────────────────────────────────────────────
     private record Section(String heading, int level, String body) {}
     private record HeadingResult(String title, int level) {}
 
@@ -134,103 +132,80 @@ public class DocumentProcessingListener {
         try {
             setStatus(document, DocStatus.PROCESSING, null);
 
-            // ── E: Extract với Tika ───────────────────────────────────────────
-            // Support both URL (NATS event from file-service) and local disk (legacy)
-            org.springframework.core.io.Resource fileResource;
+            // ── G1: Ingestion ─────────────────────────────────────────────────
+            org.springframework.core.io.Resource resource;
             if (document.getFileUrl() != null && !document.getFileUrl().isBlank()) {
-                log.info("[ETL] Loading from URL: {}", document.getFileUrl());
-                fileResource = new UrlResource(document.getFileUrl());
+                log.info("[ETL][1] URL: {}", document.getFileUrl());
+                resource = new UrlResource(document.getFileUrl());
             } else {
-                log.info("[ETL] Loading from disk: {}", document.getFilePath());
-                fileResource = new FileSystemResource(document.getFilePath());
+                log.info("[ETL][1] Disk: {}", document.getFilePath());
+                resource = new FileSystemResource(document.getFilePath());
             }
 
-            TikaDocumentReader reader = new TikaDocumentReader(
-                    fileResource,
-                    ExtractedTextFormatter.builder()
-                            .withNumberOfTopPagesToSkipBeforeDelete(0)
-                            .withNumberOfBottomTextLinesToDelete(0)
-                            .withLeftAlignment(true)
-                            .build()
-            );
+            // ── G2: DOM Extraction ────────────────────────────────────────────
+            String rawHtml = extractToHtml(resource);
+            log.info("[ETL][2] HTML: {} chars, doc={}", rawHtml.length(), docId);
+            if (rawHtml.isBlank()) throw new IllegalStateException("Tika empty HTML, doc=" + docId);
 
-            List<org.springframework.ai.document.Document> rawDocs = reader.get();
-            int totalChars = rawDocs.stream().mapToInt(d -> d.getText().length()).sum();
-            log.info("[ETL] Tika extracted {} doc(s), totalChars={}", rawDocs.size(), totalChars);
+            // ── G3: Deduplication ─────────────────────────────────────────────
+            String dedupedHtml = deduplicateHtmlContent(rawHtml);
+            log.info("[ETL][3] Dedup: {} → {} chars, doc={}", rawHtml.length(), dedupedHtml.length(), docId);
 
-            if (rawDocs.isEmpty() || rawDocs.stream().allMatch(d -> d.getText().isBlank())) {
-                throw new IllegalStateException("Extracted text is empty");
-            }
+            // ── G4: HTML → Markdown ───────────────────────────────────────────
+            String markdown = htmlToMarkdown(dedupedHtml);
+            log.info("[ETL][4] Markdown: {} chars, doc={}", markdown.length(), docId);
+            if (markdown.length() < MIN)
+                throw new IllegalStateException("Markdown too short: " + markdown.length());
 
-            // Gộp tất cả text thành 1 (Tika có thể trả về nhiều doc cho multi-page PDF)
-            StringBuilder fullText = new StringBuilder();
-            for (org.springframework.ai.document.Document raw : rawDocs) {
-                if (raw.getText() != null && !raw.getText().isBlank()) {
-                    fullText.append(raw.getText()).append("\n\n");
-                }
-            }
+            // ── G5: Semantic Chunking ─────────────────────────────────────────
+            List<String> chunks = semanticChunk(markdown);
+            log.info("[ETL][5] Chunks: {}, doc={}", chunks.size(), docId);
+            if (chunks.isEmpty()) throw new IllegalStateException("No chunks produced");
 
-            // ── T1: Clean + Reconstruct broken PDF lines ──────────────────────
-            String cleaned = cleanAndReconstruct(fullText.toString());
-            log.debug("[ETL] After clean: {} chars", cleaned.length());
-
-            if (cleaned.length() < MIN) {
-                throw new IllegalStateException("Text too short after cleaning: " + cleaned.length() + " chars");
-            }
-
-            // ── T2: Semantic Chunking (thay TokenTextSplitter) ────────────────
-            List<String> chunks = semanticChunk(cleaned);
-            log.info("[ETL] SemanticChunker → {} chunks for doc={}", chunks.size(), docId);
-
-            if (chunks.isEmpty()) {
-                throw new IllegalStateException("No chunks produced after chunking");
-            }
-
-            // ── L: Load — VectorStore + DB ────────────────────────────────────
+            // ── G6: Load ──────────────────────────────────────────────────────
             embeddingRepository.deleteByDocumentId(docId);
 
-            List<org.springframework.ai.document.Document> vectorBatch    = new ArrayList<>(BATCH_SIZE);
-            List<Embedding>                                 embeddingBatch = new ArrayList<>(BATCH_SIZE);
+            List<org.springframework.ai.document.Document> vBatch = new ArrayList<>(BATCH_SIZE);
+            List<Embedding>                                 eBatch = new ArrayList<>(BATCH_SIZE);
 
             for (int i = 0; i < chunks.size(); i++) {
-                String text       = chunks.get(i);
-                String chunkTitle = detectChunkTitle(text, document.getFileName());
+                String text  = chunks.get(i);
+                String title = detectChunkTitle(text, document.getFileName());
 
                 Map<String, Object> meta = new HashMap<>();
                 meta.put("documentId", document.getId().toString());
                 meta.put("userId",     document.getUserId());
                 meta.put("fileName",   document.getFileName());
                 meta.put("chunkIndex", String.valueOf(i));
-                meta.put("chunkTitle", chunkTitle);
+                meta.put("chunkTitle", title);
                 meta.put("tokenCount", String.valueOf(estimateTokens(text)));
                 meta.put("charCount",  String.valueOf(text.length()));
 
-                vectorBatch.add(new org.springframework.ai.document.Document(text, meta));
-                embeddingBatch.add(Embedding.builder()
+                vBatch.add(new org.springframework.ai.document.Document(text, meta));
+                eBatch.add(Embedding.builder()
                         .documentId(document.getId())
                         .chunkIndex(i)
                         .chunkText(text)
+                        .chunkTitle(title)
                         .tokenCount(estimateTokens(text))
                         .charCount(text.length())
                         .build());
 
-                if (vectorBatch.size() >= BATCH_SIZE) {
-                    vectorStore.add(new ArrayList<>(vectorBatch));
-                    embeddingRepository.saveAll(new ArrayList<>(embeddingBatch));
-                    log.info("[ETL] Flushed batch [{}-{}] for doc={}", i - BATCH_SIZE + 1, i, docId);
-                    vectorBatch.clear();
-                    embeddingBatch.clear();
+                if (vBatch.size() >= BATCH_SIZE) {
+                    vectorStore.add(new ArrayList<>(vBatch));
+                    embeddingRepository.saveAll(new ArrayList<>(eBatch));
+                    log.info("[ETL][6] Batch [{}-{}] doc={}", i - BATCH_SIZE + 1, i, docId);
+                    vBatch.clear();
+                    eBatch.clear();
                 }
             }
-
-            // Flush batch cuối
-            if (!vectorBatch.isEmpty()) {
-                vectorStore.add(vectorBatch);
-                embeddingRepository.saveAll(embeddingBatch);
-                log.info("[ETL] Flushed final batch for doc={}", docId);
+            if (!vBatch.isEmpty()) {
+                vectorStore.add(vBatch);
+                embeddingRepository.saveAll(eBatch);
+                log.info("[ETL][6] Final batch doc={}", docId);
             }
 
-            log.info("[ETL] ✓ Stored {} chunks for doc={}", chunks.size(), docId);
+            log.info("[ETL] ✓ {} chunks stored, doc={}", chunks.size(), docId);
             document.setStatus(DocStatus.COMPLETED);
             document.setChunkCount(chunks.size());
             document.setErrorMessage(null);
@@ -243,194 +218,562 @@ public class DocumentProcessingListener {
     }
 
     // =========================================================================
-    //  T1 — CLEAN + RECONSTRUCT PDF BROKEN LINES
+    //  G2 — Tika DOM Extraction
     // =========================================================================
 
     /**
-     * Bước 1: normalize encoding, xóa noise
-     * Bước 2: reconstruct PDF broken lines
+     * Dùng ToHTMLContentHandler (KHÔNG phải ToXMLContentHandler).
      *
-     * PDF extractor thường bẻ gãy 1 đoạn văn thành nhiều dòng ngắn.
-     * Rule join line[i] với line[i+1] khi:
-     *  - line[i] KHÔNG kết thúc bằng dấu câu cứng (.!?:;)
-     *  - line[i] KHÔNG phải heading candidate
-     *  - line[i+1] bắt đầu bằng chữ thường HOẶC từ nối
-     *  - line[i+1] KHÔNG phải heading
+     * Lý do:
+     *  - ToXMLContentHandler → XHTML + XML namespace → Jsoup parse miss tag
+     *  - ToHTMLContentHandler → HTML5 chuẩn → Jsoup parse chính xác
+     *  - TikaDocumentReader (Spring AI) → BodyContentHandler → plain text
+     *    (mất <table>, <h1-h6> → không thể làm Docling-style)
      */
-    private String cleanAndReconstruct(String raw) {
+    private String extractToHtml(org.springframework.core.io.Resource resource) throws Exception {
+        AutoDetectParser parser   = new AutoDetectParser();
+        Metadata         metadata = new Metadata();
+        ParseContext     context  = new ParseContext();
+        ContentHandler   handler  = new ToHTMLContentHandler();
+
+        try (InputStream stream = resource.getInputStream()) {
+            parser.parse(stream, handler, metadata, context);
+        }
+
+        log.debug("[ETL][2] title={}, pages={}, type={}",
+                metadata.get("dc:title"),
+                metadata.get("xmpTPg:NPages"),
+                metadata.get("Content-Type"));
+
+        return handler.toString();
+    }
+
+    // =========================================================================
+    //  G3 — Deduplication  (fix lỗi lặp đôi nội dung)
+    // =========================================================================
+
+    /**
+     * Root cause của lỗi lặp đôi trong phiên bản cũ:
+     *
+     * Nhiều PDF (scan hoặc export từ Word) có 2 lớp text:
+     *   - Text layer gốc (font/glyph)
+     *   - OCR layer (searchable text layer)
+     *
+     * Tika đọc cả 2 → mỗi <p> xuất hiện 2 lần trong HTML.
+     * Ví dụ thực tế từ output cũ:
+     *   "Phần mềm (Software): Là một tập hợp các chương trình máy tính..."
+     *   "Phần mềm (Software): Là một tập hợp các chương trình máy tính..." ← duplicate
+     *
+     * Giải pháp: Jaccard similarity trên set từ.
+     * Ưu điểm over Levenshtein: O(n) thay vì O(n²), đủ chính xác cho đoạn văn.
+     */
+    private String deduplicateHtmlContent(String html) {
+        org.jsoup.nodes.Document doc = Jsoup.parse(html);
+
+        // Dedup ở các cấp độ element cơ bản
+        for (String sel : new String[]{"p", "li", "td", "th"}) {
+            deduplicateSelector(doc, sel);
+        }
+
+        return doc.outerHtml();
+    }
+
+    private void deduplicateSelector(org.jsoup.nodes.Document doc, String selector) {
+        List<Element> elements = doc.select(selector);
+        String prev = "";
+
+        for (Element el : elements) {
+            String curr = el.text().strip();
+            if (curr.isBlank()) continue;
+
+            if (jaccardSimilarity(prev, curr) >= DEDUP_THRESHOLD) {
+                el.remove();
+            } else {
+                prev = curr;
+            }
+        }
+    }
+
+    /**
+     * Jaccard coefficient dựa trên set từ.
+     * Chỉ tính khi length ratio >= 0.6 (tránh false positive câu ngắn).
+     */
+    private double jaccardSimilarity(String a, String b) {
+        if (a.isBlank() || b.isBlank()) return 0.0;
+        double ratio = (double) Math.min(a.length(), b.length()) / Math.max(a.length(), b.length());
+        if (ratio < 0.6) return 0.0;
+
+        Set<String> wa = new HashSet<>(Arrays.asList(a.toLowerCase().split("\\s+")));
+        Set<String> wb = new HashSet<>(Arrays.asList(b.toLowerCase().split("\\s+")));
+
+        Set<String> intersect = new HashSet<>(wa);
+        intersect.retainAll(wb);
+
+        Set<String> union = new HashSet<>(wa);
+        union.addAll(wb);
+
+        return union.isEmpty() ? 0.0 : (double) intersect.size() / union.size();
+    }
+
+    // =========================================================================
+    //  G4 — HTML → Markdown
+    // =========================================================================
+
+    private String htmlToMarkdown(String html) {
+        org.jsoup.nodes.Document doc = Jsoup.parse(html);
+
+        // Strip non-semantic
+        doc.select("style, script, meta, link, head, noscript").remove();
+
+        // Promote PDF-style headings (<p class="title">, ALL-CAPS <p>)
+        promotePdfHeadings(doc);
+
+        StringBuilder md = new StringBuilder();
+        traverseToMarkdown(doc.body() != null ? doc.body() : doc.root(), md);
+
+        return sanitizeMarkdown(md.toString());
+    }
+
+    /**
+     * PDF heading promotion:
+     * Tika export PDF tiêu đề thành <p class="title"> hoặc <p> với ALL-CAPS text.
+     * Promote → <h2> để traverseToMarkdown() map đúng thành ## heading.
+     */
+    private void promotePdfHeadings(org.jsoup.nodes.Document doc) {
+        for (Element p : doc.select("p")) {
+            String cls  = p.className().toLowerCase();
+            String text = p.text().strip();
+            if (text.isEmpty() || text.length() > 200) continue;
+
+            boolean isClass  = cls.contains("title") || cls.contains("heading")
+                    || cls.contains("h1")   || cls.contains("h2")   || cls.contains("h3");
+            boolean isAllCap = text.length() >= 4
+                    && text.replaceAll("[\\d\\s\\-/:()&.,]", "").equals(
+                    text.replaceAll("[\\d\\s\\-/:()&.,]", "").toUpperCase())
+                    && !text.endsWith(".")
+                    && !text.contains(",");
+
+            if (isClass || isAllCap) p.tagName("h2");
+        }
+    }
+
+    /**
+     * Đệ quy duyệt DOM → Markdown.
+     * Block elements được xử lý trực tiếp.
+     * Inline elements được gom bởi inlineText().
+     */
+    private void traverseToMarkdown(Element root, StringBuilder out) {
+        for (Node node : root.childNodes()) {
+
+            if (node instanceof TextNode tn) {
+                String t = tn.text();
+                if (!t.isBlank()) out.append(t).append(" ");
+                continue;
+            }
+            if (!(node instanceof Element el)) continue;
+
+            String tag = el.tagName().toLowerCase();
+
+            switch (tag) {
+                case "h1" -> appendHeading(el, 1, out);
+                case "h2" -> appendHeading(el, 2, out);
+                case "h3" -> appendHeading(el, 3, out);
+                case "h4" -> appendHeading(el, 4, out);
+                case "h5" -> appendHeading(el, 5, out);
+                case "h6" -> appendHeading(el, 6, out);
+
+                case "p"  -> {
+                    String text = inlineText(el).strip();
+                    if (!text.isEmpty()) out.append(text).append("\n\n");
+                }
+
+                case "ul" -> appendList(el, false, 0, out);
+                case "ol" -> appendList(el, true,  0, out);
+
+                case "table" -> appendTable(el, out);
+
+                case "pre" -> {
+                    String code = el.wholeText().strip();
+                    if (!code.isEmpty()) out.append("```\n").append(code).append("\n```\n\n");
+                }
+                case "code" -> {
+                    if (!isDescendantOf(el, "pre")) {
+                        String c = el.text().strip();
+                        if (!c.isEmpty()) out.append("`").append(c).append("` ");
+                    }
+                }
+
+                case "br" -> out.append("\n");
+                case "hr" -> out.append("\n---\n\n");
+
+                case "script", "style", "meta", "link",
+                     "noscript", "form", "input", "button" -> { /* skip */ }
+
+                // Containers: recurse
+                case "div", "section", "article", "main",
+                     "header", "footer", "nav", "aside",
+                     "figure", "figcaption", "blockquote",
+                     "body", "html", "dl", "dd", "dt",
+                     "thead", "tbody", "tfoot" -> traverseToMarkdown(el, out);
+
+                default -> {
+                    if (hasBlockChild(el)) {
+                        traverseToMarkdown(el, out);
+                    } else {
+                        String text = inlineText(el).strip();
+                        if (!text.isEmpty()) out.append(text).append(" ");
+                    }
+                }
+            }
+        }
+    }
+
+    private void appendHeading(Element el, int level, StringBuilder out) {
+        String title = inlineText(el).strip();
+        if (title.isEmpty()) return;
+
+        // Anti-duplicate: skip nếu heading này giống dòng vừa emit
+        String last = lastNonBlankLine(out.toString()).replaceAll("^#+\\s*", "").strip();
+        if (jaccardSimilarity(title, last) >= DEDUP_THRESHOLD) return;
+
+        out.append("\n")
+                .append("#".repeat(Math.min(level, 6)))
+                .append(" ")
+                .append(title)
+                .append("\n\n");
+    }
+
+    private void appendList(Element listEl, boolean ordered, int depth, StringBuilder out) {
+        String indent = "  ".repeat(depth);
+        int    n      = 1;
+
+        for (Element li : listEl.select("> li")) {
+            // Lấy text trực tiếp trong li (bỏ nested list)
+            StringBuilder liTxt = new StringBuilder();
+            for (Node nd : li.childNodes()) {
+                if (nd instanceof TextNode tn && !tn.text().isBlank()) {
+                    liTxt.append(tn.text().strip()).append(" ");
+                } else if (nd instanceof Element ch) {
+                    String ct = ch.tagName().toLowerCase();
+                    if (!ct.equals("ul") && !ct.equals("ol")) {
+                        liTxt.append(inlineText(ch).strip()).append(" ");
+                    }
+                }
+            }
+
+            String itemText = liTxt.toString().strip();
+            if (!itemText.isEmpty()) {
+                if (ordered) out.append(indent).append(n++).append(". ").append(itemText).append("\n");
+                else         out.append(indent).append("- ").append(itemText).append("\n");
+            }
+
+            // Nested list
+            for (Element child : li.select("> ul, > ol")) {
+                appendList(child, child.tagName().equals("ol"), depth + 1, out);
+            }
+        }
+        if (depth == 0) out.append("\n");
+    }
+
+    /**
+     * <table> → Markdown table.
+     *
+     * Key behaviors:
+     *  - Escape | → \| trong mỗi cell (tránh vỡ cột)
+     *  - Auto-generate |---|---| separator sau header row
+     *  - Xử lý colspan (điền ô trống)
+     *  - Chuẩn hóa số cột (padding nếu thiếu)
+     */
+    private void appendTable(Element table, StringBuilder out) {
+        // Thu thập rows theo thứ tự thead → tbody → tfoot → trực tiếp
+        List<Element> trList = new ArrayList<>();
+        for (Element sec : table.select("thead, tbody, tfoot")) {
+            trList.addAll(sec.select("> tr"));
+        }
+        if (trList.isEmpty()) trList.addAll(table.select("> tr"));
+        if (trList.isEmpty()) { traverseToMarkdown(table, out); return; }
+
+        List<List<String>> rows = new ArrayList<>();
+        for (Element tr : trList) {
+            List<String> row = new ArrayList<>();
+            for (Element cell : tr.select("td, th")) {
+                String txt = cell.text()
+                        .replace("|", "\\|")
+                        .replace("\n", " ")
+                        .replaceAll("\\s{2,}", " ")
+                        .strip();
+                if (txt.isEmpty()) txt = " ";
+                row.add(txt);
+
+                // colspan
+                int cs = parseIntAttr(cell, "colspan", 1);
+                for (int c = 1; c < cs; c++) row.add(" ");
+            }
+            if (!row.isEmpty()) rows.add(row);
+        }
+        if (rows.isEmpty()) return;
+
+        // Normalize column count
+        int maxCols = rows.stream().mapToInt(List::size).max().orElse(0);
+        if (maxCols == 0) return;
+        for (List<String> row : rows) {
+            while (row.size() < maxCols) row.add(" ");
+        }
+
+        out.append("\n");
+        // Header
+        out.append("| ").append(String.join(" | ", rows.get(0))).append(" |\n");
+        // Separator
+        out.append("|");
+        for (int c = 0; c < maxCols; c++) out.append(" --- |");
+        out.append("\n");
+        // Data rows
+        for (int r = 1; r < rows.size(); r++) {
+            out.append("| ").append(String.join(" | ", rows.get(r))).append(" |\n");
+        }
+        out.append("\n");
+    }
+
+    private String inlineText(Element el) {
+        StringBuilder sb = new StringBuilder();
+        for (Node node : el.childNodes()) {
+            if (node instanceof TextNode tn) {
+                sb.append(tn.text());
+            } else if (node instanceof Element ch) {
+                String ct = ch.tagName().toLowerCase();
+                if (isBlockTag(ct)) continue;
+                if (ct.equals("code"))  sb.append("`").append(ch.text()).append("`");
+                else if (ct.equals("br")) sb.append(" ");
+                else sb.append(inlineText(ch));
+            }
+        }
+        return sb.toString();
+    }
+
+    private boolean isBlockTag(String tag) {
+        return switch (tag) {
+            case "p","div","section","article","aside","main","header","footer","nav",
+                 "figure","figcaption","h1","h2","h3","h4","h5","h6",
+                 "ul","ol","li","dl","dt","dd",
+                 "table","thead","tbody","tfoot","tr","td","th",
+                 "pre","blockquote","hr","form","fieldset" -> true;
+            default -> false;
+        };
+    }
+
+    private boolean hasBlockChild(Element el) {
+        return el.children().stream().anyMatch(c -> isBlockTag(c.tagName().toLowerCase()));
+    }
+
+    private boolean isDescendantOf(Element el, String parentTag) {
+        Element p = el.parent();
+        while (p != null) {
+            if (p.tagName().equalsIgnoreCase(parentTag)) return true;
+            p = p.parent();
+        }
+        return false;
+    }
+
+    private int parseIntAttr(Element el, String attr, int fallback) {
+        try {
+            String v = el.attr(attr);
+            return v.isBlank() ? fallback : Integer.parseInt(v.strip());
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
+    }
+
+    private String lastNonBlankLine(String s) {
+        String[] lines = s.split("\n", -1);
+        for (int i = lines.length - 1; i >= 0; i--) {
+            if (!lines[i].isBlank()) return lines[i].strip();
+        }
+        return "";
+    }
+
+    /**
+     * Cleanup Markdown:
+     *  1. Normalize encoding
+     *  2. Xóa số trang / noise
+     *  3. Chuẩn hóa blank lines (max 2)
+     *  4. Dedup dòng liên tiếp giống nhau (fallback nếu HTML dedup miss)
+     */
+    private String sanitizeMarkdown(String raw) {
         if (raw == null || raw.isBlank()) return "";
 
-        // Phase 1: normalize encoding
-        String normalized = raw
+        String s = raw
                 .replace("\uFEFF", "").replace("\r\n", "\n").replace("\r", "\n")
                 .replace("\u00A0", " ").replace("\u200B", "").replace("\u200C", "")
-                .replace("\u200D", "").replace("\uFFFD", "").replace("\t", " ")
-                .replaceAll("[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]", "")
-                .replaceAll("\n{4,}", "\n\n\n");
+                .replace("\u200D", "").replace("\uFFFD", "").replace("\t", "    ")
+                .replaceAll("[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]", "");
 
-        // Phase 2: line-by-line clean + reconstruct
-        String[] lines = normalized.split("\n", -1);
-        StringBuilder out = new StringBuilder();
-        int blanks = 0;
+        String[]      lines  = s.split("\n", -1);
+        StringBuilder out    = new StringBuilder();
+        int           blanks = 0;
+        String        prevTxt = "";
 
-        for (int i = 0; i < lines.length; i++) {
-            String line    = lines[i];
-            String trimmed = line.strip();
+        for (String line : lines) {
+            String t = line.stripTrailing();
+            t = cleanTandemSubstrings(t);
 
-            // Bỏ số trang: "1", "- 2 -", "Page 3", "Trang 4"
-            if (trimmed.matches("^[-–—]?\\s*\\d{1,4}\\s*[-–—]?$")) continue;
-            if (trimmed.matches("(?i)^(page|trang)\\s+\\d+.*$"))    continue;
-            // Bỏ dòng noise quá ngắn (< 3 ký tự) nhưng không phải blank
-            if (!trimmed.isEmpty() && trimmed.length() < 3)         continue;
+            // Xóa số trang
+            if (t.matches("^[-–—]?\\s*\\d{1,4}\\s*[-–—]?$"))   continue;
+            if (t.matches("(?i)^(page|trang)\\s+\\d+.*$"))      continue;
+            // Xóa dòng quá ngắn không phải cấu trúc
+            if (!t.isEmpty() && t.length() < 3
+                    && !t.startsWith("#") && !t.startsWith("|")
+                    && !t.startsWith("-") && !t.startsWith("`")) continue;
 
-            if (trimmed.isEmpty()) {
+            if (t.isBlank()) {
                 if (++blanks <= 2) out.append("\n");
                 continue;
             }
             blanks = 0;
 
-            // Kiểm tra có nên join với dòng tiếp theo không
-            if (i + 1 < lines.length) {
-                String next        = lines[i + 1].strip();
-                boolean nextBlank  = next.isEmpty();
-                boolean nextHeading = !next.isEmpty() && isHeadingLine(next);
-
-                // Dòng hiện tại kết thúc "cứng" → KHÔNG join
-                boolean endsHard = trimmed.matches(".*[.!?:;]\\s*$")
-                        || trimmed.length() > 80
-                        || isHeadingLine(trimmed)
-                        || trimmed.matches("^[§•].*");
-
-                // Dòng tiếp theo bắt đầu bằng chữ thường hoặc từ nối → nên join
-                boolean nextContinues = !nextBlank && !nextHeading && (
-                        (!next.isEmpty() && Character.isLowerCase(next.charAt(0)))
-                                || startsWithConnector(next)
-                );
-
-                if (!endsHard && nextContinues) {
-                    // Soft break → join với space, không xuống hàng
-                    out.append(trimmed).append(" ");
-                    continue;
-                }
+            // Dedup dòng text giống nhau liên tiếp (không áp cho table/heading/bullet)
+            String tClean = t.replaceAll("^#+\\s*", "").strip();
+            if (!t.startsWith("|") && !t.startsWith("-") && !t.startsWith("#") && !t.startsWith("`")
+                    && jaccardSimilarity(tClean, prevTxt) >= DEDUP_THRESHOLD) {
+                continue;
             }
 
-            out.append(trimmed).append("\n");
+            prevTxt = tClean;
+            out.append(t).append("\n");
         }
 
         return out.toString().trim();
     }
 
-    private boolean isHeadingLine(String line) {
-        if (line == null || line.length() > 200) return false;
-        HeadingResult hr = detectHeading(line);
-        return hr != null;
-    }
-
-    private boolean startsWithConnector(String text) {
-        if (text.isEmpty()) return false;
-        String lower = text.substring(0, Math.min(20, text.length())).toLowerCase();
-        for (String c : new String[]{
-                "và ", "hoặc ", "nhưng ", "mà ", "vì ", "nên ", "thì ", "là ",
-                "của ", "trong ", "với ", "để ", "cho ", "khi ", "theo ", "từ ",
-                "and ", "or ", "but ", "which ", "that ", "who ", "where ", "when "}) {
-            if (lower.startsWith(c)) return true;
-        }
-        return false;
-    }
-
-    // =========================================================================
-    //  T2 — SEMANTIC CHUNKER
-    // =========================================================================
-
     /**
-     * Entry point: text đã clean → List<String> chunks
-     *
-     * Pipeline:
-     *  1. parseStructure()  → phát hiện heading → List<Section>
-     *  2. chunkSection()    → sliding window theo câu cho mỗi section
-     *  3. addBreadcrumb()   → prepend "[Phần X > Mục Y]\n" vào chunk
-     *
-     * Đảm bảo:
-     *  - Chunk không bao giờ cắt ngang câu
-     *  - Heading không bao giờ bị tách khỏi nội dung của nó
-     *  - Overlap là câu hoàn chỉnh, không phải ký tự ngẫu nhiên
-     *  - Mỗi chunk mang breadcrumb để LLM biết context vị trí
+     * Khử lặp chuỗi/cụm từ liên tiếp (tandem repeats) trong một dòng đơn.
+     * Thường xảy ra khi PDF có 2 layer trùng nhau (text gốc + OCR) bị gộp làm một.
      */
+    private String cleanTandemSubstrings(String text) {
+        if (text == null || text.length() < 16) return text;
+
+        int n = text.length();
+        int maxLen = Math.min(200, n / 2);
+        for (int len = maxLen; len >= 10; len--) {
+            for (int i = 0; i <= n - 2 * len; i++) {
+                String sub1 = text.substring(i, i + len);
+                String sub2 = text.substring(i + len, i + 2 * len);
+
+                if (sub1.equals(sub2)) {
+                    String nextText = text.substring(0, i) + text.substring(i + len);
+                    return cleanTandemSubstrings(nextText);
+                }
+
+                if (sub2.startsWith(sub1)) {
+                    String nextText = text.substring(0, i) + text.substring(i + len);
+                    return cleanTandemSubstrings(nextText);
+                }
+            }
+        }
+        return text;
+    }
+
+    // =========================================================================
+    //  G5 — SEMANTIC CHUNKER
+    // =========================================================================
+
     private List<String> semanticChunk(String text) {
         List<Section> sections = parseStructure(text);
         log.debug("[Chunk] sections={}", sections.size());
 
+        // raw chunks + crumb list phải sync index
+        List<String> rawChunks = new ArrayList<>();
+        List<String> rawCrumbs = new ArrayList<>();
+
+        String[] breadcrumb = {"", ""};
+
+        for (Section sec : sections) {
+            if (sec.level() <= 1) { breadcrumb[0] = sec.heading(); breadcrumb[1] = ""; }
+            else                    breadcrumb[1] = sec.heading();
+
+            String crumb = buildCrumb(breadcrumb);
+            for (String chunk : chunkSection(sec.body())) {
+                rawChunks.add(chunk);
+                rawCrumbs.add(crumb);
+            }
+        }
+
+        // Merge orphan chunks (< MIN_TOKENS)
+        mergeOrphanChunks(rawChunks, rawCrumbs);
+
+        // Apply breadcrumb + filter still-too-small
         List<String> result = new ArrayList<>();
-        // Track heading stack để build breadcrumb
-        String[] breadcrumb = new String[]{"", ""};  // [level1, level2]
-
-        for (Section section : sections) {
-            // Cập nhật breadcrumb theo level
-            if (section.level() <= 1) {
-                breadcrumb[0] = section.heading();
-                breadcrumb[1] = "";
-            } else {
-                breadcrumb[1] = section.heading();
-            }
-
-            List<String> sectionChunks = chunkSection(section.body());
-            for (String chunk : sectionChunks) {
-                if (estimateTokens(chunk) < MIN_TOKENS) continue;
-                String withBreadcrumb = addBreadcrumb(chunk, breadcrumb);
-                result.add(withBreadcrumb);
-            }
+        for (int i = 0; i < rawChunks.size(); i++) {
+            String chunk = rawChunks.get(i);
+            if (estimateTokens(chunk) < MIN_TOKENS) continue;
+            result.add(addBreadcrumb(chunk, rawCrumbs.get(i)));
         }
         return result;
     }
 
     /**
-     * Thêm breadcrumb vào đầu chunk.
-     * Ví dụ: "[2. Trade-offs trong kiến trúc > Performance vs Maintainability]\n"
-     *
-     * Lý do quan trọng: khi LLM nhận chunk này, nó biết ngay đây là nội dung
-     * của mục nào → trả lời chính xác hơn, ít hallucinate hơn.
+     * In-place merge: duyệt rawChunks, gộp chunk < MIN_TOKENS vào chunk kế tiếp
+     * (hoặc chunk trước nếu đã là cuối). rawCrumbs được sync theo.
      */
-    private String addBreadcrumb(String chunk, String[] breadcrumb) {
-        String b1 = breadcrumb[0];
-        String b2 = breadcrumb[1];
-
-        if (b1.isBlank() && b2.isBlank()) return chunk;
-
-        String crumb;
-        if (!b1.isBlank() && !b2.isBlank()) {
-            crumb = "[" + b1 + " > " + b2 + "]";
-        } else {
-            crumb = "[" + (b1.isBlank() ? b2 : b1) + "]";
+    private void mergeOrphanChunks(List<String> chunks, List<String> crumbs) {
+        int i = 0;
+        while (i < chunks.size()) {
+            String chunk = chunks.get(i);
+            if (estimateTokens(chunk) < MIN_TOKENS) {
+                if (i + 1 < chunks.size()) {
+                    // Gộp vào chunk tiếp theo
+                    String merged = chunk + "\n\n" + chunks.get(i + 1);
+                    if (estimateTokens(merged) <= MAX_TOKENS) {
+                        chunks.set(i + 1, merged.strip());
+                        // Giữ crumb của chunk tiếp (chunk lớn hơn)
+                        chunks.remove(i);
+                        crumbs.remove(i);
+                        continue; // không tăng i, kiểm tra lại chunk mới
+                    }
+                } else if (i > 0) {
+                    // Gộp vào chunk trước
+                    String merged = chunks.get(i - 1) + "\n\n" + chunk;
+                    if (estimateTokens(merged) <= MAX_TOKENS) {
+                        chunks.set(i - 1, merged.strip());
+                        chunks.remove(i);
+                        crumbs.remove(i);
+                        i = Math.max(0, i - 1);
+                        continue;
+                    }
+                }
+            }
+            i++;
         }
+    }
 
-        // Không thêm nếu chunk đã bắt đầu bằng heading đó
-        if (chunk.startsWith(crumb) || chunk.startsWith(b1)) return chunk;
+    private String buildCrumb(String[] bc) {
+        String b1 = bc[0], b2 = bc[1];
+        if (b1.isBlank() && b2.isBlank()) return "";
+        if (!b1.isBlank() && !b2.isBlank()) return "[" + b1 + " > " + b2 + "]";
+        return "[" + (b1.isBlank() ? b2 : b1) + "]";
+    }
+
+    private String addBreadcrumb(String chunk, String crumb) {
+        if (crumb == null || crumb.isBlank()) return chunk;
+        if (chunk.startsWith(crumb)) return chunk;
         return crumb + "\n" + chunk;
     }
 
-    // ─── parseStructure ───────────────────────────────────────────────────────
+    // ── parseStructure ────────────────────────────────────────────────────────
 
-    /**
-     * Line-by-line scan, phát hiện heading → flush section → bắt đầu section mới.
-     * KHÔNG có dòng nào bị mất (zero content loss).
-     * Block (code, table, list) được giữ nguyên, không bị heading detect bên trong.
-     */
     private List<Section> parseStructure(String text) {
         List<Section> sections = new ArrayList<>();
-        String[] lines  = text.split("\n", -1);
+        String[]      lines    = text.split("\n", -1);
 
         String        heading = "General";
         int           level   = 0;
         StringBuilder body    = new StringBuilder();
 
-        boolean inCode  = false;
-        boolean inTable = false;
-        boolean inList  = false;
+        boolean inCode = false, inTable = false, inList = false;
 
         for (String line : lines) {
             String t = line.strip();
 
-            // ── Code fence ────────────────────────────────────────────────────
+            // Code fence
             if (P_CODE.matcher(t).matches()) {
                 inCode = !inCode;
                 body.append(line).append("\n");
@@ -438,11 +781,9 @@ public class DocumentProcessingListener {
             }
             if (inCode) { body.append(line).append("\n"); continue; }
 
-            // ── Table ─────────────────────────────────────────────────────────
+            // Table
             if (P_TROW.matcher(t).matches() || P_TSEP.matcher(t).matches()) {
-                inTable = true;
-                body.append(line).append("\n");
-                continue;
+                inTable = true; body.append(line).append("\n"); continue;
             }
             if (inTable) {
                 body.append(line).append("\n");
@@ -450,50 +791,38 @@ public class DocumentProcessingListener {
                 continue;
             }
 
-            // ── List ──────────────────────────────────────────────────────────
+            // List
             if (P_BULL.matcher(t).matches()) {
-                inList = true;
-                body.append(line).append("\n");
-                continue;
+                inList = true; body.append(line).append("\n"); continue;
             }
             if (inList) {
-                // Thoát list khi gặp dòng không phải bullet và không phải indent
-                boolean isContinuation = P_BLANK.matcher(t).matches()
+                boolean cont = P_BLANK.matcher(t).matches()
                         || line.startsWith("  ") || line.startsWith("\t");
                 body.append(line).append("\n");
-                if (!isContinuation) inList = false;
+                if (!cont) inList = false;
                 continue;
             }
 
-            // ── Blank line ─────────────────────────────────────────────────────
-            if (P_BLANK.matcher(t).matches()) {
-                body.append("\n");
-                continue;
-            }
+            // Blank
+            if (P_BLANK.matcher(t).matches()) { body.append("\n"); continue; }
 
-            // ── Heading detection ──────────────────────────────────────────────
+            // Heading
             HeadingResult hr = detectHeading(t);
             if (hr != null) {
-                // Flush section hiện tại
-                String bodyStr = body.toString().trim();
-                if (!bodyStr.isEmpty()) {
-                    sections.add(new Section(heading, level, bodyStr));
-                }
+                String bs = body.toString().trim();
+                if (!bs.isEmpty()) sections.add(new Section(heading, level, bs));
                 heading = hr.title();
                 level   = hr.level();
                 body.setLength(0);
-                // Giữ dòng heading trong body để chunk có context
                 body.append(line).append("\n");
             } else {
                 body.append(line).append("\n");
             }
         }
 
-        // Flush section cuối
-        String bodyStr = body.toString().trim();
-        if (!bodyStr.isEmpty()) sections.add(new Section(heading, level, bodyStr));
+        String bs = body.toString().trim();
+        if (!bs.isEmpty()) sections.add(new Section(heading, level, bs));
         if (sections.isEmpty()) sections.add(new Section("General", 0, text.trim()));
-
         return sections;
     }
 
@@ -501,11 +830,9 @@ public class DocumentProcessingListener {
         if (line == null || line.isBlank() || line.length() > 200) return null;
         Matcher m;
 
-        // 1. Markdown
         m = P_MD.matcher(line);
         if (m.matches()) return new HeadingResult(m.group(2).trim(), m.group(1).length());
 
-        // 2. Vietnamese legal
         m = P_VN.matcher(line);
         if (m.matches()) {
             int lv = switch (m.group(1).toLowerCase()) {
@@ -518,7 +845,6 @@ public class DocumentProcessingListener {
             return new HeadingResult(line.trim(), lv);
         }
 
-        // 3. English legal
         m = P_EN.matcher(line);
         if (m.matches()) {
             int lv = switch (m.group(1).toLowerCase()) {
@@ -530,209 +856,144 @@ public class DocumentProcessingListener {
             return new HeadingResult(line.trim(), lv);
         }
 
-        // 4. Numbered heading — BẮT BUỘC dấu chấm, text không kết thúc bằng dấu chấm
         m = P_NUM.matcher(line);
         if (m.matches()) {
-            String textPart = m.group(3);
-            // Reject nếu là câu văn bình thường (kết thúc dấu chấm hoặc nhiều dấu phẩy)
-            if (!textPart.endsWith(".") && textPart.chars().filter(c -> c == ',').count() <= 2) {
+            String tp = m.group(3);
+            if (!tp.endsWith(".") && tp.chars().filter(c -> c == ',').count() <= 2) {
                 int dots = (int) m.group(1).chars().filter(c -> c == '.').count();
                 return new HeadingResult(line.trim(), Math.min(dots + 1, 4));
             }
         }
 
-        // 5. ALL-CAPS title (không trong markdown doc, không có dấu phẩy, không kết thúc dấu chấm)
-        if (P_CAP.matcher(line).matches() && !line.contains(",") && !line.endsWith(".")) {
+        if (P_CAP.matcher(line).matches() && !line.contains(",") && !line.endsWith("."))
             return new HeadingResult(line.trim(), 1);
-        }
 
         return null;
     }
 
-    // ─── chunkSection ─────────────────────────────────────────────────────────
+    // ── chunkSection ──────────────────────────────────────────────────────────
 
-    /**
-     * Sliding window chunker theo câu cho một section body.
-     *
-     * Thuật toán:
-     *  1. Split body → sentences (theo paragraph boundary trước, rồi dấu câu)
-     *  2. Accumulate sentences vào window cho đến khi đạt TARGET tokens
-     *  3. Emit chunk → slide window lùi OVERLAP_TOKENS (tính theo câu hoàn chỉnh)
-     *  4. Lặp đến hết sentences
-     *
-     * Đảm bảo i luôn tiến ít nhất 1 → không bao giờ infinite loop.
-     */
     private List<String> chunkSection(String body) {
-        List<String> sentences = splitIntoSentences(body);
-        if (sentences.isEmpty()) return List.of();
+        List<String> sents = splitIntoSentences(body);
+        if (sents.isEmpty()) return List.of();
 
         List<String> chunks = new ArrayList<>();
         int i = 0;
 
-        while (i < sentences.size()) {
-            StringBuilder window = new StringBuilder();
+        while (i < sents.size()) {
+            StringBuilder win = new StringBuilder();
             int j = i;
 
-            // Tích lũy câu vào window
-            while (j < sentences.size()) {
-                String next      = sentences.get(j);
-                String candidate = window.isEmpty() ? next : window + " " + next;
-
-                if (estimateTokens(candidate) > MAX_TOKENS && !window.isEmpty()) {
-                    break; // window đầy
-                }
-                window = new StringBuilder(candidate);
+            while (j < sents.size()) {
+                String next      = sents.get(j);
+                String candidate = win.isEmpty() ? next : win + " " + next;
+                if (estimateTokens(candidate) > MAX_TOKENS && !win.isEmpty()) break;
+                win = new StringBuilder(candidate);
                 j++;
-
-                if (estimateTokens(window.toString()) >= TARGET_TOKENS) {
-                    break; // đạt target → emit
-                }
+                if (estimateTokens(win.toString()) >= TARGET_TOKENS) break;
             }
 
-            String chunk = formatChunk(window.toString());
+            String chunk = formatChunk(win.toString());
             if (!chunk.isBlank()) chunks.add(chunk);
 
             if (j == i) {
-                // Câu đơn quá dài → hard split
-                chunks.addAll(hardSplit(sentences.get(i)));
+                chunks.addAll(hardSplit(sents.get(i)));
                 i++;
             } else {
-                // Tính overlap: đếm ngược từ j-1
-                int overlapTokens = 0;
-                int overlapStart  = j; // mặc định không overlap
+                int overlapTok = 0, overlapStart = j;
                 for (int k = j - 1; k > i; k--) {
-                    int t = estimateTokens(sentences.get(k));
-                    if (overlapTokens + t > OVERLAP_TOKENS) break;
-                    overlapTokens += t;
-                    overlapStart   = k;
+                    int t = estimateTokens(sents.get(k));
+                    if (overlapTok + t > OVERLAP_TOKENS) break;
+                    overlapTok += t;
+                    overlapStart = k;
                 }
-                // i phải tiến ít nhất 1 để tránh vòng lặp vô hạn
                 i = Math.max(i + 1, overlapStart);
             }
         }
-
         return chunks;
     }
 
-    /**
-     * Split text thành sentences.
-     * Ưu tiên paragraph boundary (\n\n) trước, rồi dấu câu.
-     * Block (code, table, list) giữ nguyên không split.
-     */
     private List<String> splitIntoSentences(String text) {
         List<String> result = new ArrayList<>();
-        String[] paragraphs = text.split("\n\n+", -1);
-
-        for (String para : paragraphs) {
+        for (String para : text.split("\n\n+", -1)) {
             String p = para.strip();
             if (p.isEmpty()) continue;
 
-            // Block → giữ nguyên
-            String firstLine = p.split("\n", 2)[0].strip();
-            boolean isBlock = P_CODE.matcher(firstLine).matches()
-                    || P_TROW.matcher(firstLine).matches()
-                    || P_BULL.matcher(firstLine).matches();
+            String  fl      = p.split("\n", 2)[0].strip();
+            boolean isBlock = P_CODE.matcher(fl).matches()
+                    || P_TROW.matcher(fl).matches()
+                    || P_BULL.matcher(fl).matches();
 
-            if (isBlock) {
-                result.add(p);
-                continue;
-            }
+            if (isBlock) { result.add(p); continue; }
 
-            // Flatten paragraph thành 1 dòng rồi split theo dấu câu
-            String flat = para.replace("\n", " ").replaceAll(" {2,}", " ").strip();
-
-            Matcher m     = P_SENT.matcher(flat);
-            int     last  = 0;
+            String  flat = para.replace("\n", " ").replaceAll("\\s{2,}", " ").strip();
+            Matcher m    = P_SENT.matcher(flat);
+            int     last = 0;
 
             while (m.find()) {
-                int end = m.end();
-                String sent = flat.substring(last, end).strip();
+                String sent = flat.substring(last, m.end()).strip();
                 if (!sent.isEmpty()) result.add(sent);
-                last = end;
+                last = m.end();
                 if (last < flat.length() && flat.charAt(last) == ' ') last++;
             }
-
-            // Phần còn lại sau dấu câu cuối
             if (last < flat.length()) {
                 String rem = flat.substring(last).strip();
                 if (!rem.isEmpty()) result.add(rem);
             }
-
-            // Không tìm thấy dấu câu nào → cả paragraph là 1 câu
             if (last == 0 && !flat.isEmpty()) result.add(flat);
         }
-
         return result;
     }
 
-    /** Hard split câu quá dài tại word boundary */
-    private List<String> hardSplit(String sentence) {
-        List<String> result = new ArrayList<>();
+    private List<String> hardSplit(String s) {
+        List<String> r = new ArrayList<>();
         int pos = 0;
-        while (pos < sentence.length()) {
-            int end = Math.min(pos + MAX, sentence.length());
-            if (end < sentence.length()) {
-                int space = sentence.lastIndexOf(' ', end);
-                if (space > pos) end = space;
+        while (pos < s.length()) {
+            int end = Math.min(pos + MAX, s.length());
+            if (end < s.length()) {
+                int sp = s.lastIndexOf(' ', end);
+                if (sp > pos) end = sp;
             }
-            String piece = sentence.substring(pos, end).strip();
-            if (!piece.isEmpty()) result.add(piece);
+            String piece = s.substring(pos, end).strip();
+            if (!piece.isEmpty()) r.add(piece);
             pos = end + 1;
         }
-        return result;
+        return r;
     }
 
-    /** Normalize chunk output */
     private String formatChunk(String chunk) {
         if (chunk == null || chunk.isBlank()) return "";
-        String[] lines = chunk.split("\n", -1);
         StringBuilder sb = new StringBuilder();
         int blanks = 0;
-        for (String line : lines) {
-            String norm = line.stripTrailing().replaceAll("(?<=\\S) {2,}", " ");
-            if (norm.isBlank()) {
-                if (++blanks <= 2) sb.append("\n");
-            } else {
-                blanks = 0;
-                sb.append(norm).append("\n");
-            }
+        for (String line : chunk.split("\n", -1)) {
+            String n = line.stripTrailing().replaceAll("(?<=\\S)\\s{2,}", " ");
+            if (n.isBlank()) { if (++blanks <= 2) sb.append("\n"); }
+            else             { blanks = 0; sb.append(n).append("\n"); }
         }
         return sb.toString().trim();
     }
 
-    // =========================================================================
-    //  T3 — CHUNK TITLE DETECTION (no LLM)
-    // =========================================================================
+    // ── detectChunkTitle ──────────────────────────────────────────────────────
 
-    /**
-     * Scan 5 dòng đầu của chunk tìm heading → dùng làm title.
-     * Fallback: 10 từ đầu tiên.
-     */
-    private String detectChunkTitle(String chunkText, String fallbackFileName) {
-        if (chunkText == null || chunkText.isBlank()) return fallbackFileName;
-
-        // Bỏ qua dòng breadcrumb (bắt đầu bằng "[")
-        String[] lines = chunkText.split("\n", 8);
-        for (String line : lines) {
+    private String detectChunkTitle(String chunkText, String fallback) {
+        if (chunkText == null || chunkText.isBlank()) return fallback;
+        for (String line : chunkText.split("\n", 8)) {
             String t = line.strip();
             if (t.isEmpty() || t.length() < 3 || t.length() > 150) continue;
-            if (t.startsWith("[") && t.endsWith("]")) continue; // breadcrumb line
-
+            if (t.startsWith("[") && t.endsWith("]")) continue; // breadcrumb
             HeadingResult hr = detectHeading(t);
             if (hr != null) {
                 String title = t.replaceAll("^#+\\s*", "").trim();
                 if (!title.isBlank()) return title;
             }
         }
-
-        // Fallback: 10 từ đầu (bỏ qua breadcrumb)
-        String flat = chunkText
-                .replaceAll("^\\[.+]\\n", "")   // bỏ dòng breadcrumb
+        String flat  = chunkText.replaceAll("^\\[.+?]\\n", "")
+                .replaceAll("^#+\\s*", "")
                 .replaceAll("\\s+", " ").trim();
         String[] words = flat.split(" ");
-        int take    = Math.min(10, words.length);
-        String preview = String.join(" ", Arrays.copyOf(words, take));
-        return preview.length() > 80 ? preview.substring(0, 80) + "…" : preview;
+        int      take  = Math.min(10, words.length);
+        String   prev  = String.join(" ", Arrays.copyOf(words, take));
+        return prev.length() > 80 ? prev.substring(0, 80) + "…" : prev;
     }
 
     // =========================================================================
@@ -745,7 +1006,6 @@ public class DocumentProcessingListener {
         documentRepository.save(doc);
     }
 
-    /** 1 token ≈ 3.8 chars (Vietnamese + English mixed) */
     private int estimateTokens(String text) {
         if (text == null || text.isEmpty()) return 0;
         return Math.max(1, (int) Math.ceil(text.length() / CHARS_PER_TOKEN));

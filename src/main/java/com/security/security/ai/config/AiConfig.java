@@ -30,7 +30,7 @@ public class AiConfig {
                 """;
 
         return ChatClient.builder(chatModel)
-                .defaultOptions(org.springframework.ai.google.genai.GoogleGenAiChatOptions.builder()
+                .defaultOptions(GoogleGenAiChatOptions.builder()
                         .responseMimeType("application/json")
                         .responseSchema(responseSchema)
                         .temperature(0.0)
