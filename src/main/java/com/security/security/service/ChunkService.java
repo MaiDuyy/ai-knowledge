@@ -151,7 +151,7 @@ public class ChunkService {
         return ChunkDTO.builder()
                 .id(e.getId())
                 .chunkIndex(e.getChunkIndex())
-                .chunkTitle("Chunk #" + e.getChunkIndex())
+                .chunkTitle(e.getChunkTitle() != null ? e.getChunkTitle() : "Chunk #" + e.getChunkIndex())
                 .text(e.getChunkText())
                 .tokenCount(e.getTokenCount())
                 .charCount(e.getCharCount())

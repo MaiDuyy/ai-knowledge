@@ -12,7 +12,7 @@
 	<artifactId>security</artifactId>
 <!--	<version>0.0.1-SNAPSHOT</version>-->
 	<name>security</name>
-	<description>Demo project for Spring Securiry</description>
+	<description>Project Ai KNOWLEDGE</description>
 	<url/>
 	<licenses>
 		<license/>
@@ -36,6 +36,14 @@
 				<groupId>org.springframework.ai</groupId>
 				<artifactId>spring-ai-bom</artifactId>
 				<version>${spring-ai.version}</version>
+				<type>pom</type>
+				<scope>import</scope>
+			</dependency>
+
+			<dependency>
+				<groupId>org.apache.tika</groupId>
+				<artifactId>tika-bom</artifactId>
+				<version>2.9.2</version>
 				<type>pom</type>
 				<scope>import</scope>
 			</dependency>
@@ -130,6 +138,19 @@
 			<artifactId>spring-ai-starter-model-chat-memory-repository-jdbc</artifactId>
 		</dependency>
 
+
+				<dependency>
+					<groupId>org.apache.tika</groupId>
+					<artifactId>tika-parsers-standard-package</artifactId>
+					<version>2.9.2</version>
+				</dependency>
+
+				<!-- 3. Jsoup — HTML DOM parser dùng để chuyển HTML → Markdown -->
+				<dependency>
+					<groupId>org.jsoup</groupId>
+					<artifactId>jsoup</artifactId>
+					<version>1.17.2</version>
+				</dependency>
 		<!-- Spring AI Tika Document Reader — let it manage Tika version -->
 		<dependency>
 			<groupId>org.springframework.ai</groupId>
@@ -181,8 +202,6 @@
 			<version>2.20.4</version>
 		</dependency>
 
-		<!-- PDF + DOCX extraction handled by Tika (via spring-ai-tika-document-reader) -->
-		<!-- No need to declare pdfbox or poi-ooxml separately — Tika manages its own deps -->
 
 
 	</dependencies>

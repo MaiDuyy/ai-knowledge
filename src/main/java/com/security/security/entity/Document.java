@@ -45,11 +45,40 @@ public class Document {
     @Column(nullable = false)
     @Enumerated(EnumType.STRING)
     @Builder.Default
-    private DocStatus status = DocStatus.PENDING;  // PENDING, PROCESSING, COMPLETED, FAILED
+    private DocStatus status = DocStatus.PENDING;  // PENDING, PREVIEW, PROCESSING, COMPLETED, FAILED
+
+    @Column(name = "parser_method")
+    @Builder.Default
+    private String parserMethod = "gemini";
+
+    @Column(name = "markdown_content", columnDefinition = "TEXT")
+    private String markdownContent;
 
     @Column(name = "chunk_count")
     @Builder.Default
     private Integer chunkCount = 0;
+
+    // ── Document Profiling Stats (docling-style) ────────────────────────────
+
+    @Column(name = "num_headings")
+    @Builder.Default
+    private Integer numHeadings = 0;
+
+    @Column(name = "num_tables")
+    @Builder.Default
+    private Integer numTables = 0;
+
+    @Column(name = "num_paragraphs")
+    @Builder.Default
+    private Integer numParagraphs = 0;
+
+    @Column(name = "total_tokens")
+    @Builder.Default
+    private Integer totalTokens = 0;
+
+    @Column(name = "avg_tokens_per_chunk")
+    @Builder.Default
+    private Integer avgTokensPerChunk = 0;
 
     @Column(name = "error_message", columnDefinition = "TEXT")
     private String errorMessage;
