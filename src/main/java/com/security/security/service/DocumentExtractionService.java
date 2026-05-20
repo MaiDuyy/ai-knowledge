@@ -1,43 +1,54 @@
 package com.security.security.service;
 
+import com.security.security.service.tika.HtmlToMarkdownConverter;
+import com.security.security.service.tika.TikaHtmlExtractor;
+import com.security.security.service.tika.TikaHtmlResult;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.ai.reader.tika.TikaDocumentReader;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.stereotype.Service;
 
 /**
- * DocumentExtractionService — thin wrapper around TikaDocumentReader.
+ * DocumentExtractionService — Docling-style document extraction pipeline.
  *
- * Apache Tika (via spring-ai-tika-document-reader) handles all file types:
- * PDF, DOCX, TXT, HTML, Excel, PowerPoint, etc.
- *
- * The actual ETL pipeline is in DocumentProcessingListener.
- * This class is kept for any direct extraction needs.
+ * Flow: Tika → HTML → Jsoup NodeVisitor → Markdown
+ * Thay thế TikaDocumentReader (plain text) để giữ cấu trúc tài liệu.
  */
 @Service
 @Slf4j
+@RequiredArgsConstructor
 public class DocumentExtractionService {
 
+    private final TikaHtmlExtractor tikaHtmlExtractor;
+    private final HtmlToMarkdownConverter htmlToMarkdownConverter;
+
     /**
-     * Extract plain text from any supported file using Apache Tika.
-     * Replaces manual PDFBox + Apache POI extraction.
+     * Extract structured Markdown from any supported file (PDF, DOCX, TXT).
      */
-    public String extractText(String filePath, String documentType) {
-        log.info("[Extract] file={} type={}", filePath, documentType);
+    public String extractMarkdown(String filePath) {
+        log.info("[Extract] Markdown from: {}", filePath);
         try {
-            TikaDocumentReader reader = new TikaDocumentReader(
-                    new FileSystemResource(filePath)
-            );
-            StringBuilder sb = new StringBuilder();
-            reader.get().forEach(doc -> {
-                if (doc.getText() != null) sb.append(doc.getText());
-            });
-            String text = sb.toString();
-            log.info("[Extract] Extracted {} chars from {}", text.length(), filePath);
-            return text;
+            TikaHtmlResult result = tikaHtmlExtractor.extract(new FileSystemResource(filePath));
+            String markdown = htmlToMarkdownConverter.convert(result.html());
+            log.info("[Extract] Extracted {} chars from {}", markdown.length(), filePath);
+            return markdown;
         } catch (Exception e) {
             log.error("[Extract] Failed to extract {}: {}", filePath, e.getMessage(), e);
             throw new RuntimeException("Failed to extract text from: " + filePath, e);
         }
+    }
+
+    /**
+     * Extract plain text (strip Markdown formatting).
+     * Backward-compatible wrapper — Markdown tốt hơn cho LLM.
+     */
+    @Deprecated
+    public String extractText(String filePath, String documentType) {
+        String md = extractMarkdown(filePath);
+        return md.replaceAll("#+\\s*", "")
+                .replaceAll("[|\\-]{3,}", "")
+                .replaceAll("`{1,3}", "")
+                .replaceAll("\\*{1,2}", "")
+                .strip();
     }
 }

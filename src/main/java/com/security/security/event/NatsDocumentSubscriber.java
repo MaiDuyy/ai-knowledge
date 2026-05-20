@@ -48,6 +48,26 @@ public class NatsDocumentSubscriber {
             "application/pdf",
             "application/msword",
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/vnd.ms-powerpoint",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "application/vnd.ms-excel",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "text/html",
+            "application/xhtml+xml",
+            "audio/wav",
+            "audio/x-wav",
+            "audio/mpeg",
+            "audio/mp3",
+            "text/vtt",
+            "image/png",
+            "image/jpeg",
+            "image/jpg",
+            "image/tiff",
+            "image/gif",
+            "image/bmp",
+            "image/webp",
+            "application/x-latex",
+            "text/x-tex",
             "text/plain",
             "text/markdown"
     );
@@ -139,15 +159,38 @@ public class NatsDocumentSubscriber {
 
     private DocType resolveDocType(String mimeType, String fileName) {
         if (mimeType != null) {
-            if (mimeType.contains("pdf"))  return DocType.pdf;
-            if (mimeType.contains("word") || mimeType.contains("openxmlformats")) return DocType.docx;
-            if (mimeType.contains("text")) return DocType.txt;
+            String m = mimeType.toLowerCase();
+            if (m.contains("pdf"))  return DocType.pdf;
+            if (m.contains("word") || m.contains("openxmlformats-officedocument.wordprocessingml")) return DocType.docx;
+            if (m.contains("powerpoint") || m.contains("presentation")) return DocType.pptx;
+            if (m.contains("excel") || m.contains("sheet")) return DocType.xlsx;
+            if (m.contains("html") || m.contains("xhtml")) return DocType.html;
+            if (m.contains("wav")) return DocType.wav;
+            if (m.contains("mpeg") || m.contains("mp3")) return DocType.mp3;
+            if (m.contains("vtt")) return DocType.vtt;
+            if (m.contains("png")) return DocType.png;
+            if (m.contains("tiff")) return DocType.tiff;
+            if (m.contains("jpeg") || m.contains("jpg")) return DocType.jpeg;
+            if (m.contains("latex") || m.contains("tex")) return DocType.latex;
+            if (m.contains("markdown") || m.contains("md")) return DocType.md;
+            if (m.contains("text")) return DocType.txt;
         }
         if (fileName != null) {
             String lower = fileName.toLowerCase();
             if (lower.endsWith(".pdf"))  return DocType.pdf;
             if (lower.endsWith(".docx") || lower.endsWith(".doc")) return DocType.docx;
-            if (lower.endsWith(".txt") || lower.endsWith(".md"))   return DocType.txt;
+            if (lower.endsWith(".pptx") || lower.endsWith(".ppt")) return DocType.pptx;
+            if (lower.endsWith(".xlsx") || lower.endsWith(".xls")) return DocType.xlsx;
+            if (lower.endsWith(".html") || lower.endsWith(".htm") || lower.endsWith(".xhtml")) return DocType.html;
+            if (lower.endsWith(".wav")) return DocType.wav;
+            if (lower.endsWith(".mp3")) return DocType.mp3;
+            if (lower.endsWith(".vtt")) return DocType.vtt;
+            if (lower.endsWith(".png")) return DocType.png;
+            if (lower.endsWith(".tiff") || lower.endsWith(".tif")) return DocType.tiff;
+            if (lower.endsWith(".jpeg") || lower.endsWith(".jpg")) return DocType.jpeg;
+            if (lower.endsWith(".tex") || lower.endsWith(".latex")) return DocType.latex;
+            if (lower.endsWith(".txt")) return DocType.txt;
+            if (lower.endsWith(".md")) return DocType.md;
         }
         return DocType.pdf; // default
     }

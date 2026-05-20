@@ -9,10 +9,6 @@ import lombok.NoArgsConstructor;
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-public class DocumentUploadResponse {
-    private Long documentId;
-    private String fileName;
-    private String status;
-    private String message;
-    private String markdownContent;
+public class AiRefactorResponse {
+    private String refactoredMarkdown;
 }
