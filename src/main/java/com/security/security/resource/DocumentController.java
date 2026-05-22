@@ -14,6 +14,10 @@ import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
@@ -73,15 +77,21 @@ public class DocumentController {
     }
 
     /**
-     * List user's documents
+     * List user's documents with optional pagination
      */
     @GetMapping
-    public ResponseEntity<List<Document>> getDocuments(
-            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId)
+    public ResponseEntity<?> getDocuments(
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestParam(required = false) Integer page,
+            @RequestParam(required = false) Integer size)
     {
+        if (page != null && size != null) {
+            Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt"));
+            Page<Document> pagedDocs = documentService.getUserDocuments(userId, pageable);
+            return ResponseEntity.ok(pagedDocs);
+        }
 
         List<Document> documents = documentService.getUserDocuments(userId);
-
         return ResponseEntity.ok(documents);
     }
 
@@ -186,5 +196,29 @@ public class DocumentController {
         return ResponseEntity.ok(response);
     }
 
+    /**
+     * Approve document (trigger ETL pipeline)
+     */
+    @PostMapping("/{id}/approve")
+    public ResponseEntity<Document> approveDocument(
+            @PathVariable Long id,
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) {
+        Document doc = documentService.approveDocument(id, userId);
+        return ResponseEntity.ok(doc);
+    }
+
+    /**
+     * Update document metadata (security classification, tags)
+     */
+    @PatchMapping("/{id}/metadata")
+    public ResponseEntity<Document> updateMetadata(
+            @PathVariable Long id,
+            @RequestBody Map<String, Object> payload,
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) {
+        String securityClassification = (String) payload.get("securityClassification");
+        List<String> tags = (List<String>) payload.get("tags");
+        Document doc = documentService.updateDocumentMetadata(id, securityClassification, tags, userId);
+        return ResponseEntity.ok(doc);
+    }
 
 }

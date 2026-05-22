@@ -12,6 +12,7 @@ import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.chat.prompt.SystemPromptTemplate;
+import org.springframework.ai.google.genai.GoogleGenAiChatOptions;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.stereotype.Service;
@@ -26,6 +27,18 @@ import java.util.stream.Collectors;
 @Slf4j
 @RequiredArgsConstructor
 public class RAGService {
+
+    private static final String RAG_RESPONSE_SCHEMA = """
+            {
+              "type": "object",
+              "properties": {
+                "summary": { "type": "string" },
+                "details": { "type": "array", "items": { "type": "string" } },
+                "sources": { "type": "array", "items": { "type": "string" } }
+              },
+              "required": ["summary", "details", "sources"]
+            }
+            """;
 
     private final ChatClient chatClient;
     private final VectorStore vectorStore;
@@ -65,6 +78,11 @@ public class RAGService {
         ChatResponse response = chatClient.prompt()
                 .system(systemPrompt)
                 .user(userPrompt)
+                .options(GoogleGenAiChatOptions.builder()
+                        .responseMimeType("application/json")
+                        .responseSchema(RAG_RESPONSE_SCHEMA)
+                        .temperature(0.0)
+                        .build())
                 .call()
                 .chatResponse();
 
@@ -151,6 +169,11 @@ public class RAGService {
                             .system(systemPrompt)
                             .user(userPrompt)
                             .advisors(advisor)
+                            .options(GoogleGenAiChatOptions.builder()
+                                    .responseMimeType("application/json")
+                                    .responseSchema(RAG_RESPONSE_SCHEMA)
+                                    .temperature(0.0)
+                                    .build())
                             .stream()
                             .content())
                     .map(token -> {

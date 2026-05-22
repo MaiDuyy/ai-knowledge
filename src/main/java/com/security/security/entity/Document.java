@@ -2,12 +2,15 @@ package com.security.security.entity;
 
 import com.security.security.entity.enumeration.DocStatus;
 import com.security.security.entity.enumeration.DocType;
+import com.security.security.entity.converter.StringListConverter;
 import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.CreationTimestamp;
 import org.hibernate.annotations.UpdateTimestamp;
 
 import java.time.LocalDateTime;
+import java.util.List;
+import java.util.ArrayList;
 
 @Entity
 @Table(name = "documents")
@@ -79,6 +82,15 @@ public class Document {
     @Column(name = "avg_tokens_per_chunk")
     @Builder.Default
     private Integer avgTokensPerChunk = 0;
+
+    @Column(name = "security_classification", length = 50)
+    @Builder.Default
+    private String securityClassification = "INTERNAL";
+
+    @Column(name = "tags")
+    @Convert(converter = StringListConverter.class)
+    @Builder.Default
+    private List<String> tags = new ArrayList<>();
 
     @Column(name = "error_message", columnDefinition = "TEXT")
     private String errorMessage;

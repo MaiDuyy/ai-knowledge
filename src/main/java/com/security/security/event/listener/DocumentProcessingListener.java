@@ -126,6 +126,12 @@ public class DocumentProcessingListener {
                 meta.put("chunkTitle", cr.title());
                 meta.put("tokenCount", String.valueOf(semanticMarkdownChunker.estimateTokens(cr.text())));
                 meta.put("charCount",  String.valueOf(cr.text().length()));
+                if (document.getSecurityClassification() != null) {
+                    meta.put("securityClassification", document.getSecurityClassification());
+                }
+                if (document.getTags() != null && !document.getTags().isEmpty()) {
+                    meta.put("tags", String.join(",", document.getTags()));
+                }
 
                 vBatch.add(new org.springframework.ai.document.Document(cr.text(), meta));
                 eBatch.add(Embedding.builder()

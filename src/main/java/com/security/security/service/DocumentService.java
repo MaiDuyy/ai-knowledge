@@ -21,6 +21,8 @@ import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.core.io.FileSystemResource;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
@@ -48,6 +50,7 @@ public class DocumentService {
     private final SemanticMarkdownChunker semanticMarkdownChunker;
     private final DocumentProfiler documentProfiler;
     private final DoclingClient doclingClient;
+    private final MrpPipelineService mrpPipelineService;
 
     // Khuyến nghị set ABSOLUTE:
     // app.upload.dir=C:/data/myapp/uploads
@@ -208,9 +211,17 @@ public class DocumentService {
         return documentRepository.findAllByOrderByCreatedAtDesc();
     }
 
+    public Page<Document> getUserDocuments(String userId, Pageable pageable) {
+        return documentRepository.findAllByOrderByCreatedAtDesc(pageable);
+    }
+
     public List<Document> getCompletedDocuments(String userId) {
         // Return ALL completed docs
         return documentRepository.findCompletedByOrderByCreatedAtDesc();
+    }
+
+    public Page<Document> getCompletedDocuments(String userId, Pageable pageable) {
+        return documentRepository.findCompletedByOrderByCreatedAtDesc(pageable);
     }
 
     public Document getDocument(Long documentId, String userId) {
@@ -316,10 +327,156 @@ public class DocumentService {
         return null;
     }
 
+//    @Transactional
+//    public void ingestDocument(Long documentId, String markdownContent, String userId) {
+//        log.info("Ingesting document {} with edited markdown content", documentId);
+//
+//        Document document = documentRepository.findById(documentId)
+//                .orElseThrow(() -> new ApiException("Document not found"));
+//
+//        if (!document.getUserId().equals(userId) && !userId.equals("system-user")) {
+//            throw new ApiException("Permission denied");
+//        }
+//
+//        // Set status to PROCESSING
+//        document.setStatus(DocStatus.PROCESSING);
+//        document.setMarkdownContent(markdownContent);
+//        documentRepository.save(document);
+//
+//        // Run MRP Pipeline synchronously
+//        try {
+//            int numPages = mrpPipelineService.compileToWiki(markdownContent, documentId, "default-workspace", userId);
+//
+//            // Xóa embedding cũ nếu có
+//            try {
+//                embeddingRepository.deleteByDocumentId(documentId);
+//            } catch (Exception ex) {
+//                log.warn("Could not delete old embeddings: {}", ex.getMessage());
+//            }
+//
+//            document.setStatus(DocStatus.COMPLETED);
+//            document.setChunkCount(numPages); // Re-purpose chunkCount as wikiPageCount
+//            document.setErrorMessage(null);
+//            documentRepository.save(document);
+//
+//        } catch (Exception e) {
+//            log.error("Failed to ingest document {}: {}", documentId, e.getMessage(), e);
+//            document.setStatus(DocStatus.FAILED);
+//            document.setErrorMessage(e.getMessage());
+//            documentRepository.save(document);
+//            throw new ApiException("Failed to ingest document: " + e.getMessage());
+//        }
+//    }
+//@Transactional
+//public void ingestDocument(Long documentId, String markdownContent, String userId) {
+//    log.info("Ingesting document {} with edited markdown content", documentId);
+//
+//    Document document = documentRepository.findById(documentId)
+//            .orElseThrow(() -> new ApiException("Document not found"));
+//
+//    if (!document.getUserId().equals(userId) && !userId.equals("system-user")) {
+//        throw new ApiException("Permission denied");
+//    }
+//
+//    // Set status to PROCESSING
+//    document.setStatus(DocStatus.PROCESSING);
+//    document.setMarkdownContent(markdownContent);
+//    documentRepository.save(document);
+//
+//    try {
+//        // 1. Xóa embedding cũ trước khi thực hiện quy trình mới để đảm bảo dữ liệu sạch
+//        try {
+//            embeddingRepository.deleteByDocumentId(documentId);
+//        } catch (Exception ex) {
+//            log.warn("Could not delete old embeddings: {}", ex.getMessage());
+//        }
+//
+//        // 2. CHUNKING & VECTOR DB PIPELINE (Từ hàm thứ 2)
+//        List<SemanticMarkdownChunker.ChunkResult> chunkResults = semanticMarkdownChunker.chunk(markdownContent);
+//        if (chunkResults.isEmpty()) {
+//            throw new IllegalStateException("No chunks produced from markdown");
+//        }
+//
+//        int batchSize = 30;
+//        List<org.springframework.ai.document.Document> vBatch = new ArrayList<>(batchSize);
+//        List<Embedding> eBatch = new ArrayList<>(batchSize);
+//
+//        for (int i = 0; i < chunkResults.size(); i++) {
+//            SemanticMarkdownChunker.ChunkResult cr = chunkResults.get(i);
+//
+//            Map<String, Object> meta = new HashMap<>();
+//            meta.put("documentId", document.getId().toString());
+//            meta.put("userId", document.getUserId());
+//            meta.put("fileName", document.getFileName());
+//            meta.put("chunkIndex", String.valueOf(i));
+//            meta.put("chunkTitle", cr.title());
+//            meta.put("tokenCount", String.valueOf(semanticMarkdownChunker.estimateTokens(cr.text())));
+//            meta.put("charCount", String.valueOf(cr.text().length()));
+//
+//            vBatch.add(new org.springframework.ai.document.Document(cr.text(), meta));
+//            eBatch.add(Embedding.builder()
+//                    .documentId(document.getId())
+//                    .chunkIndex(i)
+//                    .chunkText(cr.text())
+//                    .chunkTitle(cr.title())
+//                    .tokenCount(semanticMarkdownChunker.estimateTokens(cr.text()))
+//                    .charCount(cr.text().length())
+//                    .build());
+//
+//            if (vBatch.size() >= batchSize) {
+//                vectorStore.add(new ArrayList<>(vBatch));
+//                embeddingRepository.saveAll(new ArrayList<>(eBatch));
+//                vBatch.clear();
+//                eBatch.clear();
+//            }
+//        }
+//
+//        // Lưu những chunk còn sót lại trong batch cuối cùng
+//        if (!vBatch.isEmpty()) {
+//            vectorStore.add(vBatch);
+//            embeddingRepository.saveAll(eBatch);
+//        }
+//
+//        log.info("Successfully ingested {} chunks for doc={}", chunkResults.size(), documentId);
+//
+//        // 3. MRP PIPELINE (Từ hàm thứ 1)
+//        // Chạy quy trình biên soạn Wiki đồng bộ
+//        int numWikiPages = mrpPipelineService.compileToWiki(markdownContent, documentId, "default-workspace", userId);
+//        log.info("Successfully compiled doc={} into {} wiki pages", documentId, numWikiPages);
+//
+//        // 4. CẬP NHẬT THỐNG KÊ & TRẠNG THÁI DOCUMENT
+//        DocumentProfiler.ProfileResult profile = documentProfiler.profile(markdownContent, chunkResults);
+//
+//        document.setStatus(DocStatus.COMPLETED);
+//
+//        // Lưu ý: Ở code cũ (hàm 1) bạn dùng chunkCount để lưu numPages. Ở code 2 bạn dùng để lưu số chunks.
+//        // Tôi gán cho nó là số chunks (chuẩn logic AI), nếu Entity Document của bạn có thêm trường `wikiPageCount`,
+//        // bạn có thể mở comment dòng bên dưới.
+//        document.setChunkCount(chunkResults.size());
+//        // document.setWikiPageCount(numWikiPages);
+//
+//        document.setNumHeadings(profile.numHeadings());
+//        document.setNumTables(profile.numTables());
+//        document.setNumParagraphs(profile.numParagraphs());
+//        document.setTotalTokens(profile.estimatedTokens());
+//        document.setAvgTokensPerChunk(profile.avgTokensPerChunk());
+//        document.setErrorMessage(null);
+//
+//        documentRepository.save(document);
+//
+//    } catch (Exception e) {
+//        log.error("Failed to ingest document {}: {}", documentId, e.getMessage(), e);
+//        document.setStatus(DocStatus.FAILED);
+//        document.setErrorMessage(e.getMessage());
+//        documentRepository.save(document);
+//        throw new ApiException("Failed to ingest document: " + e.getMessage());
+//    }
+//}
+
     @Transactional
     public void ingestDocument(Long documentId, String markdownContent, String userId) {
         log.info("Ingesting document {} with edited markdown content", documentId);
-        
+
         Document document = documentRepository.findById(documentId)
                 .orElseThrow(() -> new ApiException("Document not found"));
 
@@ -402,5 +559,44 @@ public class DocumentService {
             documentRepository.save(document);
             throw new ApiException("Failed to ingest document: " + e.getMessage());
         }
+    }
+    @Transactional
+    public Document approveDocument(Long id, String userId) {
+        log.info("Approving document {} for user {}", id, userId);
+        Document document = documentRepository.findById(id)
+                .orElseThrow(() -> new ApiException("Document not found"));
+
+        if (!document.getUserId().equals(userId) && !userId.equals("system-user")) {
+            throw new ApiException("Permission denied");
+        }
+
+        if (document.getStatus() == DocStatus.PENDING || document.getStatus() == DocStatus.FAILED || document.getStatus() == DocStatus.PREVIEW) {
+            document.setStatus(DocStatus.PROCESSING);
+            Document saved = documentRepository.save(document);
+            eventPublisher.publishEvent(new DocumentUploadedEvent(this, saved));
+            return saved;
+        }
+
+        return document;
+    }
+
+    @Transactional
+    public Document updateDocumentMetadata(Long id, String securityClassification, List<String> tags, String userId) {
+        log.info("Updating metadata for document {} by user {}", id, userId);
+        Document document = documentRepository.findById(id)
+                .orElseThrow(() -> new ApiException("Document not found"));
+
+        if (!document.getUserId().equals(userId) && !userId.equals("system-user")) {
+            throw new ApiException("Permission denied");
+        }
+
+        if (securityClassification != null) {
+            document.setSecurityClassification(securityClassification);
+        }
+        if (tags != null) {
+            document.setTags(tags);
+        }
+
+        return documentRepository.save(document);
     }
 }

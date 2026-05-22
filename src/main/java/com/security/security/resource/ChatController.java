@@ -13,6 +13,10 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import reactor.core.publisher.Flux;
 
 import java.util.List;
@@ -52,16 +56,23 @@ public class ChatController {
     }
 
     /**
-     * Get messages for a conversation
+     * Get messages for a conversation with optional pagination
      */
     @GetMapping("/conversations/{id}/messages")
-    public ResponseEntity<List<Message>> getMessages(
+    public ResponseEntity<?> getMessages(
             @PathVariable Long id,
-            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) {
-
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestParam(required = false) Integer page,
+            @RequestParam(required = false) Integer size) {
 
         // Verify conversation belongs to user
         conversationService.getConversation(id, userId);
+
+        if (page != null && size != null) {
+            Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.ASC, "createdAt"));
+            Page<Message> pagedMessages = conversationService.getMessages(id, pageable);
+            return ResponseEntity.ok(pagedMessages);
+        }
 
         List<Message> messages = conversationService.getMessages(id);
         return ResponseEntity.ok(messages);

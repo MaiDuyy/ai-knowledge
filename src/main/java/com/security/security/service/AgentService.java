@@ -11,6 +11,11 @@ import org.springframework.ai.vectorstore.VectorStore;
 import com.security.security.client.MessagingServiceClient;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
+import com.security.security.provider.LlmFactory;
+import com.security.security.provider.LlmProvider;
+import com.security.security.entity.AgentSkill;
+import com.security.security.service.AgentSkillService;
+import com.security.security.repository.WikiPageRepository;
 
 /**
  * Phase 2 — Autonomous AI Agent Service.
@@ -29,17 +34,23 @@ import reactor.core.publisher.Flux;
 @RequiredArgsConstructor
 public class AgentService {
 
-        private final ChatClient chatClient;
-        private final ChatMemory chatMemory;
+        private final LlmFactory llmFactory;
         private final ConversationService conversationService;
+        private final AgentSkillService agentSkillService;
         private final VectorStore vectorStore;
         private final MessagingServiceClient messagingClient;
+        private final WikiPageRepository wikiPageRepository;
 
         private static final String AGENT_SYSTEM_PROMPT = """
                             Bạn là AI Assistant của OTT Chat Platform. Bạn có khả năng truy cập công cụ để hỗ trợ người dùng.
                 
                             ## CÔNG CỤ CỦA BẠN
-                            - **searchKnowledge**: Tìm kiếm tài liệu nội bộ (chính sách, quy trình).
+                            - **searchKnowledge**: Tìm kiếm tài liệu bằng vector (RAG).
+                            - **search_wiki**: Tìm kiếm các trang Wiki (Knowledge Graph).
+                            - **read_wiki_page**: Đọc chi tiết nội dung 1 trang Wiki.
+                            - **list_wiki_pages**: Xem danh sách các trang Wiki hiện có.
+                            - **create_wiki_page**: Tạo trang Wiki mới.
+                            - **edit_wiki_page**: Chỉnh sửa trang Wiki.
                             - **summarizeChat**: Tóm tắt tin nhắn gần đây.
                             - **createTask**: Tạo task công việc.
                             - **getChatInfo**: Lấy thông tin nhóm/chat.
@@ -67,41 +78,41 @@ public class AgentService {
          * @param userId         authenticated user ID
          * @param chatId         current chat room context (passed to tools via system
          *                       prompt)
+         * @param providerName   name of the LLM provider to use (e.g., gemini, openai)
+         * @param skillId        optional ID of custom agent skill
          * @return Flux of text tokens for SSE streaming
          */
-        public Flux<String> runAgent(Long conversationId, String message, String userId, String chatId) {
-                log.info("[Agent] Running for userId={}, chatId={}, query='{}'", userId, chatId, message);
+        public Flux<String> runAgent(Long conversationId, String message, String userId, String chatId, String providerName, Long skillId) {
+                log.info("[Agent] Running for userId={}, chatId={}, skillId={}, query='{}'", userId, chatId, skillId, message);
+
+                String basePrompt = AGENT_SYSTEM_PROMPT;
+                if (skillId != null) {
+                        basePrompt = agentSkillService.getSkillById(skillId)
+                                .map(AgentSkill::getSystemPrompt)
+                                .orElse(AGENT_SYSTEM_PROMPT);
+                }
 
                 // Inject chatId into system context so tools can reference it without asking
                 // LLM to extract it
-                String systemWithContext = AGENT_SYSTEM_PROMPT + "\n\n## Context\nChatId hiện tại: " + chatId
+                String systemWithContext = basePrompt + "\n\n## Context\nChatId hiện tại: " + chatId
                                 + "\nUserId: " + userId;
 
                 // Save user message to conversation history
                 conversationService.saveMessage(conversationId, "user", message, null, null);
 
                 // Instantiate tool config with the current user ID
-                AgentToolConfig toolConfig = new AgentToolConfig(vectorStore, messagingClient, userId);
+                AgentToolConfig toolConfig = new AgentToolConfig(vectorStore, messagingClient, wikiPageRepository, userId);
 
                 StringBuilder fullResponse = new StringBuilder();
-
-                MessageChatMemoryAdvisor memoryAdvisor = MessageChatMemoryAdvisor.builder(chatMemory)
-                                .conversationId(conversationId.toString())
-                                .build();
 
                 // Strict instruction appended to user message to prevent reasoning/plans
                 String strictUserMessage = message + "\n\n(Chỉ trả về JSON, không giải thích, không lập kế hoạch)";
 
                 java.util.concurrent.atomic.AtomicBoolean jsonStarted = new java.util.concurrent.atomic.AtomicBoolean(false);
 
-                return Flux.from(
-                                chatClient.prompt()
-                                                .system(systemWithContext)
-                                                .user(strictUserMessage)
-                                                .tools(toolConfig)
-                                                .advisors(memoryAdvisor)
-                                                .stream()
-                                                .content())
+                LlmProvider provider = llmFactory.getProvider(providerName);
+
+                return Flux.from(provider.streamChat(systemWithContext, strictUserMessage, toolConfig, conversationId.toString()))
                                 .map(token -> {
                                         if (jsonStarted.get())
                                                 return token;

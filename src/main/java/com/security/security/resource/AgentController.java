@@ -57,7 +57,7 @@ public class AgentController {
         final Long finalConversationId = conversationId;
         final String chatId = request.getChatId() != null ? request.getChatId() : "unknown";
 
-        return agentService.runAgent(finalConversationId, request.getMessage(), userId, chatId)
+        return agentService.runAgent(finalConversationId, request.getMessage(), userId, chatId, request.getProvider(), request.getSkillId())
                 .onErrorResume(e -> {
                     log.error("[AgentController] Agent error: {}", e.getMessage());
                     return Flux.just("Đã xảy ra lỗi khi xử lý yêu cầu. Vui lòng thử lại.");

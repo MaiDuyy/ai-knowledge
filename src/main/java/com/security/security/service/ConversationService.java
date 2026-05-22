@@ -9,6 +9,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import java.util.List;
 
 @Service
@@ -54,6 +56,10 @@ public class ConversationService {
      */
     public List<Message> getMessages(Long conversationId) {
         return messageRepository.findByConversationIdOrderByCreatedAt(conversationId);
+    }
+
+    public Page<Message> getMessages(Long conversationId, Pageable pageable) {
+        return messageRepository.findByConversationId(conversationId, pageable);
     }
 
     /**
