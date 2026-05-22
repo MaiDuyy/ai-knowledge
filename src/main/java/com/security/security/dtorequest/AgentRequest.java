@@ -21,4 +21,8 @@ public class AgentRequest {
     private String chatId;
     /** Optional workspace context. */
     private String workspaceId;
+    /** Optional LLM provider (gemini, openai, anthropic). Default is gemini. */
+    private String provider;
+    /** Optional AgentSkill ID to use custom system prompt instead of default. */
+    private Long skillId;
 }

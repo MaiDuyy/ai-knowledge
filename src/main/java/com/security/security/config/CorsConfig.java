@@ -20,7 +20,8 @@ public class CorsConfig {
 
         config.setAllowedOriginPatterns(List.of(
                 "http://localhost:*",
-                "http://127.0.0.1:*"
+                "http://127.0.0.1:*",
+                "http://localhost:3002"
         ));
 
         config.setAllowedHeaders(List.of("*"));

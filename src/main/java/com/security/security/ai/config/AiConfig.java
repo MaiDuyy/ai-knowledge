@@ -16,24 +16,9 @@ public class AiConfig {
 
     @Bean
     public ChatClient chatClient(ChatModel chatModel) {
-        // Define strict schema for consistency
-        var responseSchema = """
-                {
-                  "type": "object",
-                  "properties": {
-                    "summary": { "type": "string" },
-                    "details": { "type": "array", "items": { "type": "string" } },
-                    "sources": { "type": "array", "items": { "type": "string" } }
-                  },
-                  "required": ["summary", "details", "sources"]
-                }
-                """;
-
         return ChatClient.builder(chatModel)
                 .defaultOptions(GoogleGenAiChatOptions.builder()
-                        .responseMimeType("application/json")
-                        .responseSchema(responseSchema)
-                        .temperature(0.0)
+                        .temperature(0.5)
                         .build())
                 .build();
     }

@@ -1,6 +1,8 @@
 package com.security.security.repository;
 
 import com.security.security.entity.Document;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.stereotype.Repository;
@@ -24,7 +26,11 @@ public interface DocumentRepository extends JpaRepository<Document, Long> {
     List<Document> findByUserIdOrderByCreatedAtDesc(String userId);
 
     List<Document> findAllByOrderByCreatedAtDesc();
+    Page<Document> findAllByOrderByCreatedAtDesc(Pageable pageable);
 
     @Query("SELECT d FROM Document d WHERE d.status = 'COMPLETED' ORDER BY d.createdAt DESC")
     List<Document> findCompletedByOrderByCreatedAtDesc();
+
+    @Query("SELECT d FROM Document d WHERE d.status = 'COMPLETED' ORDER BY d.createdAt DESC")
+    Page<Document> findCompletedByOrderByCreatedAtDesc(Pageable pageable);
 }
