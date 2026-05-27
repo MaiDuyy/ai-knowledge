@@ -5,7 +5,7 @@ target/
 !**/src/test/**/target/
 src/test
 uploads/
-src/main/resources
+src/main/resources/application-dev.properties
 docs/
 ### STS ###
 .apt_generated
