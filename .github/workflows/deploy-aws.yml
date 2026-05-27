@@ -1,0 +1,92 @@
+name: Deploy Spring Boot AI Knowledge to AWS EC2
+
+on:
+  push:
+    branches: [ main, develop, dev, product ]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: ott-chat-ai-knowledge
+  DEPLOY_DIR: /home/ec2-user/ott-chat
+
+jobs:
+  build-and-push:
+    name: Build & Push Java AI Service
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Build, Tag, and Push to ECR
+      id: build-image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        # Leverage Docker multi-stage build to compile and package Java application cleanly
+        docker build -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG \
+                     -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest .
+                     
+        docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
+        docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest
+
+  deploy:
+    name: Remote Targeted EC2 Deployment
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev'
+
+    steps:
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR (for Registry URL output)
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Targeted Service Restart via SSH
+      uses: appleboy/ssh-action@v1.0.3
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        AWS_REGION: ${{ env.AWS_REGION }}
+      with:
+        host: ${{ secrets.EC2_HOST }}
+        username: ${{ secrets.EC2_USERNAME }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        port: 22
+        envs: ECR_REGISTRY,AWS_REGION
+        script: |
+          set -e
+          cd ${{ env.DEPLOY_DIR }}
+
+          # Authenticate Docker against AWS ECR
+          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
+
+          # Inject Registry Variable for compose session
+          export ECR_REGISTRY=$ECR_REGISTRY
+
+          # Target only the Spring Boot service to pull and upgrade in isolation
+          docker compose -f docker-compose.prod.yml pull ai-knowledge
+
+          # Perform zero-downtime rolling reload for the single container
+          docker compose -f docker-compose.prod.yml --env-file .env up -d --no-deps ai-knowledge
+
+          # Housekeeping: prune old dangling images
+          docker image prune -f
