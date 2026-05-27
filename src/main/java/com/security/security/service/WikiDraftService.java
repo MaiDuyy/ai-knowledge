@@ -2,6 +2,7 @@ package com.security.security.service;
 
 import com.security.security.entity.WikiPage;
 import com.security.security.entity.WikiPageDraft;
+import com.security.security.event.NatsEventPublisher;
 import com.security.security.repository.WikiPageDraftRepository;
 import com.security.security.repository.WikiPageRepository;
 import jakarta.transaction.Transactional;
@@ -25,6 +26,8 @@ public class WikiDraftService {
     private final WikiPageDraftRepository wikiPageDraftRepository;
     private final WikiPageRepository wikiPageRepository;
     private final VectorStore vectorStore;
+    private final com.security.security.repository.WikiLinkRepository wikiLinkRepository;
+    private final NatsEventPublisher natsEventPublisher;
 
     /**
      * Propose a new draft for a Wiki page
@@ -33,7 +36,9 @@ public class WikiDraftService {
     public WikiPageDraft proposeDraft(WikiPageDraft draft) {
         log.info("[WikiDraftService] Proposing draft for slug: {}, workspace: {}", draft.getSlug(), draft.getWorkspaceId());
         draft.setStatus("PENDING");
-        return wikiPageDraftRepository.save(draft);
+        WikiPageDraft saved = wikiPageDraftRepository.save(draft);
+        natsEventPublisher.publishWikiDraftUpdated(saved.getId(), saved.getTitle(), saved.getSlug(), saved.getWorkspaceId(), saved.getStatus(), saved.getAuthorId());
+        return saved;
     }
 
     /**
@@ -68,6 +73,7 @@ public class WikiDraftService {
                 draft.setStatus("NEEDS_REVISION");
                 draft.setReviewerNote(errorMsg);
                 wikiPageDraftRepository.save(draft);
+                natsEventPublisher.publishWikiDraftUpdated(draft.getId(), draft.getTitle(), draft.getSlug(), draft.getWorkspaceId(), "NEEDS_REVISION", reviewerId);
                 throw new IllegalStateException(errorMsg);
             }
 
@@ -151,10 +157,78 @@ public class WikiDraftService {
             log.error("[WikiDraftService] Error indexing WikiPage ID {} to VectorStore: {}", targetPage.getId(), e.getMessage(), e);
         }
 
+        // Refresh knowledge graph wiki links
+        refreshLinks(targetPage.getId(), targetPage.getSlug(), targetPage.getContent());
+
         // Update draft status
         draft.setStatus("APPROVED");
         draft.setReviewerNote("Approved and committed successfully.");
-        return wikiPageDraftRepository.save(draft);
+        WikiPageDraft saved = wikiPageDraftRepository.save(draft);
+        natsEventPublisher.publishWikiDraftUpdated(saved.getId(), saved.getTitle(), saved.getSlug(), saved.getWorkspaceId(), "APPROVED", reviewerId);
+        return saved;
+    }
+
+    private void refreshLinks(Long fromPageId, String fromSlug, String contentMd) {
+        try {
+            wikiLinkRepository.deleteByFromPageId(fromPageId);
+            List<String> targets = com.security.security.dto.WikiPageMetadataDto.extractLinks(contentMd);
+            if (targets == null || targets.isEmpty()) {
+                return;
+            }
+            
+            // Fetch all existing pages to match titles and slugs dynamically
+            List<WikiPage> allPages = wikiPageRepository.findAll();
+            
+            java.util.Set<String> uniqueSlugs = new java.util.HashSet<>();
+            for (String target : targets) {
+                String trimmedTarget = target.trim();
+                String targetSlug = slugify(trimmedTarget);
+                
+                // Resolve actual page slug
+                String resolvedSlug = null;
+                for (WikiPage p : allPages) {
+                    if (p.getTitle().equalsIgnoreCase(trimmedTarget)) {
+                        resolvedSlug = p.getSlug();
+                        break;
+                    }
+                    if (p.getSlug().equalsIgnoreCase(targetSlug)) {
+                        resolvedSlug = p.getSlug();
+                        break;
+                    }
+                    if (p.getSlug().equalsIgnoreCase("source/" + targetSlug)) {
+                        resolvedSlug = p.getSlug();
+                        break;
+                    }
+                }
+                
+                if (resolvedSlug == null) {
+                    resolvedSlug = targetSlug; // fallback
+                }
+                
+                if (!resolvedSlug.isEmpty() && !resolvedSlug.equals(fromSlug)) {
+                    uniqueSlugs.add(resolvedSlug);
+                }
+            }
+            
+            for (String tSlug : uniqueSlugs) {
+                wikiLinkRepository.save(com.security.security.entity.WikiLink.builder()
+                        .fromPageId(fromPageId)
+                        .toSlug(tSlug)
+                        .build());
+            }
+            log.info("[WikiDraftService] Refreshed {} graph links for page ID {}", uniqueSlugs.size(), fromPageId);
+        } catch (Exception e) {
+            log.error("[WikiDraftService] Error refreshing graph links for page ID {}: {}", fromPageId, e.getMessage(), e);
+        }
+    }
+
+    private String slugify(String title) {
+        if (title == null) return "";
+        return title.toLowerCase()
+                .replaceAll("[^a-z0-9\\s-]", "")
+                .replaceAll("\\s+", "-")
+                .replaceAll("-+", "-")
+                .trim();
     }
 
     /**
@@ -168,7 +242,9 @@ public class WikiDraftService {
 
         draft.setStatus("REJECTED");
         draft.setReviewerNote(note);
-        return wikiPageDraftRepository.save(draft);
+        WikiPageDraft saved = wikiPageDraftRepository.save(draft);
+        natsEventPublisher.publishWikiDraftUpdated(saved.getId(), saved.getTitle(), saved.getSlug(), saved.getWorkspaceId(), "REJECTED", reviewerId);
+        return saved;
     }
 
     /**
@@ -182,7 +258,9 @@ public class WikiDraftService {
 
         draft.setStatus("NEEDS_REVISION");
         draft.setReviewerNote(note);
-        return wikiPageDraftRepository.save(draft);
+        WikiPageDraft saved = wikiPageDraftRepository.save(draft);
+        natsEventPublisher.publishWikiDraftUpdated(saved.getId(), saved.getTitle(), saved.getSlug(), saved.getWorkspaceId(), "NEEDS_REVISION", reviewerId);
+        return saved;
     }
 
     /**

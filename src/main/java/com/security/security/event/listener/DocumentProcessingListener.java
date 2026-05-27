@@ -4,6 +4,7 @@ import com.security.security.entity.Document;
 import com.security.security.entity.Embedding;
 import com.security.security.entity.enumeration.DocStatus;
 import com.security.security.event.DocumentUploadedEvent;
+import com.security.security.event.NatsEventPublisher;
 import com.security.security.repository.DocumentRepository;
 import com.security.security.repository.EmbeddingRepository;
 import com.security.security.service.tika.DocumentProfiler;
@@ -12,6 +13,15 @@ import com.security.security.service.tika.SemanticMarkdownChunker;
 import com.security.security.service.tika.TikaHtmlExtractor;
 import com.security.security.service.tika.TikaHtmlResult;
 import com.security.security.service.docling.DoclingClient;
+import com.security.security.entity.SourceImage;
+import com.security.security.repository.SourceImageRepository;
+import com.security.security.service.ImageExtractionService;
+import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.beans.factory.annotation.Value;
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.vectorstore.VectorStore;
@@ -37,6 +47,13 @@ public class DocumentProcessingListener {
     private final SemanticMarkdownChunker semanticMarkdownChunker;
     private final DocumentProfiler        documentProfiler;
     private final DoclingClient           doclingClient;
+    private final ImageExtractionService  imageExtractionService;
+    private final SourceImageRepository   sourceImageRepository;
+    private final ChatModel               chatModel;
+    private final NatsEventPublisher      natsEventPublisher;
+
+    @Value("${app.upload.dir:uploads}")
+    private String uploadDir;
 
     private static final int BATCH_SIZE     = 30;
     private static final int MIN_TOKENS     = 60;
@@ -100,6 +117,64 @@ public class DocumentProcessingListener {
                 log.info("[ETL][3+4] Markdown: {} chars, doc={}", markdown.length(), docId);
             }
 
+            // ── Extract and process inline images ─────────────────────────────
+            try {
+                byte[] fileBytes;
+                try (InputStream is = resource.getInputStream()) {
+                    fileBytes = is.readAllBytes();
+                }
+                
+                List<ImageExtractionService.ExtractedImage> extractedImages = 
+                        imageExtractionService.extractImages(fileBytes, document.getFileName());
+                
+                if (extractedImages != null && !extractedImages.isEmpty()) {
+                    log.info("[ETL] Extracted {} inline images from document ID: {}", extractedImages.size(), docId);
+                    
+                    Path imagesDir = Paths.get(uploadDir).resolve("images");
+                    if (!Files.exists(imagesDir)) {
+                        Files.createDirectories(imagesDir);
+                    }
+                    
+                    List<SourceImage> savedImages = new ArrayList<>();
+                    for (ImageExtractionService.ExtractedImage extImg : extractedImages) {
+                        UUID imgId = UUID.randomUUID();
+                        String imgFilename = imgId.toString() + "." + extImg.getExtension();
+                        Path targetPath = imagesDir.resolve(imgFilename);
+                        
+                        Files.write(targetPath, extImg.getBytes());
+                        
+                        // Generate caption using Gemini
+                        String caption = generateCaption(extImg.getBytes(), extImg.getContentType());
+                        
+                        SourceImage sourceImg = SourceImage.builder()
+                                .id(imgId)
+                                .source(document)
+                                .minioKey("images/" + imgFilename)
+                                .pageNumber(extImg.getPageNumber())
+                                .imageIndex(extImg.getImageIndex())
+                                .caption(caption)
+                                .contentType(extImg.getContentType())
+                                .sizeBytes(extImg.getBytes().length)
+                                .build();
+                                
+                        sourceImageRepository.save(sourceImg);
+                        savedImages.add(sourceImg);
+                    }
+                    
+                    // Append image reference tags at the end of the markdown
+                    StringBuilder inlineImgBuilder = new StringBuilder(markdown);
+                    inlineImgBuilder.append("\n\n---\n\n### Extracted Document Images\n\n");
+                    for (SourceImage img : savedImages) {
+                        String alt = sanitizeCaptionForAlt(img.getCaption());
+                        inlineImgBuilder.append(String.format("![%s](image://%s)\n\n", alt, img.getId().toString()));
+                    }
+                    markdown = inlineImgBuilder.toString();
+                    log.info("[ETL] Appended image references to markdown content for docId={}", docId);
+                }
+            } catch (Exception imgEx) {
+                log.warn("[ETL] Image extraction/processing failed for docId={}: {}", docId, imgEx.getMessage());
+            }
+
             if (markdown == null || markdown.length() < 60)
                 throw new IllegalStateException("Extracted markdown is empty or too short, doc=" + docId);
 
@@ -127,15 +202,21 @@ public class DocumentProcessingListener {
                 meta.put("tokenCount", String.valueOf(semanticMarkdownChunker.estimateTokens(cr.text())));
                 meta.put("charCount",  String.valueOf(cr.text().length()));
                 if (document.getSecurityClassification() != null) {
+                    meta.put("classification", document.getSecurityClassification());
                     meta.put("securityClassification", document.getSecurityClassification());
                 }
+                meta.put("uploadedBy", document.getUserId());
                 if (document.getTags() != null && !document.getTags().isEmpty()) {
                     meta.put("tags", String.join(",", document.getTags()));
+                }
+                if (document.getWorkspaceId() != null) {
+                    meta.put("workspaceId", document.getWorkspaceId());
                 }
 
                 vBatch.add(new org.springframework.ai.document.Document(cr.text(), meta));
                 eBatch.add(Embedding.builder()
                         .documentId(document.getId())
+                        .workspaceId(document.getWorkspaceId())
                         .chunkIndex(i)
                         .chunkText(cr.text())
                         .chunkTitle(cr.title())
@@ -172,6 +253,7 @@ public class DocumentProcessingListener {
             document.setMarkdownContent(markdown);
             document.setErrorMessage(null);
             documentRepository.save(document);
+            natsEventPublisher.publishDocumentStatus(document.getId(), document.getUserId(), document.getWorkspaceId(), "COMPLETED");
 
         } catch (Exception e) {
             log.error("[ETL] ✗ Failed doc={}: {}", docId, e.getMessage(), e);
@@ -187,5 +269,47 @@ public class DocumentProcessingListener {
         doc.setStatus(status);
         doc.setErrorMessage(error);
         documentRepository.save(doc);
+        natsEventPublisher.publishDocumentStatus(doc.getId(), doc.getUserId(), doc.getWorkspaceId(), status.name());
+    }
+
+    private String generateCaption(byte[] imgBytes, String contentType) {
+        try {
+            if (chatModel == null) return "Extracted Image";
+            org.springframework.core.io.ByteArrayResource byteResource = 
+                    new org.springframework.core.io.ByteArrayResource(imgBytes);
+            org.springframework.ai.content.Media media = 
+                    new org.springframework.ai.content.Media(org.springframework.util.MimeTypeUtils.parseMimeType(contentType), byteResource);
+            org.springframework.ai.chat.client.ChatClient chatClient = 
+                    org.springframework.ai.chat.client.ChatClient.builder(chatModel).build();
+            
+            String systemPrompt = "You are a precise technical image description generator. Write a extremely short, precise description of the technical contents of the image in Vietnamese. Do NOT write any introduction or notes. Just return the description.";
+            
+            org.springframework.ai.chat.model.ChatResponse response = chatClient.prompt()
+                    .options(org.springframework.ai.google.genai.GoogleGenAiChatOptions.builder()
+                            .model("gemini-1.5-flash")
+                            .temperature(0.3)
+                            .build())
+                    .system(systemPrompt)
+                    .user(u -> u.text("Describe this technical image precisely:").media(media))
+                    .call()
+                    .chatResponse();
+                    
+            if (response != null && response.getResult() != null && response.getResult().getOutput() != null) {
+                String text = response.getResult().getOutput().getText();
+                if (text != null) {
+                    return text.trim();
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Failed to generate caption using Gemini: {}", e.getMessage());
+        }
+        return "Extracted Image";
+    }
+
+    private String sanitizeCaptionForAlt(String caption) {
+        if (caption == null) return "";
+        String cleaned = caption.replace("\n", " ").replace("\r", " ");
+        cleaned = cleaned.replace("[", "(").replace("]", ")");
+        return cleaned.trim();
     }
 }

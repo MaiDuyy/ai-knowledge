@@ -6,6 +6,7 @@ import com.security.security.entity.Embedding;
 import com.security.security.entity.enumeration.DocStatus;
 import com.security.security.entity.enumeration.DocType;
 import com.security.security.event.DocumentUploadedEvent;
+import com.security.security.event.NatsEventPublisher;
 import com.security.security.exception.ApiException;
 import com.security.security.repository.DocumentRepository;
 import com.security.security.repository.EmbeddingRepository;
@@ -51,6 +52,7 @@ public class DocumentService {
     private final DocumentProfiler documentProfiler;
     private final DoclingClient doclingClient;
     private final MrpPipelineService mrpPipelineService;
+    private final NatsEventPublisher natsEventPublisher;
 
     // Khuyến nghị set ABSOLUTE:
     // app.upload.dir=C:/data/myapp/uploads
@@ -69,17 +71,27 @@ public class DocumentService {
 
     @Transactional
     public DocumentUploadResponse uploadDocument(MultipartFile file, String userId) {
-        return uploadDocument(file, userId, false, "gemini");
+        return uploadDocument(file, userId, false, "gemini", null);
     }
 
     @Transactional
     public DocumentUploadResponse uploadDocument(MultipartFile file, String userId, Boolean preview) {
-        return uploadDocument(file, userId, preview, "gemini");
+        return uploadDocument(file, userId, preview, "gemini", null);
     }
 
     @Transactional
     public DocumentUploadResponse uploadDocument(MultipartFile file, String userId, Boolean preview, String parser) {
-        log.info("Uploading document for user: {}, preview: {}, parser: {}", userId, preview, parser);
+        return uploadDocument(file, userId, preview, parser, null);
+    }
+
+    @Transactional
+    public DocumentUploadResponse uploadDocument(MultipartFile file, String userId, Boolean preview, String parser, String workspaceId) {
+        log.info("Uploading document for user: {}, preview: {}, parser: {}, workspaceId: {}", userId, preview, parser, workspaceId);
+
+        String resolvedWorkspaceId = workspaceId;
+        if (resolvedWorkspaceId == null || resolvedWorkspaceId.trim().isEmpty() || "all".equalsIgnoreCase(resolvedWorkspaceId.trim())) {
+            resolvedWorkspaceId = "default-workspace";
+        }
 
         if (file == null || file.isEmpty()) {
             throw new ApiException("File is empty");
@@ -134,6 +146,7 @@ public class DocumentService {
 
             Document document = Document.builder()
                     .userId(userId)
+                    .workspaceId(resolvedWorkspaceId)          // Associate document with workspace
                     .fileName(safeName)                 // tên gốc để hiển thị
                     .fileSize((int) file.getSize())
                     .filePath(storedPath)               // path file đã lưu
@@ -181,6 +194,7 @@ public class DocumentService {
             }
 
             Document saved = documentRepository.save(document);
+            natsEventPublisher.publishDocumentStatus(saved.getId(), saved.getUserId(), saved.getWorkspaceId(), saved.getStatus().name());
 
             if (!isPreview && saved.getStatus() != DocStatus.FAILED) {
                 // Trigger async processing
@@ -204,6 +218,24 @@ public class DocumentService {
             log.error("Unexpected error uploading document for user {}: {}", userId, e.getMessage());
             throw new ApiException("Failed to upload document: " + e.getMessage());
         }
+    }
+
+    /**
+     * Get documents scoped by workspaceId.
+     * Falls back to company-wide listing if workspaceId is null/blank (backward compat).
+     */
+    public List<Document> getDocuments(String userId, String workspaceId) {
+        if (workspaceId != null && !workspaceId.isBlank()) {
+            return documentRepository.findByWorkspaceIdOrderByCreatedAtDesc(workspaceId);
+        }
+        return documentRepository.findAllByOrderByCreatedAtDesc();
+    }
+
+    public Page<Document> getDocuments(String userId, String workspaceId, Pageable pageable) {
+        if (workspaceId != null && !workspaceId.isBlank()) {
+            return documentRepository.findByWorkspaceIdOrderByCreatedAtDesc(workspaceId, pageable);
+        }
+        return documentRepository.findAllByOrderByCreatedAtDesc(pageable);
     }
 
     public List<Document> getUserDocuments(String userId) {
@@ -488,6 +520,7 @@ public class DocumentService {
         document.setStatus(DocStatus.PROCESSING);
         document.setMarkdownContent(markdownContent);
         documentRepository.save(document);
+        natsEventPublisher.publishDocumentStatus(document.getId(), document.getUserId(), document.getWorkspaceId(), "PROCESSING");
 
         // Run chunking and loading synchronously
         try {
@@ -514,6 +547,9 @@ public class DocumentService {
                 meta.put("chunkTitle", cr.title());
                 meta.put("tokenCount", String.valueOf(semanticMarkdownChunker.estimateTokens(cr.text())));
                 meta.put("charCount", String.valueOf(cr.text().length()));
+                meta.put("classification", document.getSecurityClassification());
+                meta.put("securityClassification", document.getSecurityClassification());
+                meta.put("uploadedBy", document.getUserId());
 
                 vBatch.add(new org.springframework.ai.document.Document(cr.text(), meta));
                 eBatch.add(Embedding.builder()
@@ -551,12 +587,14 @@ public class DocumentService {
             document.setAvgTokensPerChunk(profile.avgTokensPerChunk());
             document.setErrorMessage(null);
             documentRepository.save(document);
+            natsEventPublisher.publishDocumentStatus(document.getId(), document.getUserId(), document.getWorkspaceId(), "COMPLETED");
 
         } catch (Exception e) {
             log.error("Failed to ingest document {}: {}", documentId, e.getMessage(), e);
             document.setStatus(DocStatus.FAILED);
             document.setErrorMessage(e.getMessage());
             documentRepository.save(document);
+            natsEventPublisher.publishDocumentStatus(document.getId(), document.getUserId(), document.getWorkspaceId(), "FAILED");
             throw new ApiException("Failed to ingest document: " + e.getMessage());
         }
     }
@@ -573,6 +611,7 @@ public class DocumentService {
         if (document.getStatus() == DocStatus.PENDING || document.getStatus() == DocStatus.FAILED || document.getStatus() == DocStatus.PREVIEW) {
             document.setStatus(DocStatus.PROCESSING);
             Document saved = documentRepository.save(document);
+            natsEventPublisher.publishDocumentStatus(saved.getId(), saved.getUserId(), saved.getWorkspaceId(), "PROCESSING");
             eventPublisher.publishEvent(new DocumentUploadedEvent(this, saved));
             return saved;
         }

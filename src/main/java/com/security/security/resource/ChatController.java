@@ -1,8 +1,11 @@
 package com.security.security.resource;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.security.security.dto.UserDTO;
 import com.security.security.dtorequest.ChatRequest;
 import com.security.security.dtorequest.ConversationRequest;
+import com.security.security.dtorequest.RAGQueryPayload;
 import com.security.security.entity.Conversation;
 import com.security.security.entity.Message;
 import com.security.security.service.ConversationService;
@@ -19,6 +22,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import reactor.core.publisher.Flux;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -29,6 +33,7 @@ public class ChatController {
 
     private final RAGService ragService;
     private final ConversationService conversationService;
+    private final ObjectMapper objectMapper;
 
     /**
      * Create new conversation
@@ -84,16 +89,38 @@ public class ChatController {
     @PostMapping(value = "/messages", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<String> chat(
             @RequestBody ChatRequest request,
-            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) {
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-role", required = false) String role,
+            @RequestHeader(value = "x-user-roles", required = false) String rolesJson,
+            @RequestHeader(value = "x-user-role-level", required = false) Integer roleLevel) {
 
 
         // Verify conversation belongs to user
         conversationService.getConversation(request.getConversationId(), userId);
 
+        List<String> rolesList = new ArrayList<>();
+        if (rolesJson != null && !rolesJson.isBlank()) {
+            try {
+                rolesList = objectMapper.readValue(rolesJson, new TypeReference<List<String>>() {});
+            } catch (Exception e) {
+                if (role != null && !role.isBlank()) {
+                    rolesList.add(role);
+                }
+            }
+        } else if (role != null && !role.isBlank()) {
+            rolesList.add(role);
+        }
+
+        RAGQueryPayload.UserPermissionContext permissions = RAGQueryPayload.UserPermissionContext.builder()
+                .roles(rolesList)
+                .roleLevel(roleLevel)
+                .build();
+
         return ragService.generateAnswerStream(
                 request.getConversationId(),
                 request.getMessage(),
-                userId
+                userId,
+                permissions
         );
     }
 

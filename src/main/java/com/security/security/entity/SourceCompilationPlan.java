@@ -24,6 +24,9 @@ public class SourceCompilationPlan {
     @Column(name = "source_document_id", nullable = false, unique = true)
     private Long sourceDocumentId;
 
+    @Transient
+    private String sourceDocumentName;
+
     @Column(name = "plan_json", columnDefinition = "TEXT")
     private String planJson;
 

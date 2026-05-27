@@ -33,4 +33,15 @@ public interface DocumentRepository extends JpaRepository<Document, Long> {
 
     @Query("SELECT d FROM Document d WHERE d.status = 'COMPLETED' ORDER BY d.createdAt DESC")
     Page<Document> findCompletedByOrderByCreatedAtDesc(Pageable pageable);
+
+    // Workspace-scoped queries (Department → Workspace → Document flow)
+    List<Document> findByWorkspaceIdOrderByCreatedAtDesc(String workspaceId);
+    Page<Document> findByWorkspaceIdOrderByCreatedAtDesc(String workspaceId, Pageable pageable);
+
+    @Query("SELECT d FROM Document d WHERE d.workspaceId = ?1 AND d.status = 'COMPLETED' ORDER BY d.createdAt DESC")
+    List<Document> findCompletedByWorkspaceIdOrderByCreatedAtDesc(String workspaceId);
+
+    @Query("SELECT d FROM Document d WHERE d.workspaceId = ?1 AND d.status = 'COMPLETED' ORDER BY d.createdAt DESC")
+    Page<Document> findCompletedByWorkspaceIdOrderByCreatedAtDesc(String workspaceId, Pageable pageable);
 }
+

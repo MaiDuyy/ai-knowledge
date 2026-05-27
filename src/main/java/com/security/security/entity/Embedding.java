@@ -42,6 +42,9 @@ public class Embedding {
     @Column(name = "chunk_title")
     private String chunkTitle;
 
+    @Column(name = "workspace_id", length = 50)
+    private String workspaceId;
+
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt;

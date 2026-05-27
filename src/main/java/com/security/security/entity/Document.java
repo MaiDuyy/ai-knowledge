@@ -27,6 +27,9 @@ public class Document {
     @Column(name = "user_id", nullable = false)
     private String userId;
 
+    @Column(name = "workspace_id", length = 100)
+    private String workspaceId;
+
     @Column(name = "file_name", nullable = false)
     private String fileName;
 
