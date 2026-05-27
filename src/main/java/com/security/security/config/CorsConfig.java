@@ -11,6 +11,9 @@ import java.util.List;
 @Configuration
 public class CorsConfig {
 
+    @org.springframework.beans.factory.annotation.Value("${CORS_ORIGIN:http://localhost:3002}")
+    private String corsOrigin;
+
     @Bean
     public CorsFilter corsFilter() {
         CorsConfiguration config = new CorsConfiguration();
@@ -18,11 +21,18 @@ public class CorsConfig {
         // Nếu dùng cookie/Authorization thì phải bật allowCredentials
         config.setAllowCredentials(true);
 
-        config.setAllowedOriginPatterns(List.of(
+        List<String> origins = new java.util.ArrayList<>(List.of(
                 "http://localhost:*",
                 "http://127.0.0.1:*",
-                "http://localhost:3002"
+                "http://localhost:3002",
+                "https://nexus-ott-chat.vercel.app"
         ));
+        if (corsOrigin != null && !corsOrigin.trim().isEmpty()) {
+            for (String origin : corsOrigin.split(",")) {
+                origins.add(origin.trim());
+            }
+        }
+        config.setAllowedOriginPatterns(origins);
 
         config.setAllowedHeaders(List.of("*"));
 
