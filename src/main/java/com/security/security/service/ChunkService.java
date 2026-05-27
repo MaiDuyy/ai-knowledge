@@ -111,14 +111,19 @@ public class ChunkService {
     // 4. Semantic search  →  VectorStore (đúng mục đích ANN)
     // ─────────────────────────────────────────────────────────────
 
-    public ChunkSearchResponse searchChunks(String query, Integer topK, Double minSimilarity, String userId) {
-        log.info("Semantic search: query='{}', topK={}, threshold={}", query, topK, minSimilarity);
+    public ChunkSearchResponse searchChunks(String query, Integer topK, Double minSimilarity, String workspaceId, String userId) {
+        log.info("Semantic search: query='{}', topK={}, threshold={}, workspaceId={}", query, topK, minSimilarity, workspaceId);
 
-        SearchRequest request = SearchRequest.builder()
+        SearchRequest.Builder builder = SearchRequest.builder()
                 .query(query)
                 .topK(topK)
-                .similarityThreshold(minSimilarity)
-                .build();
+                .similarityThreshold(minSimilarity);
+
+        if (workspaceId != null && !workspaceId.isBlank() && !"default-workspace".equals(workspaceId)) {
+            builder.filterExpression("workspaceId == '" + workspaceId + "'");
+        }
+
+        SearchRequest request = builder.build();
 
         List<ChunkSearchResponse.ChunkSearchResult> results = vectorStore
                 .similaritySearch(request)

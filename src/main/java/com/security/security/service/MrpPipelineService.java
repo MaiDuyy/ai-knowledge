@@ -9,6 +9,7 @@ import com.security.security.provider.LlmFactory;
 import com.security.security.provider.LlmProvider;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
+import com.security.security.event.NatsEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -97,6 +98,7 @@ public class MrpPipelineService {
     private final WikiDraftService wikiDraftService;
     private final ExecutorService mrpVirtualThreadExecutor;
     private final ObjectMapper objectMapper;
+    private final NatsEventPublisher natsEventPublisher;
 
     public MrpPipelineService(
             LlmFactory llmFactory,
@@ -107,7 +109,8 @@ public class MrpPipelineService {
             DocumentRepository documentRepository,
             WikiDraftService wikiDraftService,
             @Qualifier("mrpVirtualThreadExecutor") ExecutorService mrpVirtualThreadExecutor,
-            ObjectMapper objectMapper) {
+            ObjectMapper objectMapper,
+            NatsEventPublisher natsEventPublisher) {
         this.llmFactory = llmFactory;
         this.wikiPageRepository = wikiPageRepository;
         this.sourceChunkExtractRepository = sourceChunkExtractRepository;
@@ -117,6 +120,7 @@ public class MrpPipelineService {
         this.wikiDraftService = wikiDraftService;
         this.mrpVirtualThreadExecutor = mrpVirtualThreadExecutor;
         this.objectMapper = objectMapper;
+        this.natsEventPublisher = natsEventPublisher;
     }
 
     /**
@@ -147,6 +151,13 @@ public class MrpPipelineService {
 
         Document doc = documentRepository.findById(documentId)
                 .orElseThrow(() -> new IllegalArgumentException("Document not found with ID: " + documentId));
+
+        // Kế thừa workspaceId trực tiếp từ tài liệu gốc (Document) để bảo mật và đồng bộ dữ liệu theo đúng flow
+        String finalWorkspaceId = (doc.getWorkspaceId() != null && !doc.getWorkspaceId().trim().isEmpty()) 
+                ? doc.getWorkspaceId() 
+                : (workspaceId != null ? workspaceId : "default-workspace");
+
+        log.info("[MRP Pipeline] Workspace được xác định cho tiến trình: {}", finalWorkspaceId);
 
         String content = doc.getMarkdownContent();
         if (content == null || content.isBlank()) {
@@ -326,7 +337,7 @@ public class MrpPipelineService {
 
         for (String subject : uniqueSubjects) {
             String slug = slugify(subject);
-            Optional<WikiPage> existingPage = wikiPageRepository.findBySlugAndWorkspaceId(slug, workspaceId);
+            Optional<WikiPage> existingPage = wikiPageRepository.findBySlugAndWorkspaceId(slug, finalWorkspaceId);
 
             Map<String, Object> planItem = new HashMap<>();
             planItem.put("title", subject);
@@ -354,6 +365,47 @@ public class MrpPipelineService {
             planItem.put("keyClaims", claimsList);
 
             planningItems.add(planItem);
+        }
+
+        // --- ADD SOURCE PLAN ITEM ---
+        if (doc != null) {
+            String sourceTitle = doc.getFileName();
+            if (sourceTitle == null || sourceTitle.isBlank()) {
+                sourceTitle = "Source Document " + documentId;
+            } else {
+                int lastDot = sourceTitle.lastIndexOf('.');
+                if (lastDot > 0) {
+                    sourceTitle = sourceTitle.substring(0, lastDot);
+                }
+            }
+            sourceTitle = sourceTitle.trim();
+
+            String sourceSlug = "source/" + slugify(sourceTitle);
+            Optional<WikiPage> existingSourcePage = wikiPageRepository.findBySlugAndWorkspaceId(sourceSlug, finalWorkspaceId);
+
+            Map<String, Object> sourcePlanItem = new HashMap<>();
+            sourcePlanItem.put("title", sourceTitle);
+            sourcePlanItem.put("slug", sourceSlug);
+            
+            if (existingSourcePage.isPresent()) {
+                sourcePlanItem.put("action", "UPDATE");
+                sourcePlanItem.put("wikiPageId", existingSourcePage.get().getId());
+                sourcePlanItem.put("baseVersion", existingSourcePage.get().getVersion());
+            } else {
+                sourcePlanItem.put("action", "CREATE");
+                sourcePlanItem.put("wikiPageId", null);
+            }
+            
+            sourcePlanItem.put("pageType", "source");
+            sourcePlanItem.put("reason", "Source document compiled as a reference entry linking to all extracted topics.");
+            
+            List<String> sourceClaims = new ArrayList<>();
+            sourceClaims.add("Tài liệu gốc: " + doc.getFileName() + " [Source Context: " + doc.getFileName() + "]");
+            sourceClaims.add("Tài liệu chứa thông tin chi tiết về các chủ đề chính: " + 
+                uniqueSubjects.stream().collect(Collectors.joining(", ")) + " [Source Context: " + doc.getFileName() + "]");
+            sourcePlanItem.put("keyClaims", sourceClaims);
+
+            planningItems.add(sourcePlanItem);
         }
 
         // Generate robust plan JSON via LLM compilation plan optimization
@@ -423,12 +475,13 @@ public class MrpPipelineService {
         plan.setPlanJson(planJson);
         plan.setStatus(autoApprove ? "APPROVED" : "PENDING_REVIEW");
         sourceCompilationPlanRepository.save(plan);
+        natsEventPublisher.publishCompilationPlanUpdated(plan.getId(), plan.getSourceDocumentId(), finalWorkspaceId, plan.getStatus(), userId);
 
         log.info("[MRP Pipeline] [Reduce Phase] Đã hoàn thành Kế hoạch biên soạn ID: {}, trạng thái: {}", plan.getId(), plan.getStatus());
 
         if (autoApprove) {
             // Automatically execute Refine & Commit Phase
-            executeCompilationPlan(plan.getId(), workspaceId, userId, true);
+            executeCompilationPlan(plan.getId(), finalWorkspaceId, userId, true);
         }
 
         return plan;
@@ -451,8 +504,18 @@ public class MrpPipelineService {
         try {
             List<Map<String, Object>> planItems = parsePlanItems(plan.getPlanJson());
             
+            Document doc = documentRepository.findById(plan.getSourceDocumentId()).orElse(null);
+            String fullText = doc != null ? doc.getMarkdownContent() : "";
+
+            // Lấy workspaceId trực tiếp từ document gốc để đảm bảo tính đồng bộ tuyệt đối trong toàn bộ flow
+            String finalWorkspaceId = (doc != null && doc.getWorkspaceId() != null && !doc.getWorkspaceId().trim().isEmpty())
+                    ? doc.getWorkspaceId()
+                    : (workspaceId != null ? workspaceId : "default-workspace");
+
+            log.info("[MRP Pipeline] [Refine Phase] Workspace được xác định để tạo Draft: {}", finalWorkspaceId);
+            
             // Build the list of available titles for wikilinks
-            List<WikiPage> existingPages = wikiPageRepository.findByWorkspaceId(workspaceId);
+            List<WikiPage> existingPages = wikiPageRepository.findByWorkspaceId(finalWorkspaceId);
             Set<String> allAvailableTitles = new HashSet<>();
             for (Map<String, Object> item : planItems) {
                 String t = (String) item.get("title");
@@ -528,6 +591,9 @@ public class MrpPipelineService {
                         - ONLY link to topics that are exactly in the provided list. Do NOT create links to pages that are not in this list.
                         - This is critical for connecting nodes on the visual map. If a topic is in the list, you must link to it.
                         
+                        IMAGE DIRECTIVES (CRITICAL FOR INLINE IMAGES):
+                        - You MUST preserve all image markers of the form ![caption](image://<uuid>) exactly as they are written in the new claims if they are relevant to this topic. Do NOT invent new UUIDs or change the image:// prefix.
+                        
                         You MUST:
                         1. Carefully integrate all new claims/facts into the appropriate sections of the existing page content.
                         2. If a new claim contradicts existing content, prioritize the new facts, but preserve all other existing non-contradictory historical details.
@@ -536,16 +602,42 @@ public class MrpPipelineService {
                         5. Output ONLY the completed, fully updated markdown content.
                         """, availableTitlesList, availableTitlesList);
 
+                    String imageSection = "";
+                    List<String> imageMarkers = collectRelevantImageMarkers(keyClaims, fullText);
+                    if (!imageMarkers.isEmpty()) {
+                        imageSection = "\n## Images near this page's evidence\n"
+                            + "The following image markers appear near the evidence for this page. "
+                            + "Embed each marker VERBATIM in the most contextually appropriate section, "
+                            + "or omit if not relevant. Do NOT invent image UUIDs.\n\n"
+                            + String.join("\n", imageMarkers.stream().map(m -> "- " + m).toList())
+                            + "\n";
+                    }
+
                     String userContent = String.format(
-                            "--- ORIGINAL WIKI CONTENT ---\n%s\n\n--- NEW CLAIMS TO MERGE ---\n%s", 
-                            page.getContent(), claimsText
+                            "--- ORIGINAL WIKI CONTENT ---\n%s\n\n--- NEW CLAIMS TO MERGE ---\n%s\n\n%s", 
+                            page.getContent(), claimsText, imageSection
                     );
 
                     log.info("[MRP Pipeline] [Refine Phase] Trộn nội dung (Prompt Merge) cho trang ID: {}", wikiPageId);
-                    generatedContent = provider.streamChat(mergeSystemPrompt, userContent, null, "mrp-merge-" + wikiPageId)
+                    String mergedContent = provider.streamChat(mergeSystemPrompt, userContent, null, "mrp-merge-" + wikiPageId)
                              .collectList()
                              .map(list -> String.join("", list))
                              .block();
+
+                    if (mergedContent != null) {
+                        mergedContent = mergedContent.trim();
+                        int maxInputLen = Math.max(page.getContent().length(), claimsText.length());
+                        int minAcceptable = (int) (maxInputLen * 0.7);
+                        if (mergedContent.length() < minAcceptable) {
+                            log.warn("[MRP Pipeline] [Refine Phase] Merge rejected for page ID {} due to truncation (size: {}, threshold: {}). Falling back to new claims.", 
+                                    wikiPageId, mergedContent.length(), minAcceptable);
+                            generatedContent = claimsText;
+                        } else {
+                            generatedContent = mergedContent;
+                        }
+                    } else {
+                        generatedContent = claimsText;
+                    }
 
                 } else {
                     // --- CREATE NEW PAGE ---
@@ -565,6 +657,9 @@ public class MrpPipelineService {
                         - ONLY link to topics that are exactly in the provided list. Do NOT create links to pages that are not in this list.
                         - This is critical for connecting nodes on the visual map. If a topic is in the list, you must link to it.
                         
+                        IMAGE DIRECTIVES (CRITICAL FOR INLINE IMAGES):
+                        - You MUST preserve all image markers of the form ![caption](image://<uuid>) exactly as they are written in the key claims if they are relevant to this topic. Do NOT invent new UUIDs or change the image:// prefix.
+                        
                         You MUST:
                         1. Structure the content logically with heading blocks (#, ##, ###).
                         2. Start with a solid opening definition block detailing what this topic is, relying only on the provided context.
@@ -573,9 +668,20 @@ public class MrpPipelineService {
                         5. Output ONLY the raw markdown content.
                         """, availableTitlesList, availableTitlesList);
 
+                    String imageSection = "";
+                    List<String> imageMarkers = collectRelevantImageMarkers(keyClaims, fullText);
+                    if (!imageMarkers.isEmpty()) {
+                        imageSection = "\n## Images near this page's evidence\n"
+                            + "The following image markers appear near the evidence for this page. "
+                            + "Embed each marker VERBATIM in the most contextually appropriate section, "
+                            + "or omit if not relevant. Do NOT invent image UUIDs.\n\n"
+                            + String.join("\n", imageMarkers.stream().map(m -> "- " + m).toList())
+                            + "\n";
+                    }
+
                     String userContent = String.format(
-                            "Topic: %s\nType: %s\nKey Claims:\n%s", 
-                            title, normalizedPageType, claimsText
+                            "Topic: %s\nType: %s\nKey Claims:\n%s\n\n%s", 
+                            title, normalizedPageType, claimsText, imageSection
                     );
 
                     log.info("[MRP Pipeline] [Refine Phase] Biên soạn trang mới: {}", title);
@@ -593,7 +699,7 @@ public class MrpPipelineService {
                         .pageType(normalizedPageType)
                         .content(generatedContent)
                         .summary(String.format("Compiled from document ID: %d", plan.getSourceDocumentId()))
-                        .workspaceId(workspaceId)
+                        .workspaceId(finalWorkspaceId)
                         .authorId(userId)
                         .status("PENDING")
                         .baseVersion(baseVersion)
@@ -601,6 +707,7 @@ public class MrpPipelineService {
                         .build();
 
                 wikiPageDraftRepository.save(draft);
+                natsEventPublisher.publishWikiDraftUpdated(draft.getId(), draft.getTitle(), draft.getSlug(), draft.getWorkspaceId(), draft.getStatus(), userId);
                 log.info("[MRP Pipeline] [Refine Phase] Đã tạo Draft nháp ID: {} cho trang '{}'", draft.getId(), title);
 
                 if (runAutoApproveDrafts) {
@@ -619,6 +726,7 @@ public class MrpPipelineService {
             plan.setReviewedAt(LocalDateTime.now());
             plan.setReviewNote("Plan executed successfully.");
             sourceCompilationPlanRepository.save(plan);
+            natsEventPublisher.publishCompilationPlanUpdated(plan.getId(), plan.getSourceDocumentId(), finalWorkspaceId, "DONE", userId);
 
             log.info("[MRP Pipeline] Hoàn tất thực thi Kế hoạch Biên soạn ID: {}", planId);
 
@@ -941,5 +1049,46 @@ public class MrpPipelineService {
             }
         }
         return "[]";
+    }
+
+    private List<String> collectRelevantImageMarkers(List<String> keyClaims, String fullText) {
+        List<String> ordered = new ArrayList<>();
+        if (fullText == null || fullText.isEmpty() || keyClaims == null || keyClaims.isEmpty()) {
+            return ordered;
+        }
+        Set<String> seen = new HashSet<>();
+        java.util.regex.Pattern imgPattern = java.util.regex.Pattern.compile("!\\[([^\\]]*)\\]\\(image://([0-9a-fA-F-]+)\\)");
+        int window = 1500;
+
+        for (String claim : keyClaims) {
+            String sourceContext = "";
+            int scIndex = claim.indexOf("[Source Context:");
+            if (scIndex >= 0) {
+                sourceContext = claim.substring(scIndex + 16, claim.length() - 1).trim();
+            }
+            if (sourceContext.isEmpty()) {
+                
+                continue;
+            }
+
+            int offset = fullText.indexOf(sourceContext);
+            if (offset < 0) {
+                continue;
+            }
+
+            int start = Math.max(0, offset - window);
+            int end = Math.min(fullText.length(), offset + sourceContext.length() + window);
+            String windowText = fullText.substring(start, end);
+
+            java.util.regex.Matcher matcher = imgPattern.matcher(windowText);
+            while (matcher.find()) {
+                String marker = matcher.group(0);
+                if (!seen.contains(marker)) {
+                    seen.add(marker);
+                    ordered.add(marker);
+                }
+            }
+        }
+        return ordered;
     }
 }

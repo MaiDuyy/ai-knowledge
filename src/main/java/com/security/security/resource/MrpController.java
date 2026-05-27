@@ -4,9 +4,12 @@ import com.security.security.entity.SourceCompilationPlan;
 import com.security.security.entity.WikiPage;
 import com.security.security.entity.WikiPageDraft;
 import com.security.security.repository.WikiPageRepository;
+import com.security.security.repository.WikiPageDraftRepository;
 import com.security.security.repository.SourceCompilationPlanRepository;
+import com.security.security.repository.DocumentRepository;
 import com.security.security.service.MrpPipelineService;
 import com.security.security.service.WikiDraftService;
+import com.security.security.client.WorkspaceServiceClient;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
@@ -15,6 +18,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.security.access.AccessDeniedException;
 
 import java.util.List;
 import java.util.Map;
@@ -28,7 +32,25 @@ public class MrpController {
     private final MrpPipelineService mrpPipelineService;
     private final WikiDraftService wikiDraftService;
     private final WikiPageRepository wikiPageRepository;
+    private final WikiPageDraftRepository wikiPageDraftRepository;
     private final SourceCompilationPlanRepository sourceCompilationPlanRepository;
+    private final com.security.security.repository.WikiLinkRepository wikiLinkRepository;
+    private final WorkspaceServiceClient workspaceServiceClient;
+    private final DocumentRepository documentRepository;
+
+    /**
+     * Helper method to validate user membership in workspace
+     */
+    private void validateWorkspaceAccess(String userId, String workspaceId) {
+        if (workspaceId == null || workspaceId.trim().isEmpty() || "default-workspace".equals(workspaceId)) {
+            return; // Allow public or default
+        }
+        var workspace = workspaceServiceClient.getWorkspace(workspaceId, userId);
+        if (workspace.isEmpty()) {
+            log.warn("[Security] Access denied or workspace not found: User {} in Workspace {}", userId, workspaceId);
+            throw new AccessDeniedException("You do not have access to Workspace: " + workspaceId);
+        }
+    }
 
     /**
      * Khởi tạo quy trình MRP Compile (Map & Reduce Phase).
@@ -40,12 +62,19 @@ public class MrpController {
             @RequestParam Long documentId,
             @RequestParam(defaultValue = "default-workspace") String workspaceId,
             @RequestParam(defaultValue = "false") boolean autoApprove,
-            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) {
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-roles", required = false) String userRoles) {
         
         log.info("[MrpController] Compiling document ID: {}, workspace: {}, autoApprove: {}, user: {}", 
                 documentId, workspaceId, autoApprove, userId);
         
+        boolean isAdmin = userRoles != null && (userRoles.contains("SUPER_ADMIN") || userRoles.contains("ADMIN"));
+        if (!isAdmin) {
+            validateWorkspaceAccess(userId, workspaceId);
+        }
+        
         SourceCompilationPlan plan = mrpPipelineService.initiateCompile(documentId, workspaceId, userId, autoApprove);
+        populateDocumentName(plan);
         return ResponseEntity.ok(plan);
     }
 
@@ -58,9 +87,16 @@ public class MrpController {
             @PathVariable Long planId,
             @RequestParam(defaultValue = "default-workspace") String workspaceId,
             @RequestParam(defaultValue = "false") boolean runAutoApproveDrafts,
-            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) {
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-roles", required = false) String userRoles) {
         
         log.info("[MrpController] Approving plan ID: {}, runAutoApproveDrafts: {}, user: {}", planId, runAutoApproveDrafts, userId);
+        
+        boolean isAdmin = userRoles != null && (userRoles.contains("SUPER_ADMIN") || userRoles.contains("ADMIN"));
+        if (!isAdmin) {
+            validateWorkspaceAccess(userId, workspaceId);
+        }
+        
         mrpPipelineService.executeCompilationPlan(planId, workspaceId, userId, runAutoApproveDrafts);
         
         return ResponseEntity.ok(Map.of("message", "Compilation plan approved and executed. Drafts are generated."));
@@ -91,8 +127,13 @@ public class MrpController {
      * GET /api/mrp/drafts/workspace/{workspaceId}
      */
     @GetMapping("/drafts/workspace/{workspaceId}")
-    public ResponseEntity<List<WikiPageDraft>> getDraftsByWorkspace(@PathVariable String workspaceId) {
-        log.info("[MrpController] Fetching drafts for workspace ID: {}", workspaceId);
+    public ResponseEntity<List<WikiPageDraft>> getDraftsByWorkspace(
+            @PathVariable String workspaceId,
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) {
+        log.info("[MrpController] Fetching drafts for workspace ID: {} by user: {}", workspaceId, userId);
+        
+        validateWorkspaceAccess(userId, workspaceId);
+        
         List<WikiPageDraft> drafts = wikiDraftService.getDraftsByWorkspace(workspaceId);
         return ResponseEntity.ok(drafts);
     }
@@ -107,6 +148,11 @@ public class MrpController {
             @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) {
         
         log.info("[MrpController] Approving draft ID: {} by user: {}", draftId, userId);
+        
+        WikiPageDraft draft = wikiPageDraftRepository.findById(draftId)
+                .orElseThrow(() -> new IllegalArgumentException("Draft not found with ID: " + draftId));
+        validateWorkspaceAccess(userId, draft.getWorkspaceId());
+        
         WikiPageDraft approvedDraft = wikiDraftService.approveDraft(draftId, userId);
         return ResponseEntity.ok(approvedDraft);
     }
@@ -123,6 +169,10 @@ public class MrpController {
         
         String reviewerNote = payload.getOrDefault("note", "Rejected by reviewer.");
         log.info("[MrpController] Rejecting draft ID: {} by user: {}, reason: {}", draftId, userId, reviewerNote);
+        
+        WikiPageDraft draft = wikiPageDraftRepository.findById(draftId)
+                .orElseThrow(() -> new IllegalArgumentException("Draft not found with ID: " + draftId));
+        validateWorkspaceAccess(userId, draft.getWorkspaceId());
         
         WikiPageDraft rejectedDraft = wikiDraftService.rejectDraft(draftId, userId, reviewerNote);
         return ResponseEntity.ok(rejectedDraft);
@@ -141,11 +191,15 @@ public class MrpController {
         String reviewerNote = payload.getOrDefault("note", "Requires revision.");
         log.info("[MrpController] Requesting changes for draft ID: {} by user: {}, reason: {}", draftId, userId, reviewerNote);
         
+        WikiPageDraft draft = wikiPageDraftRepository.findById(draftId)
+                .orElseThrow(() -> new IllegalArgumentException("Draft not found with ID: " + draftId));
+        validateWorkspaceAccess(userId, draft.getWorkspaceId());
+        
         WikiPageDraft revisedDraft = wikiDraftService.requestChanges(draftId, userId, reviewerNote);
         return ResponseEntity.ok(revisedDraft);
     }
 
-    // ==================== OFFICIAL WIKI PAGE ENDPOINTS ====================
+    // ==================== WIKI VIEW ENDPOINTS ====================
 
     /**
      * Lấy các trang Wiki trong Workspace, có hỗ trợ phân trang server-side nếu cung cấp page và size.
@@ -155,8 +209,12 @@ public class MrpController {
     public ResponseEntity<?> getWikiPages(
             @RequestParam(defaultValue = "default-workspace") String workspaceId,
             @RequestParam(required = false) Integer page,
-            @RequestParam(required = false) Integer size) {
-        log.info("[MrpController] Fetching wiki pages for workspace: {}, page: {}, size: {}", workspaceId, page, size);
+            @RequestParam(required = false) Integer size,
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) {
+        log.info("[MrpController] Fetching wiki pages for workspace: {}, page: {}, size: {}, user: {}", workspaceId, page, size, userId);
+        
+        validateWorkspaceAccess(userId, workspaceId);
+        
         if (page != null && size != null) {
             Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "updatedAt"));
             Page<WikiPage> pagedWiki = wikiPageRepository.findByWorkspaceId(workspaceId, pageable);
@@ -172,11 +230,23 @@ public class MrpController {
      */
     @GetMapping("/wiki/metadata")
     public ResponseEntity<List<com.security.security.dto.WikiPageMetadataDto>> getWikiMetadata(
-            @RequestParam(defaultValue = "default-workspace") String workspaceId) {
-        log.info("[MrpController] Fetching lightweight wiki metadata with parsed links for workspace: {}", workspaceId);
+            @RequestParam(defaultValue = "default-workspace") String workspaceId,
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) {
+        log.info("[MrpController] Fetching lightweight wiki metadata with parsed links for workspace: {} by user: {}", workspaceId, userId);
+        
+        validateWorkspaceAccess(userId, workspaceId);
+        
         List<WikiPage> pages = wikiPageRepository.findByWorkspaceId(workspaceId);
-        List<com.security.security.dto.WikiPageMetadataDto> dtos = pages.stream().map(page -> 
-            com.security.security.dto.WikiPageMetadataDto.builder()
+        List<com.security.security.dto.WikiPageMetadataDto> dtos = pages.stream().map(page -> {
+            List<String> dbLinks = wikiLinkRepository.findByFromPageId(page.getId()).stream()
+                    .map(com.security.security.entity.WikiLink::getToSlug)
+                    .toList();
+            // If the DB doesn't have links yet (e.g. legacy wiki pages), fall back to parsing from content
+            List<String> links = dbLinks.isEmpty() 
+                    ? com.security.security.dto.WikiPageMetadataDto.extractLinks(page.getContent())
+                    : dbLinks;
+
+            return com.security.security.dto.WikiPageMetadataDto.builder()
                     .id(page.getId())
                     .title(page.getTitle())
                     .slug(page.getSlug())
@@ -186,9 +256,9 @@ public class MrpController {
                     .version(page.getVersion())
                     .createdAt(page.getCreatedAt())
                     .updatedAt(page.getUpdatedAt())
-                    .links(com.security.security.dto.WikiPageMetadataDto.extractLinks(page.getContent()))
-                    .build()
-        ).toList();
+                    .links(links)
+                    .build();
+        }).toList();
         return ResponseEntity.ok(dtos);
     }
 
@@ -196,12 +266,21 @@ public class MrpController {
      * Lấy chi tiết một trang Wiki theo slug.
      * GET /api/mrp/wiki/slug/{slug}?workspaceId=...
      */
-    @GetMapping("/wiki/slug/{slug}")
+    @GetMapping("/wiki/slug/{*slug}")
     public ResponseEntity<WikiPage> getWikiPageBySlug(
             @PathVariable String slug,
-            @RequestParam(defaultValue = "default-workspace") String workspaceId) {
-        log.info("[MrpController] Fetching wiki page slug: {} for workspace: {}", slug, workspaceId);
-        WikiPage page = wikiPageRepository.findBySlugAndWorkspaceId(slug, workspaceId)
+            @RequestParam(defaultValue = "default-workspace") String workspaceId,
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) {
+        log.info("[MrpController] Fetching wiki page slug: {} for workspace: {} by user: {}", slug, workspaceId, userId);
+        
+        validateWorkspaceAccess(userId, workspaceId);
+        
+        String cleanSlug = slug;
+        if (cleanSlug != null && cleanSlug.startsWith("/")) {
+            cleanSlug = cleanSlug.substring(1);
+        }
+        
+        WikiPage page = wikiPageRepository.findBySlugAndWorkspaceId(cleanSlug, workspaceId)
                 .orElseThrow(() -> new IllegalArgumentException("Wiki page not found with slug: " + slug));
         return ResponseEntity.ok(page);
     }
@@ -211,28 +290,58 @@ public class MrpController {
      * GET /api/mrp/wiki/id/{id}
      */
     @GetMapping("/wiki/id/{id}")
-    public ResponseEntity<WikiPage> getWikiPageById(@PathVariable Long id) {
-        log.info("[MrpController] Fetching wiki page ID: {}", id);
+    public ResponseEntity<WikiPage> getWikiPageById(
+            @PathVariable Long id,
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) {
+        log.info("[MrpController] Fetching wiki page ID: {} by user: {}", id, userId);
+        
         WikiPage page = wikiPageRepository.findById(id)
                 .orElseThrow(() -> new IllegalArgumentException("Wiki page not found with ID: " + id));
+        validateWorkspaceAccess(userId, page.getWorkspaceId());
+        
         return ResponseEntity.ok(page);
     }
 
     /**
-     * Lấy các Kế hoạch biên soạn (SourceCompilationPlan) có phân trang.
-     * GET /api/mrp/plans?page=0&size=10
+     * Lấy các Kế hoạch biên soạn (SourceCompilationPlan) trong Workspace, có phân trang.
+     * GET /api/mrp/plans?workspaceId=...&page=0&size=10
      */
     @GetMapping("/plans")
     public ResponseEntity<?> getAllPlans(
+            @RequestParam(defaultValue = "default-workspace") String workspaceId,
             @RequestParam(required = false) Integer page,
-            @RequestParam(required = false) Integer size) {
-        log.info("[MrpController] Fetching source compilation plans. page: {}, size: {}", page, size);
+            @RequestParam(required = false) Integer size,
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-roles", required = false) String userRoles) {
+        log.info("[MrpController] Fetching source compilation plans for workspace: {}. page: {}, size: {}, roles: {}", workspaceId, page, size, userRoles);
+        
+        boolean isAdmin = userRoles != null && (userRoles.contains("SUPER_ADMIN") || userRoles.contains("ADMIN"));
+        
+        if ("all".equals(workspaceId)) {
+            if (!isAdmin) {
+                throw new AccessDeniedException("Only system administrators can access compilation plans across all workspaces.");
+            }
+            if (page != null && size != null) {
+                Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt"));
+                Page<SourceCompilationPlan> pagedPlans = sourceCompilationPlanRepository.findAll(pageable);
+                pagedPlans.forEach(this::populateDocumentName);
+                return ResponseEntity.ok(pagedPlans);
+            }
+            List<SourceCompilationPlan> plans = sourceCompilationPlanRepository.findAll();
+            plans.forEach(this::populateDocumentName);
+            return ResponseEntity.ok(plans);
+        }
+
+        validateWorkspaceAccess(userId, workspaceId);
+
         if (page != null && size != null) {
             Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt"));
-            Page<SourceCompilationPlan> pagedPlans = sourceCompilationPlanRepository.findAll(pageable);
+            Page<SourceCompilationPlan> pagedPlans = sourceCompilationPlanRepository.findByWorkspaceId(workspaceId, pageable);
+            pagedPlans.forEach(this::populateDocumentName);
             return ResponseEntity.ok(pagedPlans);
         }
-        List<SourceCompilationPlan> plans = sourceCompilationPlanRepository.findAll(Sort.by(Sort.Direction.DESC, "createdAt"));
+        List<SourceCompilationPlan> plans = sourceCompilationPlanRepository.findByWorkspaceId(workspaceId);
+        plans.forEach(this::populateDocumentName);
         return ResponseEntity.ok(plans);
     }
 
@@ -245,6 +354,14 @@ public class MrpController {
         log.info("[MrpController] Fetching plan ID: {}", planId);
         SourceCompilationPlan plan = sourceCompilationPlanRepository.findById(planId)
                 .orElseThrow(() -> new IllegalArgumentException("Source compilation plan not found with ID: " + planId));
+        populateDocumentName(plan);
         return ResponseEntity.ok(plan);
+    }
+
+    private void populateDocumentName(SourceCompilationPlan plan) {
+        if (plan != null && plan.getSourceDocumentId() != null) {
+            documentRepository.findById(plan.getSourceDocumentId())
+                    .ifPresent(doc -> plan.setSourceDocumentName(doc.getFileName()));
+        }
     }
 }

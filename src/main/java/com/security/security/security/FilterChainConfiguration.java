@@ -40,6 +40,7 @@ public class FilterChainConfiguration {
                                 .toStaticResources().atCommonLocations())
                         .permitAll()
                         .requestMatchers(
+                                "/favicon.ico",
                                 "/api/mrp/**", "/skills/**",
                                 "/api/settings/**",
                                 "/chat/ai/**", "/rag/**", "/chat/**",

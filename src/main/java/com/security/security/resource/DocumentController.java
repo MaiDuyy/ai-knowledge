@@ -39,8 +39,12 @@ public class DocumentController {
             @RequestParam("file") MultipartFile file,
             @RequestParam(value = "preview", required = false) Boolean preview,
             @RequestParam(value = "parser", required = false, defaultValue = "gemini") String parser,
-            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) throws IOException {
-        DocumentUploadResponse response = documentService.uploadDocument(file, userId, preview, parser);
+            @RequestParam(value = "workspaceId", required = false) String workspaceIdParam,
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-workspace-id", required = false) String workspaceIdHeader) throws IOException {
+        // Resolve workspaceId: query param takes priority over header
+        String workspaceId = (workspaceIdParam != null && !workspaceIdParam.isBlank()) ? workspaceIdParam : workspaceIdHeader;
+        DocumentUploadResponse response = documentService.uploadDocument(file, userId, preview, parser, workspaceId);
 
         return ResponseEntity.accepted().body(response);
     }
@@ -82,16 +86,25 @@ public class DocumentController {
     @GetMapping
     public ResponseEntity<?> getDocuments(
             @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-workspace-id", required = false) String workspaceIdHeader,
+            @RequestParam(required = false) String workspaceId,
             @RequestParam(required = false) Integer page,
             @RequestParam(required = false) Integer size)
     {
+        // Resolve workspaceId: query param takes priority over header
+        String resolvedWsId = (workspaceId != null && !workspaceId.isBlank()) ? workspaceId : workspaceIdHeader;
+        if ("all".equalsIgnoreCase(resolvedWsId)) {
+            resolvedWsId = null;
+        } else if (resolvedWsId == null || resolvedWsId.isBlank()) {
+            resolvedWsId = "default-workspace";
+        }
         if (page != null && size != null) {
             Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt"));
-            Page<Document> pagedDocs = documentService.getUserDocuments(userId, pageable);
+            Page<Document> pagedDocs = documentService.getDocuments(userId, resolvedWsId, pageable);
             return ResponseEntity.ok(pagedDocs);
         }
 
-        List<Document> documents = documentService.getUserDocuments(userId);
+        List<Document> documents = documentService.getDocuments(userId, resolvedWsId);
         return ResponseEntity.ok(documents);
     }
 
@@ -191,6 +204,7 @@ public class DocumentController {
                 request.getQuery(),
                 request.getTopK() != null ? request.getTopK() : 5,
                 request.getMinSimilarity() != null ? request.getMinSimilarity() : 0.5,
+                request.getWorkspaceId(),
                 userId);
 
         return ResponseEntity.ok(response);

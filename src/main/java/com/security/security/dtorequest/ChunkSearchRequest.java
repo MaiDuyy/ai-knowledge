@@ -11,4 +11,5 @@ public class ChunkSearchRequest {
     private String query;
     private Integer topK = 5;
     private Double minSimilarity = 0.5;
+    private String workspaceId;
 }

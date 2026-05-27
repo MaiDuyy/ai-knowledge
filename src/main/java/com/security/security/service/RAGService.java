@@ -55,11 +55,18 @@ public class RAGService {
         int maxResults = payload.getOptions() != null ? payload.getOptions().getMaxResults() : TOP_K;
         double minScore = payload.getOptions() != null ? payload.getOptions().getMinScore() : SIMILARITY_THRESHOLD;
 
-        SearchRequest searchRequest = SearchRequest.builder()
+        SearchRequest.Builder searchRequestBuiler = SearchRequest.builder()
                 .query(payload.getQuery())
                 .topK(maxResults)
-                .similarityThreshold(minScore)
-                .build();
+                .similarityThreshold(minScore);
+
+        String filterExpr = buildFilterExpression(payload.getUserPermissions(), payload.getUserId());
+        if (filterExpr != null && !filterExpr.trim().isEmpty()) {
+            log.info("Applying RAG metadata filter expression: {}", filterExpr);
+            searchRequestBuiler.filterExpression(filterExpr);
+        }
+
+        SearchRequest searchRequest = searchRequestBuiler.build();
 
         List<org.springframework.ai.document.Document> relevantDocs = vectorStore.similaritySearch(searchRequest);
         log.info("Found {} relevant documents for RAG", relevantDocs.size());
@@ -121,7 +128,7 @@ public class RAGService {
     /**
      * Generate answer using RAG + Chat Memory + Streaming
      */
-    public Flux<String> generateAnswerStream(Long conversationId, String question, String userId) {
+    public Flux<String> generateAnswerStream(Long conversationId, String question, String userId, RAGQueryPayload.UserPermissionContext permissions) {
         log.info("Generating RAG answer (with memory) for: {}", question);
         long startTime = System.currentTimeMillis();
 
@@ -133,11 +140,18 @@ public class RAGService {
             }
 
             // 2. Vector Search
-            SearchRequest searchRequest = SearchRequest.builder()
+            SearchRequest.Builder searchRequestBuiler = SearchRequest.builder()
                     .query(question)
                     .topK(TOP_K)
-                    .similarityThreshold(SIMILARITY_THRESHOLD)
-                    .build();
+                    .similarityThreshold(SIMILARITY_THRESHOLD);
+
+            String filterExpr = buildFilterExpression(permissions, userId);
+            if (filterExpr != null && !filterExpr.trim().isEmpty()) {
+                log.info("Applying RAG metadata filter expression for stream: {}", filterExpr);
+                searchRequestBuiler.filterExpression(filterExpr);
+            }
+
+            SearchRequest searchRequest = searchRequestBuiler.build();
 
             List<org.springframework.ai.document.Document> relevantDocs = vectorStore.similaritySearch(searchRequest);
 
@@ -281,6 +295,69 @@ public class RAGService {
                 
                 Trả về JSON duy nhất.
                 """.formatted(context, question);
+    }
+
+    private String buildFilterExpression(RAGQueryPayload.UserPermissionContext context, String userId) {
+        if (context == null) {
+            return "collectionId == 'none'";
+        }
+
+        // 1. If Super Admin or Admin, bypass filtering
+        List<String> roles = context.getRoles();
+        Integer roleLevel = context.getRoleLevel();
+        boolean isAdmin = false;
+        if (roles != null) {
+            if (roles.contains("SUPER_ADMIN") || roles.contains("ADMIN") || roles.contains("ORG_ADMIN")) {
+                isAdmin = true;
+            }
+        }
+        if (roleLevel != null && roleLevel <= 1) {
+            isAdmin = true;
+        }
+
+        if (isAdmin) {
+            return ""; // Access all documents
+        }
+
+        // 2. Check if user is Guest
+        boolean isGuest = false;
+        if (roles != null && roles.contains("EXTERNAL_GUEST")) {
+            isGuest = true;
+        }
+        if (roleLevel != null && roleLevel >= 6) {
+            isGuest = true;
+        }
+
+        if (isGuest) {
+            // Guest can only access PUBLIC documents
+            return "classification == 'PUBLIC' || securityClassification == 'PUBLIC'";
+        }
+
+        // 3. Normal Employee / Manager
+        List<String> collections = context.getAccessibleCollections();
+        StringBuilder filter = new StringBuilder();
+
+        // Standard classifications accessible by default: PUBLIC and INTERNAL
+        filter.append("(classification == 'PUBLIC' || classification == 'INTERNAL' || securityClassification == 'PUBLIC' || securityClassification == 'INTERNAL')");
+
+        // Collections they have explicit access to (e.g. CONFIDENTIAL/RESTRICTED collections)
+        if (collections != null && !collections.isEmpty()) {
+            filter.append(" || collectionId in [");
+            for (int i = 0; i < collections.size(); i++) {
+                filter.append("'").append(collections.get(i)).append("'");
+                if (i < collections.size() - 1) {
+                    filter.append(",");
+                }
+            }
+            filter.append("]");
+        }
+
+        // Documents they uploaded themselves
+        if (userId != null && !userId.trim().isEmpty()) {
+            filter.append(String.format(" || uploadedBy == '%s'", userId));
+        }
+
+        return filter.toString();
     }
 
     private String cleanResponse(String raw) {
