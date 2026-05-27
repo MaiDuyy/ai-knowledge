@@ -20,10 +20,14 @@ WORKDIR /app
 
 # Create a non-root user for security
 RUN addgroup -S spring && adduser -S spring -G spring
+
+# Create uploads directory and change ownership of /app to spring
+RUN mkdir -p /app/uploads && chown -R spring:spring /app
+
 USER spring
 
 # Copy the jar from builder stage
-COPY --from=builder /app/target/*.jar app.jar
+COPY --chown=spring:spring --from=builder /app/target/*.jar app.jar
 
 # Expose the application port
 EXPOSE 8080
