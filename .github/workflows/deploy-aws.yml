@@ -90,3 +90,8 @@ jobs:
 
           # Housekeeping: prune old dangling images
           docker image prune -f
+
+          docker exec ott-nginx-prod nginx -t
+          
+          docker exec ott-nginx-prod nginx -s reload
+

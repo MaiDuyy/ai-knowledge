@@ -144,9 +144,13 @@ public class ConversationService {
                 
                 Conversation conv = conversationRepository.findById(conversationId).orElse(null);
                 if (conv != null) {
-                    conv.setTitle(cleanTitle);
+                    String finalTitle = cleanTitle;
+                    if (conv.getTitle() != null && conv.getTitle().startsWith("Agent")) {
+                        finalTitle = "Agent — " + cleanTitle;
+                    }
+                    conv.setTitle(finalTitle);
                     conversationRepository.save(conv);
-                    log.info("Updated conversation {} title to: {}", conversationId, cleanTitle);
+                    log.info("Updated conversation {} title to: {}", conversationId, finalTitle);
                 }
             }
         } catch (Exception e) {
