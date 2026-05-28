@@ -1,11 +1,12 @@
 package com.security.security.config;
 
 import com.security.security.client.MessagingServiceClient;
+import com.security.security.entity.WikiPageDraft;
+import com.security.security.repository.WikiPageDraftRepository;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
-import org.springframework.stereotype.Component;
 import com.security.security.repository.WikiPageRepository;
 import com.security.security.entity.WikiPage;
 
@@ -23,13 +24,23 @@ public class AgentToolConfig {
     private final VectorStore vectorStore;
     private final MessagingServiceClient messagingClient;
     private final WikiPageRepository wikiPageRepository;
+    private final WikiPageDraftRepository wikiPageDraftRepository;
     private final String userId;
+    private final String workspaceId;
 
-    public AgentToolConfig(VectorStore vectorStore, MessagingServiceClient messagingClient, WikiPageRepository wikiPageRepository, String userId) {
+    public AgentToolConfig(
+            VectorStore vectorStore,
+            MessagingServiceClient messagingClient,
+            WikiPageRepository wikiPageRepository,
+            WikiPageDraftRepository wikiPageDraftRepository,
+            String userId,
+            String workspaceId) {
         this.vectorStore = vectorStore;
         this.messagingClient = messagingClient;
         this.wikiPageRepository = wikiPageRepository;
+        this.wikiPageDraftRepository = wikiPageDraftRepository;
         this.userId = userId;
+        this.workspaceId = workspaceId;
     }
 
     public record KnowledgeSearchInput(String query) {}
@@ -74,20 +85,75 @@ public class AgentToolConfig {
         return new SummarizeChatOutput(joined, messages.size());
     }
 
-    public record CreateTaskInput(String chatId, String title, String description) {}
+    public record CreateTaskInput(
+            String chatId,
+            String title,
+            String description,
+            String deadlineAt,
+            List<String> assigneeIds
+    ) {}
     public record CreateTaskOutput(boolean success, String taskId, String message) {}
 
-    @Tool(name = "createTask", description = "Create a new task in the current chat.")
+    @Tool(name = "createTask", description = "Create a new task in the current chat conversation. You can optionally specify deadlineAt (ISO 8601 string) and assigneeIds (list of account IDs from getChatInfo).")
     public CreateTaskOutput createTask(CreateTaskInput input) {
         log.info("[Agent Tool] createTask: chatId='{}', title='{}', userId='{}'", input.chatId(), input.title(), userId);
         if (input.chatId() == null || input.chatId().isBlank()) {
             return new CreateTaskOutput(false, null, "Không thể tạo task: không có chatId.");
         }
-        String taskId = messagingClient.createTask(input.chatId(), input.title(), input.description(), userId);
-        if (taskId != null) {
+        Map<String, Object> result = messagingClient.createTask(
+                input.chatId(),
+                input.title(),
+                input.description(),
+                input.deadlineAt(),
+                input.assigneeIds(),
+                userId
+        );
+        boolean success = (Boolean) result.getOrDefault("success", false);
+        String taskId = (String) result.getOrDefault("taskId", "");
+        String message = (String) result.getOrDefault("message", "Không thể tạo task.");
+
+        if (success) {
             return new CreateTaskOutput(true, taskId, "✅ Task \"" + input.title() + "\" đã được tạo thành công.");
         }
-        return new CreateTaskOutput(false, null, "Không thể tạo task. Vui lòng thử lại.");
+        return new CreateTaskOutput(false, null, "❌ Không thể tạo task: " + message);
+    }
+
+    public record CreatePollInput(
+            String chatId,
+            String title,
+            List<String> options,
+            String endsAt
+    ) {}
+    public record CreatePollOutput(boolean success, String pollId, String message) {}
+
+    @Tool(name = "createPoll", description = "Create a new poll/survey in the current chat room. The poll has a title and a list of options (at least 2 options, up to 10). The parameter 'endsAt' (ISO 8601 string) is strictly optional. Only provide endsAt if the user explicitly requested a specific end time (e.g., 'in 10 minutes', 'until tomorrow'). If the user did not mention any deadline, leave endsAt null or empty so the poll stays open indefinitely. NEVER set endsAt to the current time.")
+    public CreatePollOutput createPoll(CreatePollInput input) {
+        log.info("[Agent Tool] createPoll: chatId='{}', title='{}', userId='{}'", input.chatId(), input.title(), userId);
+        if (input.chatId() == null || input.chatId().isBlank()) {
+            return new CreatePollOutput(false, null, "Không thể tạo cuộc bình chọn: không có chatId.");
+        }
+        if (input.title() == null || input.title().isBlank()) {
+            return new CreatePollOutput(false, null, "Không thể tạo cuộc bình chọn: tiêu đề trống.");
+        }
+        if (input.options() == null || input.options().size() < 2) {
+            return new CreatePollOutput(false, null, "Không thể tạo cuộc bình chọn: phải có ít nhất 2 lựa chọn.");
+        }
+
+        Map<String, Object> result = messagingClient.createPoll(
+                input.chatId(),
+                input.title(),
+                input.options(),
+                input.endsAt(),
+                userId
+        );
+        boolean success = (Boolean) result.getOrDefault("success", false);
+        String pollId = (String) result.getOrDefault("pollId", "");
+        String message = (String) result.getOrDefault("message", "Không thể tạo cuộc bình chọn.");
+
+        if (success) {
+            return new CreatePollOutput(true, pollId, "✅ Cuộc bình chọn \"" + input.title() + "\" đã được tạo thành công.");
+        }
+        return new CreatePollOutput(false, null, "❌ Không thể tạo cuộc bình chọn: " + message);
     }
 
     public record GetChatInfoInput(String chatId) {}
@@ -145,47 +211,163 @@ public class AgentToolConfig {
     @Tool(name = "list_wiki_pages", description = "List all available Wiki pages in the workspace.")
     public ListWikiPagesOutput listWikiPages(ListWikiPagesInput input) {
         log.info("[Agent Tool] listWikiPages: workspaceId={}", input.workspaceId());
-        String wsId = input.workspaceId() != null ? input.workspaceId() : "default-workspace";
+        String wsId = input.workspaceId() != null && !input.workspaceId().isBlank()
+                ? input.workspaceId()
+                : (this.workspaceId != null && !this.workspaceId.isBlank() ? this.workspaceId : "default-workspace");
         List<String> pages = wikiPageRepository.findByWorkspaceId(wsId).stream()
                 .map(p -> String.format("ID: %d | Title: %s", p.getId(), p.getTitle()))
                 .collect(Collectors.toList());
         return new ListWikiPagesOutput(pages);
     }
 
-    public record CreateWikiPageInput(String title, String content, String tags, String workspaceId) {}
-    public record CreateWikiPageOutput(boolean success, Long id, String message) {}
+    public record CreateWikiPageInput(String title, String content, String tags, String workspaceId, String note) {}
+    public record CreateWikiPageOutput(boolean success, Long draftId, String message) {}
 
-    @Tool(name = "create_wiki_page", description = "Create a new Knowledge Wiki page.")
+    @Tool(name = "create_wiki_page", description = "Propose a new Knowledge Wiki page. This always creates a PENDING draft that requires admin approval before being published. Never directly publishes content.")
     public CreateWikiPageOutput createWikiPage(CreateWikiPageInput input) {
-        log.info("[Agent Tool] createWikiPage: title='{}'", input.title());
+        log.info("[Agent Tool] createWikiPage (draft): title='{}', userId='{}'", input.title(), userId);
         try {
-            WikiPage page = WikiPage.builder()
+            String wsId = input.workspaceId() != null && !input.workspaceId().isBlank()
+                    ? input.workspaceId()
+                    : (this.workspaceId != null && !this.workspaceId.isBlank() ? this.workspaceId : "default-workspace");
+
+            // Generate a slug from title (simple ASCII-safe slugify)
+            String slug = input.title().toLowerCase()
+                    .replaceAll("[^a-z0-9\\s-]", "")
+                    .replaceAll("\\s+", "-")
+                    .replaceAll("-+", "-")
+                    .trim();
+
+            // Create a draft (PENDING) — never publish directly
+            WikiPageDraft draft = WikiPageDraft.builder()
                     .title(input.title())
+                    .slug(slug)
                     .content(input.content())
                     .tags(input.tags())
-                    .workspaceId(input.workspaceId() != null ? input.workspaceId() : "default-workspace")
+                    .workspaceId(wsId)
+                    .authorId(userId)
                     .pageType("concept")
+                    .status("PENDING")
+                    .note(input.note() != null ? input.note() : "Đề xuất từ AI Agent")
                     .build();
-            WikiPage saved = wikiPageRepository.save(page);
-            return new CreateWikiPageOutput(true, saved.getId(), "Tạo trang wiki thành công");
+
+            WikiPageDraft saved = wikiPageDraftRepository.save(draft);
+            return new CreateWikiPageOutput(true, saved.getId(),
+                    "Bản thảo wiki \"" + input.title() + "\" đã được gửi chờ Admin phê duyệt (Draft ID: " + saved.getId() + ").");
         } catch (Exception e) {
-            log.error("[Agent Tool] createWikiPage error", e);
-            return new CreateWikiPageOutput(false, null, "Lỗi khi tạo trang wiki: " + e.getMessage());
+            log.error("[Agent Tool] createWikiPage draft error", e);
+            return new CreateWikiPageOutput(false, null, "Lỗi khi tạo bản thảo wiki: " + e.getMessage());
         }
     }
 
-    public record EditWikiPageInput(Long id, String title, String content, String tags) {}
-    public record EditWikiPageOutput(boolean success, String message) {}
+    public record EditWikiPageInput(Long id, String title, String content, String tags, String note) {}
+    public record EditWikiPageOutput(boolean success, Long draftId, String message) {}
 
-    @Tool(name = "edit_wiki_page", description = "Edit an existing Knowledge Wiki page.")
+    @Tool(name = "edit_wiki_page", description = "Propose an edit to an existing Knowledge Wiki page by its ID. This always creates a PENDING draft for admin review, not a direct edit.")
     public EditWikiPageOutput editWikiPage(EditWikiPageInput input) {
-        log.info("[Agent Tool] editWikiPage: id={}", input.id());
+        log.info("[Agent Tool] editWikiPage (draft): id={}, userId='{}'", input.id(), userId);
         return wikiPageRepository.findById(input.id()).map(page -> {
-            if (input.title() != null) page.setTitle(input.title());
-            if (input.content() != null) page.setContent(input.content());
-            if (input.tags() != null) page.setTags(input.tags());
-            wikiPageRepository.save(page);
-            return new EditWikiPageOutput(true, "Cập nhật trang wiki thành công");
-        }).orElse(new EditWikiPageOutput(false, "Không tìm thấy trang wiki để cập nhật"));
+            try {
+                // Build draft based on current page, applying requested changes
+                WikiPageDraft draft = WikiPageDraft.builder()
+                        .wikiPageId(page.getId())
+                        .slug(page.getSlug())
+                        .title(input.title() != null ? input.title() : page.getTitle())
+                        .content(input.content() != null ? input.content() : page.getContent())
+                        .tags(input.tags() != null ? input.tags() : page.getTags())
+                        .workspaceId(page.getWorkspaceId())
+                        .pageType(page.getPageType())
+                        .authorId(userId)
+                        .status("PENDING")
+                        .baseVersion(page.getVersion())
+                        .note(input.note() != null ? input.note() : "Chỉnh sửa đề xuất từ AI Agent")
+                        .build();
+
+                WikiPageDraft saved = wikiPageDraftRepository.save(draft);
+                return new EditWikiPageOutput(true, saved.getId(),
+                        "Bản thảo chỉnh sửa trang \"" + page.getTitle() + "\" đã gửi chờ Admin phê duyệt (Draft ID: " + saved.getId() + ").");
+            } catch (Exception e) {
+                log.error("[Agent Tool] editWikiPage draft error", e);
+                return new EditWikiPageOutput(false, null, "Lỗi khi tạo bản thảo chỉnh sửa: " + e.getMessage());
+            }
+        }).orElse(new EditWikiPageOutput(false, null, "Không tìm thấy trang wiki với ID: " + input.id()));
+    }
+
+    public record ListTasksInput(String chatId) {}
+    public record ListTasksOutput(boolean success, List<Map<String, Object>> tasks, String message) {}
+
+    @Tool(name = "listTasks", description = "Get the list of all active plans/tasks in the current chat room.")
+    public ListTasksOutput listTasks(ListTasksInput input) {
+        log.info("[Agent Tool] listTasks: chatId='{}'", input.chatId());
+        if (input.chatId() == null || input.chatId().isBlank()) {
+            return new ListTasksOutput(false, List.of(), "Không thể lấy danh sách task: không có chatId.");
+        }
+        List<Map<String, Object>> tasks = messagingClient.getTasks(input.chatId(), userId);
+        return new ListTasksOutput(true, tasks, "Thành công");
+    }
+
+    public record UpdateTaskStatusInput(String taskId, String status, String chatId) {}
+    public record UpdateTaskStatusOutput(boolean success, String message) {}
+
+    @Tool(name = "updateTaskStatus", description = "Update the status of a specific task. Allowed status values: TODO, IN_PROGRESS, DONE, CANCELLED.")
+    public UpdateTaskStatusOutput updateTaskStatus(UpdateTaskStatusInput input) {
+        log.info("[Agent Tool] updateTaskStatus: taskId='{}', status='{}', chatId='{}'", input.taskId(), input.status(), input.chatId());
+        if (input.taskId() == null || input.taskId().isBlank()) {
+            return new UpdateTaskStatusOutput(false, "Không thể cập nhật task: không có taskId.");
+        }
+        if (input.status() == null || input.status().isBlank()) {
+            return new UpdateTaskStatusOutput(false, "Không thể cập nhật task: trạng thái mới trống.");
+        }
+        Map<String, Object> res = messagingClient.updateTaskStatus(input.taskId(), input.status().toUpperCase(), input.chatId(), userId);
+        boolean success = (Boolean) res.getOrDefault("success", false);
+        String msg = (String) res.getOrDefault("message", "Lỗi không xác định.");
+
+        return new UpdateTaskStatusOutput(success, msg);
+    }
+
+    public record TogglePinMessageInput(String messageId) {}
+    public record TogglePinMessageOutput(boolean success, boolean pin, String message) {}
+
+    @Tool(name = "togglePinMessage", description = "Toggle pin state of a specific message (pins if unpinned, unpins if pinned) by its unique messageId.")
+    public TogglePinMessageOutput togglePinMessage(TogglePinMessageInput input) {
+        log.info("[Agent Tool] togglePinMessage: messageId='{}', userId='{}'", input.messageId(), userId);
+        if (input.messageId() == null || input.messageId().isBlank()) {
+            return new TogglePinMessageOutput(false, false, "Không thể ghim tin nhắn: không có messageId.");
+        }
+        Map<String, Object> result = messagingClient.togglePinMessage(input.messageId(), userId);
+        boolean success = (Boolean) result.getOrDefault("success", false);
+        boolean pin = (Boolean) result.getOrDefault("pin", false);
+        String message = (String) result.getOrDefault("message", "Lỗi xử lý.");
+
+        return new TogglePinMessageOutput(success, pin, message);
+    }
+
+    public record GetPinnedMessagesInput(String chatId) {}
+    public record GetPinnedMessagesOutput(boolean success, List<Map<String, Object>> pinnedMessages, String message) {}
+
+    @Tool(name = "getPinnedMessages", description = "Get list of all pinned/important messages in the current chat room.")
+    public GetPinnedMessagesOutput getPinnedMessages(GetPinnedMessagesInput input) {
+        log.info("[Agent Tool] getPinnedMessages: chatId='{}'", input.chatId());
+        if (input.chatId() == null || input.chatId().isBlank()) {
+            return new GetPinnedMessagesOutput(false, List.of(), "Không thể lấy tin nhắn ghim: không có chatId.");
+        }
+        List<Map<String, Object>> messages = messagingClient.getPinnedMessages(input.chatId(), userId);
+        return new GetPinnedMessagesOutput(true, messages, "Thành công");
+    }
+
+    public record SearchMessagesInput(String chatId, String query) {}
+    public record SearchMessagesOutput(boolean success, List<Map<String, Object>> messages, String message) {}
+
+    @Tool(name = "searchMessages", description = "Search chat history messages in the current chat room by keyword query.")
+    public SearchMessagesOutput searchMessages(SearchMessagesInput input) {
+        log.info("[Agent Tool] searchMessages: chatId='{}', query='{}'", input.chatId(), input.query());
+        if (input.chatId() == null || input.chatId().isBlank()) {
+            return new SearchMessagesOutput(false, List.of(), "Không thể tìm kiếm: không có chatId.");
+        }
+        if (input.query() == null || input.query().isBlank()) {
+            return new SearchMessagesOutput(false, List.of(), "Không thể tìm kiếm: từ khóa trống.");
+        }
+        List<Map<String, Object>> messages = messagingClient.searchMessages(input.chatId(), input.query(), userId);
+        return new SearchMessagesOutput(true, messages, "Thành công");
     }
 }
