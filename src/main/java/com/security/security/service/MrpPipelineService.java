@@ -472,6 +472,11 @@ public class MrpPipelineService {
                         .sourceDocumentId(documentId)
                         .build());
 
+        // Copy security attributes from Document
+        plan.setDepartmentId(doc.getDepartmentId());
+        plan.setAllowedRoles(doc.getAllowedRoles() != null ? doc.getAllowedRoles() : "ALL");
+        plan.setSecurityClassification(doc.getSecurityClassification() != null ? doc.getSecurityClassification() : "INTERNAL");
+
         plan.setPlanJson(planJson);
         plan.setStatus(autoApprove ? "APPROVED" : "PENDING_REVIEW");
         sourceCompilationPlanRepository.save(plan);
@@ -700,6 +705,9 @@ public class MrpPipelineService {
                         .content(generatedContent)
                         .summary(String.format("Compiled from document ID: %d", plan.getSourceDocumentId()))
                         .workspaceId(finalWorkspaceId)
+                        .departmentId(plan.getDepartmentId())
+                        .allowedRoles(plan.getAllowedRoles() != null ? plan.getAllowedRoles() : "ALL")
+                        .securityClassification(plan.getSecurityClassification() != null ? plan.getSecurityClassification() : "INTERNAL")
                         .authorId(userId)
                         .status("PENDING")
                         .baseVersion(baseVersion)

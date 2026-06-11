@@ -81,12 +81,18 @@ public class DocumentService {
 
     @Transactional
     public DocumentUploadResponse uploadDocument(MultipartFile file, String userId, Boolean preview, String parser) {
-        return uploadDocument(file, userId, preview, parser, null);
+        return uploadDocument(file, userId, preview, parser, null, null, null, null);
     }
 
     @Transactional
     public DocumentUploadResponse uploadDocument(MultipartFile file, String userId, Boolean preview, String parser, String workspaceId) {
-        log.info("Uploading document for user: {}, preview: {}, parser: {}, workspaceId: {}", userId, preview, parser, workspaceId);
+        return uploadDocument(file, userId, preview, parser, workspaceId, null, null, null);
+    }
+
+    @Transactional
+    public DocumentUploadResponse uploadDocument(MultipartFile file, String userId, Boolean preview, String parser, String workspaceId, String departmentId, String allowedRoles, String securityClassification) {
+        log.info("Uploading document for user: {}, preview: {}, parser: {}, workspaceId: {}, departmentId: {}, allowedRoles: {}, classification: {}", 
+                userId, preview, parser, workspaceId, departmentId, allowedRoles, securityClassification);
 
         String resolvedWorkspaceId = workspaceId;
         if (resolvedWorkspaceId == null || resolvedWorkspaceId.trim().isEmpty() || "all".equalsIgnoreCase(resolvedWorkspaceId.trim())) {
@@ -154,6 +160,9 @@ public class DocumentService {
                     .status(isPreview ? DocStatus.PREVIEW : DocStatus.PENDING)
                     .chunkCount(0)
                     .parserMethod(parser != null ? parser : "gemini")
+                    .departmentId(departmentId)
+                    .allowedRoles(allowedRoles != null && !allowedRoles.isBlank() ? allowedRoles : "ALL")
+                    .securityClassification(securityClassification != null && !securityClassification.isBlank() ? securityClassification : "INTERNAL")
                     .build();
 
             if (isPreview) {
@@ -550,6 +559,9 @@ public class DocumentService {
                 meta.put("classification", document.getSecurityClassification());
                 meta.put("securityClassification", document.getSecurityClassification());
                 meta.put("uploadedBy", document.getUserId());
+                meta.put("workspaceId", document.getWorkspaceId() != null ? document.getWorkspaceId() : "");
+                meta.put("departmentId", document.getDepartmentId() != null ? document.getDepartmentId() : "");
+                meta.put("allowedRoles", document.getAllowedRoles() != null ? document.getAllowedRoles() : "ALL");
 
                 vBatch.add(new org.springframework.ai.document.Document(cr.text(), meta));
                 eBatch.add(Embedding.builder()
@@ -620,7 +632,7 @@ public class DocumentService {
     }
 
     @Transactional
-    public Document updateDocumentMetadata(Long id, String securityClassification, List<String> tags, String userId) {
+    public Document updateDocumentMetadata(Long id, String securityClassification, String departmentId, String allowedRoles, List<String> tags, String userId) {
         log.info("Updating metadata for document {} by user {}", id, userId);
         Document document = documentRepository.findById(id)
                 .orElseThrow(() -> new ApiException("Document not found"));
@@ -631,6 +643,12 @@ public class DocumentService {
 
         if (securityClassification != null) {
             document.setSecurityClassification(securityClassification);
+        }
+        if (departmentId != null) {
+            document.setDepartmentId(departmentId);
+        }
+        if (allowedRoles != null) {
+            document.setAllowedRoles(allowedRoles);
         }
         if (tags != null) {
             document.setTags(tags);

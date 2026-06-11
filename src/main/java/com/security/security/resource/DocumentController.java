@@ -40,11 +40,14 @@ public class DocumentController {
             @RequestParam(value = "preview", required = false) Boolean preview,
             @RequestParam(value = "parser", required = false, defaultValue = "gemini") String parser,
             @RequestParam(value = "workspaceId", required = false) String workspaceIdParam,
+            @RequestParam(value = "departmentId", required = false) String departmentId,
+            @RequestParam(value = "allowedRoles", required = false) String allowedRoles,
+            @RequestParam(value = "securityClassification", required = false) String securityClassification,
             @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
             @RequestHeader(value = "x-workspace-id", required = false) String workspaceIdHeader) throws IOException {
         // Resolve workspaceId: query param takes priority over header
         String workspaceId = (workspaceIdParam != null && !workspaceIdParam.isBlank()) ? workspaceIdParam : workspaceIdHeader;
-        DocumentUploadResponse response = documentService.uploadDocument(file, userId, preview, parser, workspaceId);
+        DocumentUploadResponse response = documentService.uploadDocument(file, userId, preview, parser, workspaceId, departmentId, allowedRoles, securityClassification);
 
         return ResponseEntity.accepted().body(response);
     }
@@ -222,7 +225,7 @@ public class DocumentController {
     }
 
     /**
-     * Update document metadata (security classification, tags)
+     * Update document metadata (security classification, departmentId, allowedRoles, tags)
      */
     @PatchMapping("/{id}/metadata")
     public ResponseEntity<Document> updateMetadata(
@@ -230,8 +233,10 @@ public class DocumentController {
             @RequestBody Map<String, Object> payload,
             @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) {
         String securityClassification = (String) payload.get("securityClassification");
+        String departmentId = (String) payload.get("departmentId");
+        String allowedRoles = (String) payload.get("allowedRoles");
         List<String> tags = (List<String>) payload.get("tags");
-        Document doc = documentService.updateDocumentMetadata(id, securityClassification, tags, userId);
+        Document doc = documentService.updateDocumentMetadata(id, securityClassification, departmentId, allowedRoles, tags, userId);
         return ResponseEntity.ok(doc);
     }
 

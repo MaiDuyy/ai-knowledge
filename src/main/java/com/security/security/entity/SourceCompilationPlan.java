@@ -37,6 +37,17 @@ public class SourceCompilationPlan {
     @Column(name = "reviewed_by", length = 100)
     private String reviewedBy;
 
+    @Column(name = "department_id", length = 100)
+    private String departmentId;
+
+    @Column(name = "allowed_roles", length = 100)
+    @Builder.Default
+    private String allowedRoles = "ALL"; // ALL, HEAD, MEMBER
+
+    @Column(name = "security_classification", length = 50)
+    @Builder.Default
+    private String securityClassification = "INTERNAL"; // PUBLIC, INTERNAL, CONFIDENTIAL, RESTRICTED
+
     @Column(name = "review_note", columnDefinition = "TEXT")
     private String reviewNote;
 

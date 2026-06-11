@@ -83,6 +83,9 @@ public class WikiDraftService {
             targetPage.setTags(draft.getTags());
             targetPage.setPageType(draft.getPageType());
             targetPage.setSummary(draft.getSummary());
+            targetPage.setDepartmentId(draft.getDepartmentId());
+            targetPage.setAllowedRoles(draft.getAllowedRoles() != null ? draft.getAllowedRoles() : "ALL");
+            targetPage.setSecurityClassification(draft.getSecurityClassification() != null ? draft.getSecurityClassification() : "INTERNAL");
             
             // JPA handles @Version increments automatically
             targetPage = wikiPageRepository.save(targetPage);
@@ -112,6 +115,9 @@ public class WikiDraftService {
                 targetPage.setTags(draft.getTags());
                 targetPage.setPageType(draft.getPageType());
                 targetPage.setSummary(draft.getSummary());
+                targetPage.setDepartmentId(draft.getDepartmentId());
+                targetPage.setAllowedRoles(draft.getAllowedRoles() != null ? draft.getAllowedRoles() : "ALL");
+                targetPage.setSecurityClassification(draft.getSecurityClassification() != null ? draft.getSecurityClassification() : "INTERNAL");
                 targetPage = wikiPageRepository.save(targetPage);
                 
                 try {
@@ -128,6 +134,9 @@ public class WikiDraftService {
                         .content(draft.getContent())
                         .tags(draft.getTags())
                         .workspaceId(draft.getWorkspaceId())
+                        .departmentId(draft.getDepartmentId())
+                        .allowedRoles(draft.getAllowedRoles() != null ? draft.getAllowedRoles() : "ALL")
+                        .securityClassification(draft.getSecurityClassification() != null ? draft.getSecurityClassification() : "INTERNAL")
                         .pageType(draft.getPageType())
                         .summary(draft.getSummary())
                         .build();
@@ -144,6 +153,10 @@ public class WikiDraftService {
                     Map.of(
                             "wikiPageId", targetPage.getId().toString(),
                             "workspaceId", targetPage.getWorkspaceId() != null ? targetPage.getWorkspaceId() : "",
+                            "departmentId", targetPage.getDepartmentId() != null ? targetPage.getDepartmentId() : "",
+                            "allowedRoles", targetPage.getAllowedRoles() != null ? targetPage.getAllowedRoles() : "ALL",
+                            "classification", targetPage.getSecurityClassification() != null ? targetPage.getSecurityClassification() : "INTERNAL",
+                            "securityClassification", targetPage.getSecurityClassification() != null ? targetPage.getSecurityClassification() : "INTERNAL",
                             "type", "wiki"
                     )
             );
