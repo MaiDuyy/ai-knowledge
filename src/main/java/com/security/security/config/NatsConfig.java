@@ -5,10 +5,16 @@ import io.nats.client.Nats;
 import io.nats.client.Options;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import com.security.security.event.NatsConnectedEvent;
 
 import java.io.IOException;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.time.Duration;
 
 @Configuration
@@ -18,8 +24,10 @@ public class NatsConfig {
     @Value("${nats.url:nats://localhost:4222}")
     private String natsUrl;
 
+    private volatile Connection delegate = null;
+
     @Bean
-    public Connection natsConnection() throws IOException, InterruptedException {
+    public Connection natsConnection(ApplicationEventPublisher eventPublisher) {
         Options options = new Options.Builder()
                 .server(natsUrl)
                 .connectionName("ai-knowledge-service")
@@ -44,17 +52,73 @@ public class NatsConfig {
         try {
             Connection conn = Nats.connect(options);
             log.info("[NATS] Connected to {}", natsUrl);
-            return conn;
+            delegate = conn;
         } catch (Exception e) {
-            log.warn("[NATS] Could not connect to {} — document events will not be received. Cause: {}",
+            log.warn("[NATS] Could not connect to {} on startup — will retry in background. Cause: {}",
                     natsUrl, e.getMessage());
-            // Return a disconnected connection instead of failing startup
-            // ai-knowledge can still serve requests without NATS
-            return Nats.connect(new Options.Builder()
-                    .server(natsUrl)
-                    .maxReconnects(-1)
-                    .reconnectWait(Duration.ofSeconds(5))
-                    .build());
+            startConnectionRetry(options, eventPublisher);
         }
+
+        return (Connection) Proxy.newProxyInstance(
+                NatsConfig.class.getClassLoader(),
+                new Class<?>[]{Connection.class},
+                new InvocationHandler() {
+                    @Override
+                    public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+                        if (method.getName().equals("getStatus")) {
+                            return delegate != null ? delegate.getStatus() : Connection.Status.DISCONNECTED;
+                        }
+                        if (method.getName().equals("close")) {
+                            if (delegate != null) {
+                                delegate.close();
+                            }
+                            return null;
+                        }
+                        if (method.getName().equals("equals")) {
+                            return proxy == args[0];
+                        }
+                        if (method.getName().equals("hashCode")) {
+                            return System.identityHashCode(proxy);
+                        }
+                        if (method.getName().equals("toString")) {
+                            return "NatsConnectionProxy[delegate=" + (delegate != null ? delegate.toString() : "null") + "]";
+                        }
+                        if (delegate == null) {
+                            throw new IllegalStateException("NATS connection is not established yet");
+                        }
+                        try {
+                            return method.invoke(delegate, args);
+                        } catch (InvocationTargetException e) {
+                            throw e.getTargetException();
+                        }
+                    }
+                }
+        );
+    }
+
+    private void startConnectionRetry(Options options, ApplicationEventPublisher eventPublisher) {
+        Thread thread = new Thread(() -> {
+            while (delegate == null) {
+                try {
+                    log.info("[NATS] Attempting to connect to NATS in background...");
+                    Connection conn = Nats.connect(options);
+                    delegate = conn;
+                    log.info("[NATS] Successfully connected to NATS at {}", natsUrl);
+                    eventPublisher.publishEvent(new NatsConnectedEvent(this, conn));
+                } catch (Exception e) {
+                    log.debug("[NATS] Background connection attempt failed. Retrying in 5 seconds...");
+                    try {
+                        Thread.sleep(5000);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+            }
+        });
+        thread.setName("nats-connection-retry");
+        thread.setDaemon(true);
+        thread.start();
     }
 }
+

@@ -80,14 +80,25 @@ public class NatsDocumentSubscriber {
     private Dispatcher dispatcher;
 
     @PostConstruct
-    public void subscribe() {
+    public synchronized void subscribe() {
+        if (dispatcher != null) {
+            log.info("[NATS] Already subscribed to subject: {}", SUBJECT);
+            return;
+        }
         try {
             dispatcher = natsConnection.createDispatcher(this::handleMessage);
             dispatcher.subscribe(SUBJECT);
             log.info("[NATS] Subscribed to subject: {}", SUBJECT);
         } catch (Exception e) {
             log.warn("[NATS] Could not subscribe to '{}' — will retry on reconnect. Cause: {}", SUBJECT, e.getMessage());
+            dispatcher = null;
         }
+    }
+
+    @org.springframework.context.event.EventListener
+    public void onNatsConnected(NatsConnectedEvent event) {
+        log.info("[NATS] Received NatsConnectedEvent, triggering subscription...");
+        subscribe();
     }
 
     @PreDestroy
