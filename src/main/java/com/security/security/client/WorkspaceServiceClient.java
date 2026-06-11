@@ -37,6 +37,11 @@ public class WorkspaceServiceClient {
      * Get workspace metadata and check if the user has access.
      * Returns a Map containing workspace details, or an empty Map if access is denied or workspace is not found.
      */
+    @org.springframework.cache.annotation.Cacheable(
+            value = "workspaceDepartment",
+            key = "#workspaceId",
+            unless = "#result == null || #result.isEmpty()"
+    )
     public Map<String, Object> getWorkspace(String workspaceId, String userId) {
         try {
             String url = messagingBaseUrl + "/workspaces/" + workspaceId;
@@ -59,7 +64,8 @@ public class WorkspaceServiceClient {
                     "id", workspace.path("id").asText(""),
                     "name", workspace.path("name").asText(""),
                     "slug", workspace.path("slug").asText(""),
-                    "isPublic", workspace.path("isPublic").asBoolean(false)
+                    "isPublic", workspace.path("isPublic").asBoolean(false),
+                    "departmentId", workspace.path("departmentId").asText("")
             );
         } catch (Exception e) {
             log.error("[WorkspaceServiceClient] Error fetching workspaceId={} for userId={}: {}", 

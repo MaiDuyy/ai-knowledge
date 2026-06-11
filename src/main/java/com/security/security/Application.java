@@ -9,6 +9,7 @@ import org.springframework.scheduling.annotation.EnableAsync;
 @SpringBootApplication
 @EnableJpaRepositories
 @EnableAsync
+@org.springframework.cache.annotation.EnableCaching
 public class Application {
 
 	public static void main(String[] args) {
