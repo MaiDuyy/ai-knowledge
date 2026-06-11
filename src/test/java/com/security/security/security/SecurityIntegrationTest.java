@@ -38,6 +38,9 @@ class SecurityIntegrationTest {
     @Autowired
     private WikiPageDraftRepository wikiPageDraftRepository;
 
+    @Autowired
+    private com.security.security.service.EmbeddingService embeddingService;
+
     @MockBean
     private WorkspaceServiceClient workspaceServiceClient;
 
@@ -259,5 +262,12 @@ class SecurityIntegrationTest {
                         .header("Origin", "http://localhost:3002")
                         .header("Access-Control-Request-Method", "GET"))
                 .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.header().string("Access-Control-Allow-Origin", "http://localhost:3002"));
+    }
+
+    @Test
+    @DisplayName("Should successfully load all chunks for a document without NullPointerException")
+    void whenGettingDocumentChunks_shouldNotThrowNullPointerException() {
+        java.util.List<String> chunks = embeddingService.getDocumentChunks(999L);
+        org.assertj.core.api.Assertions.assertThat(chunks).isEmpty();
     }
 }

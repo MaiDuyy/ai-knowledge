@@ -24,7 +24,7 @@ public class EmbeddingService {
 
     private final VectorStore vectorStore;
     private final EmbeddingModel embeddingModel;
-    private EmbeddingRepository embeddingRepository;
+    private final EmbeddingRepository embeddingRepository;
 
     /**
      * Store document chunks in VectorStore
