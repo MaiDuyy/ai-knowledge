@@ -52,6 +52,7 @@ public class NatsConfig {
         try {
             Connection conn = Nats.connect(options);
             log.info("[NATS] Connected to {}", natsUrl);
+            initializeStreams(conn);
             delegate = conn;
         } catch (Exception e) {
             log.warn("[NATS] Could not connect to {} on startup — will retry in background. Cause: {}",
@@ -96,12 +97,50 @@ public class NatsConfig {
         );
     }
 
+    private void initializeStreams(Connection conn) {
+        try {
+            log.info("[NATS] Initializing JetStream streams...");
+            io.nats.client.JetStreamManagement jsm = conn.jetStreamManagement();
+
+            // 1. FILE_EVENTS Stream
+            try {
+                jsm.getStreamInfo("FILE_EVENTS");
+                log.info("[NATS] Stream 'FILE_EVENTS' already exists.");
+            } catch (io.nats.client.JetStreamApiException e) {
+                io.nats.client.api.StreamConfiguration streamConfig = io.nats.client.api.StreamConfiguration.builder()
+                        .name("FILE_EVENTS")
+                        .subjects("file.document.uploaded")
+                        .storageType(io.nats.client.api.StorageType.File)
+                        .build();
+                jsm.addStream(streamConfig);
+                log.info("[NATS] Created JetStream stream 'FILE_EVENTS' for subject 'file.document.uploaded'");
+            }
+
+            // 2. AI_KNOWLEDGE_EVENTS Stream
+            try {
+                jsm.getStreamInfo("AI_KNOWLEDGE_EVENTS");
+                log.info("[NATS] Stream 'AI_KNOWLEDGE_EVENTS' already exists.");
+            } catch (io.nats.client.JetStreamApiException e) {
+                io.nats.client.api.StreamConfiguration streamConfig = io.nats.client.api.StreamConfiguration.builder()
+                        .name("AI_KNOWLEDGE_EVENTS")
+                        .subjects("document.status.updated", "compilation.plan.updated", "wiki.draft.updated")
+                        .storageType(io.nats.client.api.StorageType.File)
+                        .build();
+                jsm.addStream(streamConfig);
+                log.info("[NATS] Created JetStream stream 'AI_KNOWLEDGE_EVENTS'");
+            }
+        } catch (Exception e) {
+            log.warn("[NATS] Failed to initialize JetStream streams: {}", e.getMessage());
+        }
+    }
+
     private void startConnectionRetry(Options options, ApplicationEventPublisher eventPublisher) {
         Thread thread = new Thread(() -> {
             while (delegate == null) {
                 try {
                     log.info("[NATS] Attempting to connect to NATS in background...");
                     Connection conn = Nats.connect(options);
+                    initializeStreams(conn);
                     delegate = conn;
                     log.info("[NATS] Successfully connected to NATS at {}", natsUrl);
                     eventPublisher.publishEvent(new NatsConnectedEvent(this, conn));

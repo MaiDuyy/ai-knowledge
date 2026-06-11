@@ -18,9 +18,6 @@ public class NatsEventPublisher {
     private final Connection natsConnection;
     private final ObjectMapper objectMapper;
 
-    /**
-     * Publishes a NATS event wrapped in the standard envelope: { subject, payload, timestamp }
-     */
     public void publishEvent(String subject, Map<String, Object> payload) {
         if (natsConnection == null || natsConnection.getStatus() != Connection.Status.CONNECTED) {
             log.warn("[NATS Publisher] Skipping publish to subject '{}' because NATS is not connected", subject);
@@ -34,11 +31,15 @@ public class NatsEventPublisher {
             envelope.put("timestamp", Instant.now().toString());
 
             byte[] jsonBytes = objectMapper.writeValueAsBytes(envelope);
-            natsConnection.publish(subject, jsonBytes);
-            log.info("[NATS Publisher] Published event to subject '{}'", subject);
+            
+            // Publish via JetStream API
+            io.nats.client.JetStream js = natsConnection.jetStream();
+            js.publish(subject, jsonBytes);
+            
+            log.info("[NATS Publisher] Published JetStream event to subject '{}'", subject);
             log.debug("[NATS Publisher] Payload: {}", payload);
         } catch (Exception e) {
-            log.error("[NATS Publisher] Failed to publish event to subject '{}': {}", subject, e.getMessage(), e);
+            log.error("[NATS Publisher] Failed to publish JetStream event to subject '{}': {}", subject, e.getMessage(), e);
         }
     }
 

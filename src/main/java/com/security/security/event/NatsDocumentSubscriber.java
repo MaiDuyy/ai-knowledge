@@ -86,11 +86,18 @@ public class NatsDocumentSubscriber {
             return;
         }
         try {
-            dispatcher = natsConnection.createDispatcher(this::handleMessage);
-            dispatcher.subscribe(SUBJECT);
-            log.info("[NATS] Subscribed to subject: {}", SUBJECT);
+            // Create a dispatcher to handle messaging in background threads
+            dispatcher = natsConnection.createDispatcher(msg -> {});
+            
+            io.nats.client.JetStream js = natsConnection.jetStream();
+            io.nats.client.PushSubscribeOptions pushOptions = io.nats.client.PushSubscribeOptions.builder()
+                    .durable("ai-knowledge-document-subscriber")
+                    .build();
+            
+            js.subscribe(SUBJECT, dispatcher, this::handleMessage, false, pushOptions);
+            log.info("[NATS] Subscribed to JetStream subject: {} with durable consumer 'ai-knowledge-document-subscriber'", SUBJECT);
         } catch (Exception e) {
-            log.warn("[NATS] Could not subscribe to '{}' — will retry on reconnect. Cause: {}", SUBJECT, e.getMessage());
+            log.warn("[NATS] Could not subscribe to JetStream '{}' — will retry on reconnect. Cause: {}", SUBJECT, e.getMessage());
             dispatcher = null;
         }
     }
@@ -129,11 +136,13 @@ public class NatsDocumentSubscriber {
 
             if (url == null || url.isBlank()) {
                 log.warn("[NATS] Missing 'url' in payload, skipping");
+                msg.ack();
                 return;
             }
 
             if (!SUPPORTED_MIME_TYPES.contains(mimeType)) {
                 log.info("[NATS] Skipping unsupported mimeType: {}", mimeType);
+                msg.ack();
                 return;
             }
 
@@ -158,6 +167,7 @@ public class NatsDocumentSubscriber {
             // Trigger async RAG pipeline (same as direct upload)
             eventPublisher.publishEvent(new DocumentUploadedEvent(this, saved));
 
+            msg.ack();
         } catch (Exception e) {
             log.error("[NATS] Error processing message: {}", e.getMessage(), e);
         }
