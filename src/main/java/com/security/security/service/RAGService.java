@@ -302,7 +302,7 @@ public class RAGService {
             return "collectionId == 'none'";
         }
 
-        // 1. If Super Admin or Admin, bypass filtering
+        // 1. If Super Admin or Admin, bypass filtering (scoped by workspaceId)
         List<String> roles = context.getRoles();
         Integer roleLevel = context.getRoleLevel();
         boolean isAdmin = false;
@@ -315,8 +315,16 @@ public class RAGService {
             isAdmin = true;
         }
 
+        String resolvedWorkspaceId = context.getWorkspaceId();
+        if (resolvedWorkspaceId == null || resolvedWorkspaceId.trim().isEmpty() || "all".equalsIgnoreCase(resolvedWorkspaceId.trim())) {
+            resolvedWorkspaceId = "default-workspace";
+        }
+
+        StringBuilder filter = new StringBuilder();
+        filter.append("(workspaceId == '").append(resolvedWorkspaceId).append("' || workspaceId == '' || workspaceId == 'default-workspace')");
+
         if (isAdmin) {
-            return ""; // Access all documents
+            return filter.toString();
         }
 
         // 2. Check if user is Guest
@@ -329,18 +337,35 @@ public class RAGService {
         }
 
         if (isGuest) {
-            // Guest can only access PUBLIC documents
-            return "classification == 'PUBLIC' || securityClassification == 'PUBLIC'";
+            // Guest can only access PUBLIC documents in current workspace
+            filter.append(" && (classification == 'PUBLIC' || securityClassification == 'PUBLIC')");
+            return filter.toString();
         }
 
         // 3. Normal Employee / Manager
+        filter.append(" && (");
+
+        // 3.1. General company-wide public/internal documents
+        filter.append("((classification == 'PUBLIC' || classification == 'INTERNAL' || securityClassification == 'PUBLIC' || securityClassification == 'INTERNAL') && (departmentId == ''))");
+
+        // 3.2. Documents uploaded by the user themselves
+        if (userId != null && !userId.trim().isEmpty()) {
+            filter.append(" || uploadedBy == '").append(userId).append("'");
+        }
+
+        // 3.3. Department & Role boundaries
+        if (context.getUserDepartments() != null && !context.getUserDepartments().isEmpty()) {
+            for (RAGQueryPayload.DepartmentRole dept : context.getUserDepartments()) {
+                filter.append(" || (departmentId == '").append(dept.getDepartmentId()).append("'");
+                if ("MEMBER".equalsIgnoreCase(dept.getRole())) {
+                    filter.append(" && allowedRoles != 'HEAD'");
+                }
+                filter.append(")");
+            }
+        }
+
+        // 3.4. Collections they have explicit access to (backward compatibility)
         List<String> collections = context.getAccessibleCollections();
-        StringBuilder filter = new StringBuilder();
-
-        // Standard classifications accessible by default: PUBLIC and INTERNAL
-        filter.append("(classification == 'PUBLIC' || classification == 'INTERNAL' || securityClassification == 'PUBLIC' || securityClassification == 'INTERNAL')");
-
-        // Collections they have explicit access to (e.g. CONFIDENTIAL/RESTRICTED collections)
         if (collections != null && !collections.isEmpty()) {
             filter.append(" || collectionId in [");
             for (int i = 0; i < collections.size(); i++) {
@@ -352,11 +377,7 @@ public class RAGService {
             filter.append("]");
         }
 
-        // Documents they uploaded themselves
-        if (userId != null && !userId.trim().isEmpty()) {
-            filter.append(String.format(" || uploadedBy == '%s'", userId));
-        }
-
+        filter.append(")");
         return filter.toString();
     }
 

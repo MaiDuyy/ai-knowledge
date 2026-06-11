@@ -27,6 +27,17 @@ public class RAGQueryPayload {
         private List<String> departments;
         private List<String> groups;
         private List<String> accessibleCollections;
+        private String workspaceId;
+        private List<DepartmentRole> userDepartments;
+    }
+
+    @Data
+    @Builder
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class DepartmentRole {
+        private String departmentId;
+        private String role; // HEAD, MEMBER, etc.
     }
 
     @Data
