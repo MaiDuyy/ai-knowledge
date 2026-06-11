@@ -1,7 +1,7 @@
 package com.security.security.constants;
 
 public class Constants {
-    public static final String TOKEN_PREFIX = "TOKEN_";
+    public static final String TOKEN_PREFIX = "Bearer ";
     public static final int STRENGTH = 12;
     public static final int NINETY_DAYS = 90;
     public static final String PATH = "/user/login";

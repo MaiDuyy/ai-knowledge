@@ -11,9 +11,11 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import javax.crypto.Cipher;
+import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.util.*;
 
 /**
@@ -89,6 +91,10 @@ public class AppConfigService {
 
     private SecretKeySpec aesKey;
 
+    private static final String GCM_TRANSFORMATION = "AES/GCM/NoPadding";
+    private static final int GCM_IV_LENGTH = 12;
+    private static final int GCM_TAG_LENGTH = 128; // in bits
+
     @PostConstruct
     private void initKey() {
         try {
@@ -104,10 +110,19 @@ public class AppConfigService {
 
     private String encrypt(String value) {
         try {
-            Cipher cipher = Cipher.getInstance("AES/ECB/PKCS5Padding");
-            cipher.init(Cipher.ENCRYPT_MODE, aesKey);
-            byte[] encrypted = cipher.doFinal(value.getBytes(StandardCharsets.UTF_8));
-            return Base64.getEncoder().encodeToString(encrypted);
+            Cipher cipher = Cipher.getInstance(GCM_TRANSFORMATION);
+            byte[] iv = new byte[GCM_IV_LENGTH];
+            new SecureRandom().nextBytes(iv);
+            GCMParameterSpec parameterSpec = new GCMParameterSpec(GCM_TAG_LENGTH, iv);
+            cipher.init(Cipher.ENCRYPT_MODE, aesKey, parameterSpec);
+            byte[] ciphertext = cipher.doFinal(value.getBytes(StandardCharsets.UTF_8));
+
+            // Combine IV and Ciphertext
+            byte[] combined = new byte[iv.length + ciphertext.length];
+            System.arraycopy(iv, 0, combined, 0, iv.length);
+            System.arraycopy(ciphertext, 0, combined, iv.length, ciphertext.length);
+
+            return Base64.getEncoder().encodeToString(combined);
         } catch (Exception e) {
             log.error("[AppConfigService] Encryption failed", e);
             throw new RuntimeException("Failed to encrypt config value", e);
@@ -116,9 +131,28 @@ public class AppConfigService {
 
     private String decrypt(String value) {
         try {
+            byte[] decoded = Base64.getDecoder().decode(value);
+            if (decoded.length > GCM_IV_LENGTH) {
+                // Try GCM decryption
+                try {
+                    Cipher cipher = Cipher.getInstance(GCM_TRANSFORMATION);
+                    byte[] iv = new byte[GCM_IV_LENGTH];
+                    System.arraycopy(decoded, 0, iv, 0, GCM_IV_LENGTH);
+                    int ciphertextLen = decoded.length - GCM_IV_LENGTH;
+                    byte[] ciphertext = new byte[ciphertextLen];
+                    System.arraycopy(decoded, GCM_IV_LENGTH, ciphertext, 0, ciphertextLen);
+
+                    GCMParameterSpec parameterSpec = new GCMParameterSpec(GCM_TAG_LENGTH, iv);
+                    cipher.init(Cipher.DECRYPT_MODE, aesKey, parameterSpec);
+                    return new String(cipher.doFinal(ciphertext), StandardCharsets.UTF_8);
+                } catch (Exception gcmException) {
+                    log.debug("[AppConfigService] GCM Decryption failed, falling back to ECB", gcmException);
+                }
+            }
+
+            // Fallback to old ECB decryption
             Cipher cipher = Cipher.getInstance("AES/ECB/PKCS5Padding");
             cipher.init(Cipher.DECRYPT_MODE, aesKey);
-            byte[] decoded = Base64.getDecoder().decode(value);
             return new String(cipher.doFinal(decoded), StandardCharsets.UTF_8);
         } catch (Exception e) {
             log.warn("[AppConfigService] Decryption failed — returning raw value (key may have changed)");
