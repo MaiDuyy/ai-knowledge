@@ -26,6 +26,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+import com.security.security.service.LlmRateLimiterService;
+
 @RestController
 @RequestMapping("/chat")
 @RequiredArgsConstructor
@@ -34,6 +36,7 @@ public class ChatController {
     private final RAGService ragService;
     private final ConversationService conversationService;
     private final ObjectMapper objectMapper;
+    private final LlmRateLimiterService llmRateLimiterService;
 
     /**
      * Create new conversation
@@ -86,13 +89,16 @@ public class ChatController {
     /**
      * Send message and get streaming response (RAG)
      */
-    @PostMapping(value = "/messages", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+     @PostMapping(value = "/messages", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<String> chat(
             @RequestBody ChatRequest request,
             @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
             @RequestHeader(value = "x-user-role", required = false) String role,
             @RequestHeader(value = "x-user-roles", required = false) String rolesJson,
-            @RequestHeader(value = "x-user-role-level", required = false) Integer roleLevel) {
+            @RequestHeader(value = "x-user-role-level", required = false) Integer roleLevel,
+            @RequestHeader(value = "x-workspace-id", required = false) String workspaceId,
+            @RequestHeader(value = "x-rag-scope", required = false) String ragScope,
+            @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsJson) {
 
 
         // Verify conversation belongs to user
@@ -111,17 +117,36 @@ public class ChatController {
             rolesList.add(role);
         }
 
+        List<RAGQueryPayload.DepartmentRole> userDepts = new ArrayList<>();
+        if (userDepartmentsJson != null && !userDepartmentsJson.isBlank()) {
+            try {
+                userDepts = objectMapper.readValue(userDepartmentsJson, new TypeReference<List<RAGQueryPayload.DepartmentRole>>() {});
+            } catch (Exception e) {
+                // Fallback gracefully: treat as empty list
+            }
+        }
+
         RAGQueryPayload.UserPermissionContext permissions = RAGQueryPayload.UserPermissionContext.builder()
                 .roles(rolesList)
                 .roleLevel(roleLevel)
+                .workspaceId(workspaceId)
+                .ragScope(ragScope)
+                .userDepartments(userDepts)
                 .build();
 
-        return ragService.generateAnswerStream(
-                request.getConversationId(),
-                request.getMessage(),
-                userId,
-                permissions
-        );
+        llmRateLimiterService.acquireChat();
+        try {
+            Flux<String> stream = ragService.generateAnswerStream(
+                    request.getConversationId(),
+                    request.getMessage(),
+                    userId,
+                    permissions
+            );
+            return stream.doFinally(signalType -> llmRateLimiterService.releaseChat());
+        } catch (Exception e) {
+            llmRateLimiterService.releaseChat();
+            throw e;
+        }
     }
 
     /**

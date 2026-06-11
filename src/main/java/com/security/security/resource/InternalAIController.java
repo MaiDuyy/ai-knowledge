@@ -17,6 +17,8 @@ import java.util.Map;
  * NOT exposed to the public internet.  
  * Provides: document indexing, RAG queries, and document deletion.
  */
+import com.security.security.service.LlmRateLimiterService;
+
 @RestController
 @RequestMapping("/api")
 @RequiredArgsConstructor
@@ -25,6 +27,7 @@ public class InternalAIController {
 
     private final RAGService ragService;
     private final EmbeddingService embeddingService;
+    private final LlmRateLimiterService llmRateLimiterService;
 
     /**
      * Permission-aware RAG query.
@@ -34,8 +37,13 @@ public class InternalAIController {
     public ResponseEntity<RAGResponseDTO> query(@RequestBody RAGQueryPayload payload) {
         log.info("Received RAG query from knowledge-service for user: {}", payload.getUserId());
 
-        RAGResponseDTO response = ragService.performRAGQuery(payload);
-        return ResponseEntity.ok(response);
+        llmRateLimiterService.acquireRagQuery();
+        try {
+            RAGResponseDTO response = ragService.performRAGQuery(payload);
+            return ResponseEntity.ok(response);
+        } finally {
+            llmRateLimiterService.releaseRagQuery();
+        }
     }
 
     /**

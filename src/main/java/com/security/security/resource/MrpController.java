@@ -45,8 +45,8 @@ public class MrpController {
      * Helper method to validate user membership in workspace
      */
     private void validateWorkspaceAccess(String userId, String workspaceId) {
-        if (workspaceId == null || workspaceId.trim().isEmpty() || "default-workspace".equals(workspaceId)) {
-            return; // Allow public or default
+        if (workspaceId == null || workspaceId.trim().isEmpty() || "default-workspace".equals(workspaceId) || "all".equals(workspaceId)) {
+            return; // Allow public, default, or all-workspaces
         }
         var workspace = workspaceServiceClient.getWorkspace(workspaceId, userId);
         if (workspace.isEmpty()) {
@@ -114,6 +114,14 @@ public class MrpController {
         if ("PUBLIC".equalsIgnoreCase(page.getSecurityClassification())) {
             return;
         }
+        
+        // Bypass department checks for workspace-specific pages when allowedRoles != HEAD
+        if (page.getWorkspaceId() != null && !page.getWorkspaceId().isEmpty()
+                && !"all".equals(page.getWorkspaceId()) && !"default-workspace".equals(page.getWorkspaceId())
+                && !"HEAD".equalsIgnoreCase(page.getAllowedRoles())) {
+            return;
+        }
+
         if (page.getDepartmentId() == null || page.getDepartmentId().trim().isEmpty()) {
             // INTERNAL company-wide pages are accessible by all internal users
             if ("INTERNAL".equalsIgnoreCase(page.getSecurityClassification())) {
@@ -154,7 +162,7 @@ public class MrpController {
         
         SourceCompilationPlan plan = mrpPipelineService.initiateCompile(documentId, workspaceId, userId, autoApprove);
         populateDocumentName(plan);
-        return ResponseEntity.ok(plan);
+        return ResponseEntity.accepted().body(plan);
     }
 
     /**
@@ -200,6 +208,17 @@ public class MrpController {
         ParsedUserPermissions perm = parseUserPermissions(userRolesHeader, userDepartmentsHeader);
         if (!perm.isAdmin) {
             validateWorkspaceAccess(userId, workspaceId);
+        }
+
+        // Admins and SuperAdmins can view all pending drafts across all workspaces
+        if (perm.isAdmin) {
+            if (page != null && size != null) {
+                Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt"));
+                Page<WikiPageDraft> pagedDrafts = wikiPageDraftRepository.findByStatus("PENDING", pageable);
+                return ResponseEntity.ok(pagedDrafts);
+            }
+            List<WikiPageDraft> drafts = wikiPageDraftRepository.findByStatus("PENDING");
+            return ResponseEntity.ok(drafts);
         }
 
         if (page != null && size != null) {

@@ -29,6 +29,7 @@ public class RAGQueryPayload {
         private List<String> accessibleCollections;
         private String workspaceId;
         private List<DepartmentRole> userDepartments;
+        private String ragScope;
     }
 
     @Data

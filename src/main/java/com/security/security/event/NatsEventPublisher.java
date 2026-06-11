@@ -84,4 +84,15 @@ public class NatsEventPublisher {
 
         publishEvent("wiki.draft.updated", payload);
     }
+
+    /**
+     * Publish document ingestion request event
+     */
+    public void publishDocumentIngestRequested(Long documentId, String userId) {
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("documentId", documentId);
+        payload.put("userId", userId != null ? userId : "system-user");
+
+        publishEvent("document.ingest.requested", payload);
+    }
 }

@@ -44,10 +44,12 @@ public class DocumentController {
             @RequestParam(value = "allowedRoles", required = false) String allowedRoles,
             @RequestParam(value = "securityClassification", required = false) String securityClassification,
             @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-role", required = false) String userRole,
+            @RequestHeader(value = "x-user-departments", required = false) String userDepartments,
             @RequestHeader(value = "x-workspace-id", required = false) String workspaceIdHeader) throws IOException {
         // Resolve workspaceId: query param takes priority over header
         String workspaceId = (workspaceIdParam != null && !workspaceIdParam.isBlank()) ? workspaceIdParam : workspaceIdHeader;
-        DocumentUploadResponse response = documentService.uploadDocument(file, userId, preview, parser, workspaceId, departmentId, allowedRoles, securityClassification);
+        DocumentUploadResponse response = documentService.uploadDocument(file, userId, preview, parser, workspaceId, departmentId, allowedRoles, securityClassification, userRole, userDepartments);
 
         return ResponseEntity.accepted().body(response);
     }
@@ -89,6 +91,8 @@ public class DocumentController {
     @GetMapping
     public ResponseEntity<?> getDocuments(
             @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-role", required = false) String userRole,
+            @RequestHeader(value = "x-user-departments", required = false) String userDepartments,
             @RequestHeader(value = "x-workspace-id", required = false) String workspaceIdHeader,
             @RequestParam(required = false) String workspaceId,
             @RequestParam(required = false) Integer page,
@@ -103,11 +107,11 @@ public class DocumentController {
         }
         if (page != null && size != null) {
             Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt"));
-            Page<Document> pagedDocs = documentService.getDocuments(userId, resolvedWsId, pageable);
+            Page<Document> pagedDocs = documentService.getDocuments(userId, resolvedWsId, pageable, userRole, userDepartments);
             return ResponseEntity.ok(pagedDocs);
         }
 
-        List<Document> documents = documentService.getDocuments(userId, resolvedWsId);
+        List<Document> documents = documentService.getDocuments(userId, resolvedWsId, userRole, userDepartments);
         return ResponseEntity.ok(documents);
     }
 
@@ -117,9 +121,11 @@ public class DocumentController {
     @GetMapping("/{id}")
     public ResponseEntity<Document> getDocument(
             @PathVariable Long id,
-            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) {
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-role", required = false) String userRole,
+            @RequestHeader(value = "x-user-departments", required = false) String userDepartments) {
 
-        Document document = documentService.getDocument(id, userId);
+        Document document = documentService.getDocument(id, userId, userRole, userDepartments);
 
         return ResponseEntity.ok(document);
     }
@@ -130,9 +136,11 @@ public class DocumentController {
     @GetMapping("/{id}/raw")
     public ResponseEntity<org.springframework.core.io.Resource> getRawDocument(
             @PathVariable Long id,
-            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) {
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-role", required = false) String userRole,
+            @RequestHeader(value = "x-user-departments", required = false) String userDepartments) {
         
-        org.springframework.core.io.Resource fileResource = documentService.getDocumentFileResource(id, userId);
+        org.springframework.core.io.Resource fileResource = documentService.getDocumentFileResource(id, userId, userRole, userDepartments);
         String contentType = "application/pdf"; 
         
         return ResponseEntity.ok()
@@ -219,8 +227,10 @@ public class DocumentController {
     @PostMapping("/{id}/approve")
     public ResponseEntity<Document> approveDocument(
             @PathVariable Long id,
-            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) {
-        Document doc = documentService.approveDocument(id, userId);
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-role", required = false) String userRole,
+            @RequestHeader(value = "x-user-departments", required = false) String userDepartments) {
+        Document doc = documentService.approveDocument(id, userId, userRole, userDepartments);
         return ResponseEntity.ok(doc);
     }
 

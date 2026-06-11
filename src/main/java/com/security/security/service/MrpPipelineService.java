@@ -159,313 +159,6 @@ public class MrpPipelineService {
 
         log.info("[MRP Pipeline] Workspace được xác định cho tiến trình: {}", finalWorkspaceId);
 
-        String content = doc.getMarkdownContent();
-        if (content == null || content.isBlank()) {
-            content = "Document details for " + doc.getFileName();
-        }
-
-        // --- PHASE 1: MAP PHASE (Song song sử dụng Virtual Threads) ---
-        log.info("[MRP Pipeline] [Map Phase] Bắt đầu phân tách tài liệu thành các khối để trích xuất song song...");
-        List<String> chunks = splitIntoChunks(content, 20000, 1000);
-        log.info("[MRP Pipeline] [Map Phase] Phân tách thành {} chunks.", chunks.size());
-
-        List<CompletableFuture<SourceChunkExtract>> futures = new ArrayList<>();
-        LlmProvider provider = llmFactory.getProvider("gemini");
-
-        for (int i = 0; i < chunks.size(); i++) {
-            final int index = i;
-            final String chunkText = chunks.get(i);
-
-            CompletableFuture<SourceChunkExtract> future = CompletableFuture.supplyAsync(() -> {
-                // Resume-on-crash: Check if chunk extract already exists and is DONE
-                Optional<SourceChunkExtract> existing = sourceChunkExtractRepository
-                        .findBySourceDocumentIdAndChunkIndex(documentId, index);
-                
-                if (existing.isPresent() && "DONE".equals(existing.get().getStatus())) {
-                    log.info("[MRP Pipeline] [Map Phase] Chunk Index {} đã được trích xuất trước đó, bỏ qua.", index);
-                    return existing.get();
-                }
-
-                SourceChunkExtract extract = existing.orElseGet(() -> SourceChunkExtract.builder()
-                        .sourceDocumentId(documentId)
-                        .chunkIndex(index)
-                        .startChar(index * 19000)
-                        .endChar(index * 19000 + chunkText.length())
-                        .status("PENDING")
-                        .build());
-
-                extract.setStatus("PROCESSING");
-                sourceChunkExtractRepository.save(extract);
-
-                try {
-                    // Stagger start slightly to avoid bursting the API gateway/rate limits
-                    if (index > 0) {
-                        try {
-                            Thread.sleep(1500L * index);
-                        } catch (InterruptedException ie) {
-                            Thread.currentThread().interrupt();
-                            throw new RuntimeException("Map Phase chunk staggered start interrupted", ie);
-                        }
-                    }
-
-                    String mapSystemPrompt = """
-                        You are an expert enterprise knowledge extraction agent.
-                        Your job is to read the provided text chunk and extract key structured details.
-                        
-                        CRITICAL GROUNDEDNESS DIRECTIVES:
-                        - You must ONLY extract entities, concepts, and claims that are explicitly mentioned in the provided text chunk.
-                        - Do NOT use any external background knowledge, prior assumptions, or web search facts to write descriptions or definitions.
-                        - The description/definition of each entity or concept MUST be constructed solely from the facts provided in the text. If the text does not describe the entity, use a minimal description derived strictly from the text context, or leave it brief.
-                        - Every claim's 'claim' and 'sourceContext' fields MUST correspond to the exact facts and sentences in the text chunk. Do NOT extrapolate or assume anything.
-                        
-                        You must extract:
-                        1. Entities: Organizations, products, technologies, tools, platforms, or people. Give each a clear description.
-                        2. Concepts: Core paradigms, frameworks, architectural designs, procedures, rules, policies. Define each precisely.
-                        3. Claims: Facts, guidelines, configurations, assertions, metrics, or requirements. Detail each claim and link it to the subject.
-                        
-                        You must return ONLY a valid JSON object. Do NOT wrap the response in markdown blocks (such as ```json). Do NOT add any conversational text before or after the JSON.
-                        {
-                          "entities": [
-                            {"name": "Entity Name", "type": "organization/technology/etc", "description": "Concise description of the entity"}
-                          ],
-                          "concepts": [
-                            {"name": "Concept Name", "description": "Precise definition of this concept"}
-                          ],
-                          "claims": [
-                            {"subject": "Entity/Concept name", "claim": "Fact, metric, assertion, or config", "sourceContext": "Exact text sentence or clear context"}
-                          ]
-                        }
-                        """;
-
-                    log.info("[MRP Pipeline] [Map Phase] Đang gửi yêu cầu LLM trích xuất cho chunk {}...", index);
-                    String response = callChatWithRetry(provider, mapSystemPrompt, chunkText, MAP_PHASE_SCHEMA, "mrp-map-" + documentId + "-" + index);
-                    log.info("[MRP Pipeline] [Map Phase] Raw LLM response for chunk {}: \n{}", index, response);
-
-                    String cleanedJson = cleanJsonResponse(response, true);
-                    log.info("[MRP Pipeline] [Map Phase] Cleaned JSON for chunk {}: \n{}", index, cleanedJson);
-                    
-                    // Validate JSON parsing and ensure non-empty structure
-                    JsonNode rootNode = objectMapper.readTree(cleanedJson);
-                    if (rootNode.isEmpty()) {
-                        throw new RuntimeException("LLM returned an empty or invalid extract structure");
-                    }
-
-                    extract.setExtractJson(cleanedJson);
-                    extract.setStatus("DONE");
-                    extract.setErrorMessage(null);
-                    log.info("[MRP Pipeline] [Map Phase] Trích xuất thành công chunk {}.", index);
-                } catch (Exception e) {
-                    log.error("[MRP Pipeline] [Map Phase] Lỗi trích xuất chunk {}: {}", index, e.getMessage());
-                    extract.setStatus("ERROR");
-                    extract.setErrorMessage(e.getMessage());
-                }
-
-                return sourceChunkExtractRepository.save(extract);
-            }, mrpVirtualThreadExecutor);
-
-            futures.add(future);
-        }
-
-        // Wait for all Map jobs to complete
-        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
-        log.info("[MRP Pipeline] [Map Phase] Đã hoàn tất Map Phase.");
-
-        // --- PHASE 2: REDUCE PHASE (Tổng hợp, Deduplicate & Reconcile) ---
-        log.info("[MRP Pipeline] [Reduce Phase] Bắt đầu tổng hợp tri thức trích xuất...");
-        List<SourceChunkExtract> doneChunks = sourceChunkExtractRepository.findBySourceDocumentIdAndStatus(documentId, "DONE");
-        
-        List<Map<String, Object>> allEntities = new ArrayList<>();
-        List<Map<String, Object>> allConcepts = new ArrayList<>();
-        List<Map<String, Object>> allClaims = new ArrayList<>();
-
-        for (SourceChunkExtract chunk : doneChunks) {
-            try {
-                Map<String, Object> data = objectMapper.readValue(chunk.getExtractJson(), new TypeReference<>() {});
-                if (data.containsKey("entities")) {
-                    allEntities.addAll((List<Map<String, Object>>) data.get("entities"));
-                }
-                if (data.containsKey("concepts")) {
-                    allConcepts.addAll((List<Map<String, Object>>) data.get("concepts"));
-                }
-                if (data.containsKey("claims")) {
-                    allClaims.addAll((List<Map<String, Object>>) data.get("claims"));
-                }
-            } catch (Exception e) {
-                log.warn("[MRP Pipeline] Không thể parse JSON chunk {}: {}", chunk.getChunkIndex(), e.getMessage());
-            }
-        }
-
-        // Deduplicate entities & concepts, matching and grouping claims
-        Map<String, String> entityDescriptions = new HashMap<>();
-        Map<String, String> conceptDescriptions = new HashMap<>();
-        Map<String, List<String>> subjectClaims = new HashMap<>();
-
-        for (Map<String, Object> entity : allEntities) {
-            String name = (String) entity.get("name");
-            String desc = (String) entity.get("description");
-            if (name != null && !name.isBlank()) {
-                entityDescriptions.merge(name.trim(), desc != null ? desc : "", (o, n) -> o.length() > n.length() ? o : n);
-            }
-        }
-
-        for (Map<String, Object> concept : allConcepts) {
-            String name = (String) concept.get("name");
-            String desc = (String) concept.get("description");
-            if (name != null && !name.isBlank()) {
-                conceptDescriptions.merge(name.trim(), desc != null ? desc : "", (o, n) -> o.length() > n.length() ? o : n);
-            }
-        }
-
-        for (Map<String, Object> claim : allClaims) {
-            String subject = (String) claim.get("subject");
-            String assertion = (String) claim.get("claim");
-            String sourceContext = (String) claim.get("sourceContext");
-            if (subject != null && assertion != null && !subject.isBlank() && !assertion.isBlank()) {
-                String claimDetail = assertion.trim();
-                if (sourceContext != null && !sourceContext.isBlank()) {
-                    claimDetail += " [Source Context: " + sourceContext.trim() + "]";
-                }
-                subjectClaims.computeIfAbsent(subject.trim(), k -> new ArrayList<>()).add(claimDetail);
-            }
-        }
-
-        // Reconcile with existing WikiPages via Slug & Workspace
-        List<Map<String, Object>> planningItems = new ArrayList<>();
-        Set<String> uniqueSubjects = new HashSet<>();
-        uniqueSubjects.addAll(entityDescriptions.keySet());
-        uniqueSubjects.addAll(conceptDescriptions.keySet());
-
-        for (String subject : uniqueSubjects) {
-            String slug = slugify(subject);
-            Optional<WikiPage> existingPage = wikiPageRepository.findBySlugAndWorkspaceId(slug, finalWorkspaceId);
-
-            Map<String, Object> planItem = new HashMap<>();
-            planItem.put("title", subject);
-            planItem.put("slug", slug);
-            
-            if (existingPage.isPresent()) {
-                planItem.put("action", "UPDATE");
-                planItem.put("wikiPageId", existingPage.get().getId());
-                planItem.put("baseVersion", existingPage.get().getVersion());
-            } else {
-                planItem.put("action", "CREATE");
-                planItem.put("wikiPageId", null);
-            }
-
-            planItem.put("pageType", entityDescriptions.containsKey(subject) ? "entity" : "concept");
-            planItem.put("reason", String.format("Extracted from source document. Deduped & compiled."));
-            
-            List<String> claimsList = subjectClaims.getOrDefault(subject, new ArrayList<>());
-            if (claimsList.isEmpty()) {
-                String desc = entityDescriptions.containsKey(subject) ? entityDescriptions.get(subject) : conceptDescriptions.get(subject);
-                if (desc != null && !desc.isBlank()) {
-                    claimsList.add(desc);
-                }
-            }
-            planItem.put("keyClaims", claimsList);
-
-            planningItems.add(planItem);
-        }
-
-        // --- ADD SOURCE PLAN ITEM ---
-        if (doc != null) {
-            String sourceTitle = doc.getFileName();
-            if (sourceTitle == null || sourceTitle.isBlank()) {
-                sourceTitle = "Source Document " + documentId;
-            } else {
-                int lastDot = sourceTitle.lastIndexOf('.');
-                if (lastDot > 0) {
-                    sourceTitle = sourceTitle.substring(0, lastDot);
-                }
-            }
-            sourceTitle = sourceTitle.trim();
-
-            String sourceSlug = "source/" + slugify(sourceTitle);
-            Optional<WikiPage> existingSourcePage = wikiPageRepository.findBySlugAndWorkspaceId(sourceSlug, finalWorkspaceId);
-
-            Map<String, Object> sourcePlanItem = new HashMap<>();
-            sourcePlanItem.put("title", sourceTitle);
-            sourcePlanItem.put("slug", sourceSlug);
-            
-            if (existingSourcePage.isPresent()) {
-                sourcePlanItem.put("action", "UPDATE");
-                sourcePlanItem.put("wikiPageId", existingSourcePage.get().getId());
-                sourcePlanItem.put("baseVersion", existingSourcePage.get().getVersion());
-            } else {
-                sourcePlanItem.put("action", "CREATE");
-                sourcePlanItem.put("wikiPageId", null);
-            }
-            
-            sourcePlanItem.put("pageType", "source");
-            sourcePlanItem.put("reason", "Source document compiled as a reference entry linking to all extracted topics.");
-            
-            List<String> sourceClaims = new ArrayList<>();
-            sourceClaims.add("Tài liệu gốc: " + doc.getFileName() + " [Source Context: " + doc.getFileName() + "]");
-            sourceClaims.add("Tài liệu chứa thông tin chi tiết về các chủ đề chính: " + 
-                uniqueSubjects.stream().collect(Collectors.joining(", ")) + " [Source Context: " + doc.getFileName() + "]");
-            sourcePlanItem.put("keyClaims", sourceClaims);
-
-            planningItems.add(sourcePlanItem);
-        }
-
-        // Generate robust plan JSON via LLM compilation plan optimization
-        String planJson;
-        try {
-            String rawItemsJson = objectMapper.writeValueAsString(planningItems);
-            
-            String planSystemPrompt = """
-                You are a Senior Technical Knowledge Architect.
-                You are given a rough list of topics (entities/concepts) and their associated claims/facts.
-                Your job is to structure this into a professional, cohesive Wiki compilation plan.
-                
-                You must classify each page into one of the following exact types:
-                - "entity": Specific names of organizations, technologies, tools, platforms, systems, devices, products, or individuals.
-                - "concept": Abstract paradigms, theoretical models, frameworks, architectural designs, algorithms, rules, policies, or procedures.
-                - "topic": Broad subjects, themes, categories, or high-level tag-like grouping pages that aggregate other elements.
-                - "source": Reference documents, articles, books, news, reports, files, or original records from which facts are derived.
-                
-                You must:
-                1. Consolidate topics that are highly related to avoid a cluttered Wiki.
-                2. Verify names and write precise slugs.
-                3. Ensure that keyClaims are prioritized and concise.
-                4. Crucial: Do NOT modify or remove the "[Source Context: ...]" suffix of any claim, as these contain the original reference sentences.
-                5. Crucial: Do NOT introduce, expand, or add any new entities, concepts, facts, or details that are not explicitly present in the input list. You must only organize and structure what is provided.
-                
-                You MUST return a valid JSON array of Plan Items matching this schema exactly.
-                [
-                  {
-                    "title": "Cohesive Title",
-                    "slug": "url-friendly-slug",
-                    "action": "CREATE" or "UPDATE",
-                    "wikiPageId": 123 (if UPDATE, otherwise null),
-                    "pageType": "entity" or "concept" or "topic" or "source",
-                    "reason": "Why this page needs creation or update",
-                    "keyClaims": ["Detailed claim 1 [Source Context: ...]", "Detailed claim 2 [Source Context: ...]"]
-                  }
-                ]
-                """;
-
-            log.info("[MRP Pipeline] [Reduce Phase] Đang gọi LLM tối ưu hóa Kế hoạch Biên soạn...");
-            String planResponse = callChatWithRetry(provider, planSystemPrompt, rawItemsJson, REDUCE_PHASE_SCHEMA, "mrp-plan-" + documentId);
-            log.info("[MRP Pipeline] [Reduce Phase] Raw LLM response: \n{}", planResponse);
-
-            planJson = cleanJsonResponse(planResponse, false);
-            log.info("[MRP Pipeline] [Reduce Phase] Cleaned JSON: \n{}", planJson);
-            
-            // Verify valid JSON and non-empty content
-            JsonNode rootNode = objectMapper.readTree(planJson);
-            if (rootNode.isEmpty()) {
-                throw new RuntimeException("LLM response parsed to an empty JSON structure");
-            }
-        } catch (Exception e) {
-            log.error("[MRP Pipeline] [Reduce Phase] Gặp lỗi tối ưu hóa kế hoạch qua LLM, sử dụng cấu trúc thô: {}", e.getMessage());
-            try {
-                planJson = objectMapper.writeValueAsString(planningItems);
-            } catch (Exception ex) {
-                throw new RuntimeException("Failed to serialize planning items: " + ex.getMessage());
-            }
-        }
-
         // Create or update SourceCompilationPlan record
         SourceCompilationPlan plan = sourceCompilationPlanRepository.findBySourceDocumentId(documentId)
                 .orElseGet(() -> SourceCompilationPlan.builder()
@@ -477,19 +170,377 @@ public class MrpPipelineService {
         plan.setAllowedRoles(doc.getAllowedRoles() != null ? doc.getAllowedRoles() : "ALL");
         plan.setSecurityClassification(doc.getSecurityClassification() != null ? doc.getSecurityClassification() : "INTERNAL");
 
-        plan.setPlanJson(planJson);
-        plan.setStatus(autoApprove ? "APPROVED" : "PENDING_REVIEW");
-        sourceCompilationPlanRepository.save(plan);
+        plan.setStatus("PROCESSING");
+        plan.setPlanJson(null); // Clear previous plan if any, as we are re-compiling
+        plan = sourceCompilationPlanRepository.save(plan);
+
+        // Publish event that status is PROCESSING
         natsEventPublisher.publishCompilationPlanUpdated(plan.getId(), plan.getSourceDocumentId(), finalWorkspaceId, plan.getStatus(), userId);
 
-        log.info("[MRP Pipeline] [Reduce Phase] Đã hoàn thành Kế hoạch biên soạn ID: {}, trạng thái: {}", plan.getId(), plan.getStatus());
-
-        if (autoApprove) {
-            // Automatically execute Refine & Commit Phase
-            executeCompilationPlan(plan.getId(), finalWorkspaceId, userId, true);
+        final Long planId = plan.getId();
+        final String docContent = doc.getMarkdownContent();
+        
+        // Trigger async pipeline compilation after transaction commit
+        if (org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()) {
+            org.springframework.transaction.support.TransactionSynchronizationManager.registerSynchronization(
+                new org.springframework.transaction.support.TransactionSynchronization() {
+                    @Override
+                    public void afterCommit() {
+                        CompletableFuture.runAsync(() -> {
+                            runCompilationProcess(planId, documentId, docContent, finalWorkspaceId, userId, autoApprove);
+                        }, mrpVirtualThreadExecutor);
+                    }
+                }
+            );
+        } else {
+            CompletableFuture.runAsync(() -> {
+                runCompilationProcess(planId, documentId, docContent, finalWorkspaceId, userId, autoApprove);
+            }, mrpVirtualThreadExecutor);
         }
 
         return plan;
+    }
+
+    /**
+     * Quy trình xử lý biên dịch bất đồng bộ (Map, Reduce & Auto-Approve if configured).
+     */
+    public void runCompilationProcess(Long planId, Long documentId, String content, String finalWorkspaceId, String userId, boolean autoApprove) {
+        log.info("[MRP Pipeline] [Async] Bắt đầu xử lý biên dịch bất đồng bộ cho plan ID: {}, document ID: {}", planId, documentId);
+        
+        String actualContent = content;
+        if (actualContent == null || actualContent.isBlank()) {
+            actualContent = "Document details";
+        }
+
+        try {
+            // --- PHASE 1: MAP PHASE (Song song sử dụng Virtual Threads) ---
+            log.info("[MRP Pipeline] [Map Phase] Bắt đầu phân tách tài liệu thành các khối để trích xuất song song...");
+            List<String> chunks = splitIntoChunks(actualContent, 20000, 1000);
+            log.info("[MRP Pipeline] [Map Phase] Phân tách thành {} chunks.", chunks.size());
+
+            List<CompletableFuture<SourceChunkExtract>> futures = new ArrayList<>();
+            LlmProvider provider = llmFactory.getProvider("gemini");
+
+            for (int i = 0; i < chunks.size(); i++) {
+                final int index = i;
+                final String chunkText = chunks.get(i);
+
+                CompletableFuture<SourceChunkExtract> future = CompletableFuture.supplyAsync(() -> {
+                    // Resume-on-crash: Check if chunk extract already exists and is DONE
+                    Optional<SourceChunkExtract> existing = sourceChunkExtractRepository
+                            .findBySourceDocumentIdAndChunkIndex(documentId, index);
+                    
+                    if (existing.isPresent() && "DONE".equals(existing.get().getStatus())) {
+                        log.info("[MRP Pipeline] [Map Phase] Chunk Index {} đã được trích xuất trước đó, bỏ qua.", index);
+                        return existing.get();
+                    }
+
+                    SourceChunkExtract extract = existing.orElseGet(() -> SourceChunkExtract.builder()
+                            .sourceDocumentId(documentId)
+                            .chunkIndex(index)
+                            .startChar(index * 19000)
+                            .endChar(index * 19000 + chunkText.length())
+                            .status("PENDING")
+                            .build());
+
+                    extract.setStatus("PROCESSING");
+                    sourceChunkExtractRepository.save(extract);
+
+                    try {
+                        // Stagger start slightly to avoid bursting the API gateway/rate limits
+                        if (index > 0) {
+                            try {
+                                Thread.sleep(1500L * index);
+                            } catch (InterruptedException ie) {
+                                Thread.currentThread().interrupt();
+                                throw new RuntimeException("Map Phase chunk staggered start interrupted", ie);
+                            }
+                        }
+
+                        String mapSystemPrompt = """
+                            You are an expert enterprise knowledge extraction agent.
+                            Your job is to read the provided text chunk and extract key structured details.
+                            
+                            CRITICAL GROUNDEDNESS DIRECTIVES:
+                            - You must ONLY extract entities, concepts, and claims that are explicitly mentioned in the provided text chunk.
+                            - Do NOT use any external background knowledge, prior assumptions, or web search facts to write descriptions or definitions.
+                            - The description/definition of each entity or concept MUST be constructed solely from the facts provided in the text. If the text does not describe the entity, use a minimal description derived strictly from the text context, or leave it brief.
+                            - Every claim's 'claim' and 'sourceContext' fields MUST correspond to the exact facts and sentences in the text chunk. Do NOT extrapolate or assume anything.
+                            
+                            You must extract:
+                            1. Entities: Organizations, products, technologies, tools, platforms, or people. Give each a clear description.
+                            2. Concepts: Core paradigms, frameworks, architectural designs, procedures, rules, policies. Define each precisely.
+                            3. Claims: Facts, guidelines, configurations, assertions, metrics, or requirements. Detail each claim and link it to the subject.
+                            
+                            You must return ONLY a valid JSON object. Do NOT wrap the response in markdown blocks (such as ```json). Do NOT add any conversational text before or after the JSON.
+                            {
+                              "entities": [
+                                {"name": "Entity Name", "type": "organization/technology/etc", "description": "Concise description of the entity"}
+                              ],
+                              "concepts": [
+                                {"name": "Concept Name", "description": "Precise definition of this concept"}
+                              ],
+                              "claims": [
+                                {"subject": "Entity/Concept name", "claim": "Fact, metric, assertion, or config", "sourceContext": "Exact text sentence or clear context"}
+                              ]
+                            }
+                            """;
+
+                        log.info("[MRP Pipeline] [Map Phase] Đang gửi yêu cầu LLM trích xuất cho chunk {}...", index);
+                        String response = callChatWithRetry(provider, mapSystemPrompt, chunkText, MAP_PHASE_SCHEMA, "mrp-map-" + documentId + "-" + index);
+                        log.info("[MRP Pipeline] [Map Phase] Raw LLM response for chunk {}: \n{}", index, response);
+
+                        String cleanedJson = cleanJsonResponse(response, true);
+                        log.info("[MRP Pipeline] [Map Phase] Cleaned JSON for chunk {}: \n{}", index, cleanedJson);
+                        
+                        // Validate JSON parsing and ensure non-empty structure
+                        JsonNode rootNode = objectMapper.readTree(cleanedJson);
+                        if (rootNode.isEmpty()) {
+                            throw new RuntimeException("LLM returned an empty or invalid extract structure");
+                        }
+
+                        extract.setExtractJson(cleanedJson);
+                        extract.setStatus("DONE");
+                        extract.setErrorMessage(null);
+                        log.info("[MRP Pipeline] [Map Phase] Trích xuất thành công chunk {}.", index);
+                    } catch (Exception e) {
+                        log.error("[MRP Pipeline] [Map Phase] Lỗi trích xuất chunk {}: {}", index, e.getMessage());
+                        extract.setStatus("ERROR");
+                        extract.setErrorMessage(e.getMessage());
+                    }
+
+                    return sourceChunkExtractRepository.save(extract);
+                }, mrpVirtualThreadExecutor);
+
+                futures.add(future);
+            }
+
+            // Wait for all Map jobs to complete
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+            log.info("[MRP Pipeline] [Map Phase] Đã hoàn tất Map Phase.");
+
+            // --- PHASE 2: REDUCE PHASE (Tổng hợp, Deduplicate & Reconcile) ---
+            log.info("[MRP Pipeline] [Reduce Phase] Bắt đầu tổng hợp tri thức trích xuất...");
+            List<SourceChunkExtract> doneChunks = sourceChunkExtractRepository.findBySourceDocumentIdAndStatus(documentId, "DONE");
+            
+            List<Map<String, Object>> allEntities = new ArrayList<>();
+            List<Map<String, Object>> allConcepts = new ArrayList<>();
+            List<Map<String, Object>> allClaims = new ArrayList<>();
+
+            for (SourceChunkExtract chunk : doneChunks) {
+                try {
+                    Map<String, Object> data = objectMapper.readValue(chunk.getExtractJson(), new TypeReference<>() {});
+                    if (data.containsKey("entities")) {
+                        allEntities.addAll((List<Map<String, Object>>) data.get("entities"));
+                    }
+                    if (data.containsKey("concepts")) {
+                        allConcepts.addAll((List<Map<String, Object>>) data.get("concepts"));
+                    }
+                    if (data.containsKey("claims")) {
+                        allClaims.addAll((List<Map<String, Object>>) data.get("claims"));
+                    }
+                } catch (Exception e) {
+                    log.warn("[MRP Pipeline] Không thể parse JSON chunk {}: {}", chunk.getChunkIndex(), e.getMessage());
+                }
+            }
+
+            // Deduplicate entities & concepts, matching and grouping claims
+            Map<String, String> entityDescriptions = new HashMap<>();
+            Map<String, String> conceptDescriptions = new HashMap<>();
+            Map<String, List<String>> subjectClaims = new HashMap<>();
+
+            for (Map<String, Object> entity : allEntities) {
+                String name = (String) entity.get("name");
+                String desc = (String) entity.get("description");
+                if (name != null && !name.isBlank()) {
+                    entityDescriptions.merge(name.trim(), desc != null ? desc : "", (o, n) -> o.length() > n.length() ? o : n);
+                }
+            }
+
+            for (Map<String, Object> concept : allConcepts) {
+                String name = (String) concept.get("name");
+                String desc = (String) concept.get("description");
+                if (name != null && !name.isBlank()) {
+                    conceptDescriptions.merge(name.trim(), desc != null ? desc : "", (o, n) -> o.length() > n.length() ? o : n);
+                }
+            }
+
+            for (Map<String, Object> claim : allClaims) {
+                String subject = (String) claim.get("subject");
+                String assertion = (String) claim.get("claim");
+                String sourceContext = (String) claim.get("sourceContext");
+                if (subject != null && assertion != null && !subject.isBlank() && !assertion.isBlank()) {
+                    String claimDetail = assertion.trim();
+                    if (sourceContext != null && !sourceContext.isBlank()) {
+                        claimDetail += " [Source Context: " + sourceContext.trim() + "]";
+                    }
+                    subjectClaims.computeIfAbsent(subject.trim(), k -> new ArrayList<>()).add(claimDetail);
+                }
+            }
+
+            // Reconcile with existing WikiPages via Slug & Workspace
+            List<Map<String, Object>> planningItems = new ArrayList<>();
+            Set<String> uniqueSubjects = new HashSet<>();
+            uniqueSubjects.addAll(entityDescriptions.keySet());
+            uniqueSubjects.addAll(conceptDescriptions.keySet());
+
+            for (String subject : uniqueSubjects) {
+                String slug = slugify(subject);
+                Optional<WikiPage> existingPage = wikiPageRepository.findBySlugAndWorkspaceId(slug, finalWorkspaceId);
+
+                Map<String, Object> planItem = new HashMap<>();
+                planItem.put("title", subject);
+                planItem.put("slug", slug);
+                
+                if (existingPage.isPresent()) {
+                    planItem.put("action", "UPDATE");
+                    planItem.put("wikiPageId", existingPage.get().getId());
+                    planItem.put("baseVersion", existingPage.get().getVersion());
+                } else {
+                    planItem.put("action", "CREATE");
+                    planItem.put("wikiPageId", null);
+                }
+
+                planItem.put("pageType", entityDescriptions.containsKey(subject) ? "entity" : "concept");
+                planItem.put("reason", String.format("Extracted from source document. Deduped & compiled."));
+                
+                List<String> claimsList = subjectClaims.getOrDefault(subject, new ArrayList<>());
+                if (claimsList.isEmpty()) {
+                    String desc = entityDescriptions.containsKey(subject) ? entityDescriptions.get(subject) : conceptDescriptions.get(subject);
+                    if (desc != null && !desc.isBlank()) {
+                        claimsList.add(desc);
+                    }
+                }
+                planItem.put("keyClaims", claimsList);
+
+                planningItems.add(planItem);
+            }
+
+            // --- ADD SOURCE PLAN ITEM ---
+            Optional<Document> existingDoc = documentRepository.findById(documentId);
+            if (existingDoc.isPresent()) {
+                Document doc = existingDoc.get();
+                String sourceTitle = doc.getFileName();
+                if (sourceTitle == null || sourceTitle.isBlank()) {
+                    sourceTitle = "Source Document " + documentId;
+                } else {
+                    int lastDot = sourceTitle.lastIndexOf('.');
+                    if (lastDot > 0) {
+                        sourceTitle = sourceTitle.substring(0, lastDot);
+                    }
+                }
+                sourceTitle = sourceTitle.trim();
+
+                String sourceSlug = "source/" + slugify(sourceTitle);
+                Optional<WikiPage> existingSourcePage = wikiPageRepository.findBySlugAndWorkspaceId(sourceSlug, finalWorkspaceId);
+
+                Map<String, Object> sourcePlanItem = new HashMap<>();
+                sourcePlanItem.put("title", sourceTitle);
+                sourcePlanItem.put("slug", sourceSlug);
+                
+                if (existingSourcePage.isPresent()) {
+                    sourcePlanItem.put("action", "UPDATE");
+                    sourcePlanItem.put("wikiPageId", existingSourcePage.get().getId());
+                    sourcePlanItem.put("baseVersion", existingSourcePage.get().getVersion());
+                } else {
+                    sourcePlanItem.put("action", "CREATE");
+                    sourcePlanItem.put("wikiPageId", null);
+                }
+                
+                sourcePlanItem.put("pageType", "source");
+                sourcePlanItem.put("reason", "Source document compiled as a reference entry linking to all extracted topics.");
+                
+                List<String> sourceClaims = new ArrayList<>();
+                sourceClaims.add("Tài liệu gốc: " + doc.getFileName() + " [Source Context: " + doc.getFileName() + "]");
+                sourceClaims.add("Tài liệu chứa thông tin chi tiết về các chủ đề chính: " + 
+                    uniqueSubjects.stream().collect(Collectors.joining(", ")) + " [Source Context: " + doc.getFileName() + "]");
+                sourcePlanItem.put("keyClaims", sourceClaims);
+
+                planningItems.add(sourcePlanItem);
+            }
+
+            // Generate robust plan JSON via LLM compilation plan optimization
+            String planJson;
+            try {
+                String rawItemsJson = objectMapper.writeValueAsString(planningItems);
+                
+                String planSystemPrompt = """
+                    You are a Senior Technical Knowledge Architect.
+                    You are given a rough list of topics (entities/concepts) and their associated claims/facts.
+                    Your job is to structure this into a professional, cohesive Wiki compilation plan.
+                    
+                    You must classify each page into one of the following exact types:
+                    - "entity": Specific names of organizations, technologies, tools, platforms, systems, devices, products, or individuals.
+                    - "concept": Abstract paradigms, theoretical models, frameworks, architectural designs, algorithms, rules, policies, or procedures.
+                    - "topic": Broad subjects, themes, categories, or high-level tag-like grouping pages that aggregate other elements.
+                    - "source": Reference documents, articles, books, news, reports, files, or original records from which facts are derived.
+                    
+                    You must:
+                    1. Consolidate topics that are highly related to avoid a cluttered Wiki.
+                    2. Verify names and write precise slugs.
+                    3. Ensure that keyClaims are prioritized and concise.
+                    4. Crucial: Do NOT modify or remove the "[Source Context: ...]" suffix of any claim, as these contain the original reference sentences.
+                    5. Crucial: Do NOT introduce, expand, or add any new entities, concepts, facts, or details that are not explicitly present in the input list. You must only organize and structure what is provided.
+                    
+                    You MUST return a valid JSON array of Plan Items matching this schema exactly.
+                    [
+                      {
+                        "title": "Cohesive Title",
+                        "slug": "url-friendly-slug",
+                        "action": "CREATE" or "UPDATE",
+                        "wikiPageId": 123 (if UPDATE, otherwise null),
+                        "pageType": "entity" or "concept" or "topic" or "source",
+                        "reason": "Why this page needs creation or update",
+                        "keyClaims": ["Detailed claim 1 [Source Context: ...]", "Detailed claim 2 [Source Context: ...]"]
+                      }
+                    ]
+                    """;
+
+                log.info("[MRP Pipeline] [Reduce Phase] Đang gọi LLM tối ưu hóa Kế hoạch Biên soạn...");
+                String planResponse = callChatWithRetry(provider, planSystemPrompt, rawItemsJson, REDUCE_PHASE_SCHEMA, "mrp-plan-" + documentId);
+                log.info("[MRP Pipeline] [Reduce Phase] Raw LLM response: \n{}", planResponse);
+
+                planJson = cleanJsonResponse(planResponse, false);
+                log.info("[MRP Pipeline] [Reduce Phase] Cleaned JSON: \n{}", planJson);
+                
+                // Verify valid JSON and non-empty content
+                JsonNode rootNode = objectMapper.readTree(planJson);
+                if (rootNode.isEmpty()) {
+                    throw new RuntimeException("LLM response parsed to an empty JSON structure");
+                }
+            } catch (Exception e) {
+                log.error("[MRP Pipeline] [Reduce Phase] Gặp lỗi tối ưu hóa kế hoạch qua LLM, sử dụng cấu trúc thô: {}", e.getMessage());
+                try {
+                    planJson = objectMapper.writeValueAsString(planningItems);
+                } catch (Exception ex) {
+                    throw new RuntimeException("Failed to serialize planning items: " + ex.getMessage());
+                }
+            }
+
+            // Update SourceCompilationPlan record
+            SourceCompilationPlan plan = sourceCompilationPlanRepository.findById(planId)
+                    .orElseThrow(() -> new IllegalArgumentException("Plan not found with ID: " + planId));
+
+            plan.setPlanJson(planJson);
+            plan.setStatus(autoApprove ? "APPROVED" : "PENDING_REVIEW");
+            sourceCompilationPlanRepository.save(plan);
+            natsEventPublisher.publishCompilationPlanUpdated(plan.getId(), plan.getSourceDocumentId(), finalWorkspaceId, plan.getStatus(), userId);
+
+            log.info("[MRP Pipeline] [Reduce Phase] Đã hoàn thành Kế hoạch biên soạn ID: {}, trạng thái: {}", plan.getId(), plan.getStatus());
+
+            if (autoApprove) {
+                // Automatically execute Refine & Commit Phase
+                executeCompilationPlan(plan.getId(), finalWorkspaceId, userId, true);
+            }
+        } catch (Exception e) {
+            log.error("[MRP Pipeline] [Async] Error in background compilation process: {}", e.getMessage(), e);
+            sourceCompilationPlanRepository.findById(planId).ifPresent(plan -> {
+                plan.setStatus("FAILED");
+                plan.setReviewNote("Compilation failed: " + e.getMessage());
+                sourceCompilationPlanRepository.save(plan);
+                natsEventPublisher.publishCompilationPlanUpdated(plan.getId(), plan.getSourceDocumentId(), finalWorkspaceId, "FAILED", userId);
+            });
+        }
     }
 
     /**

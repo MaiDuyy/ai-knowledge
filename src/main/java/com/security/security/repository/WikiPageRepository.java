@@ -17,11 +17,13 @@ public interface WikiPageRepository extends JpaRepository<WikiPage, Long> {
     List<WikiPage> findBySourceDocumentId(Long sourceDocumentId);
     List<WikiPage> findByWorkspaceId(String workspaceId);
     Page<WikiPage> findByWorkspaceId(String workspaceId, Pageable pageable);
-    Optional<WikiPage> findBySlugAndWorkspaceId(String slug, String workspaceId);
+    @Query("SELECT w FROM WikiPage w WHERE w.slug = :slug AND (w.workspaceId = :workspaceId OR (w.workspaceId = 'all' AND :workspaceId != 'default-workspace'))")
+    Optional<WikiPage> findBySlugAndWorkspaceId(@Param("slug") String slug, @Param("workspaceId") String workspaceId);
 
-    @Query("SELECT w FROM WikiPage w WHERE w.workspaceId = :workspaceId AND ("
+    @Query("SELECT w FROM WikiPage w WHERE (w.workspaceId = :workspaceId OR (w.workspaceId = 'all' AND :workspaceId != 'default-workspace')) AND ("
          + ":isAdmin = true OR "
          + "w.securityClassification = 'PUBLIC' OR "
+         + "(w.workspaceId = :workspaceId AND w.allowedRoles != 'HEAD') OR "
          + "(w.securityClassification = 'INTERNAL' AND (w.departmentId IS NULL OR w.departmentId = '')) OR "
          + "(w.departmentId IN :deptIdsWhereHead) OR "
          + "(w.departmentId IN :deptIdsWhereMember AND w.allowedRoles != 'HEAD')"
@@ -33,9 +35,10 @@ public interface WikiPageRepository extends JpaRepository<WikiPage, Long> {
         @Param("deptIdsWhereMember") List<String> deptIdsWhereMember
     );
 
-    @Query("SELECT w FROM WikiPage w WHERE w.workspaceId = :workspaceId AND ("
+    @Query("SELECT w FROM WikiPage w WHERE (w.workspaceId = :workspaceId OR (w.workspaceId = 'all' AND :workspaceId != 'default-workspace')) AND ("
          + ":isAdmin = true OR "
          + "w.securityClassification = 'PUBLIC' OR "
+         + "(w.workspaceId = :workspaceId AND w.allowedRoles != 'HEAD') OR "
          + "(w.securityClassification = 'INTERNAL' AND (w.departmentId IS NULL OR w.departmentId = '')) OR "
          + "(w.departmentId IN :deptIdsWhereHead) OR "
          + "(w.departmentId IN :deptIdsWhereMember AND w.allowedRoles != 'HEAD')"
@@ -61,9 +64,10 @@ public interface WikiPageRepository extends JpaRepository<WikiPage, Long> {
         java.time.LocalDateTime getUpdatedAt();
     }
 
-    @Query("SELECT w FROM WikiPage w WHERE w.workspaceId = :workspaceId AND ("
+    @Query("SELECT w FROM WikiPage w WHERE (w.workspaceId = :workspaceId OR (w.workspaceId = 'all' AND :workspaceId != 'default-workspace')) AND ("
          + ":isAdmin = true OR "
          + "w.securityClassification = 'PUBLIC' OR "
+         + "(w.workspaceId = :workspaceId AND w.allowedRoles != 'HEAD') OR "
          + "(w.securityClassification = 'INTERNAL' AND (w.departmentId IS NULL OR w.departmentId = '')) OR "
          + "(w.departmentId IN :deptIdsWhereHead) OR "
          + "(w.departmentId IN :deptIdsWhereMember AND w.allowedRoles != 'HEAD')"

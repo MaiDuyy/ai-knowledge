@@ -13,7 +13,6 @@ import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Component;
 
 import java.util.Set;
@@ -74,7 +73,7 @@ public class NatsDocumentSubscriber {
 
     private final Connection natsConnection;
     private final DocumentRepository documentRepository;
-    private final ApplicationEventPublisher eventPublisher;
+    private final NatsEventPublisher natsEventPublisher;
     private final ObjectMapper objectMapper;
 
     private Dispatcher dispatcher;
@@ -157,15 +156,15 @@ public class NatsDocumentSubscriber {
                     .filePath(null)         // no local path — using URL
                     .fileUrl(url)
                     .documentType(docType)
-                    .status(DocStatus.PENDING)
+                    .status(DocStatus.PROCESSING)
                     .chunkCount(0)
                     .build();
 
             Document saved = documentRepository.save(document);
             log.info("[NATS] Document record created: id={}", saved.getId());
 
-            // Trigger async RAG pipeline (same as direct upload)
-            eventPublisher.publishEvent(new DocumentUploadedEvent(this, saved));
+            // Trigger async RAG pipeline (JetStream message)
+            natsEventPublisher.publishDocumentIngestRequested(saved.getId(), saved.getUserId());
 
             msg.ack();
         } catch (Exception e) {

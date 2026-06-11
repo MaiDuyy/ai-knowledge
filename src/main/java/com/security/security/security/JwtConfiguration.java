@@ -8,8 +8,8 @@ import org.springframework.beans.factory.annotation.Value;
 @Setter
 
 public class JwtConfiguration {
-    @Value("${JWT_EXPIRATION}")
+    @Value("${jwt.expiration:86400}")
     private Long expiration;
-    @Value("${JWT_SECRET}")
+    @Value("${jwt.secret:default-secret-key-32-characters-or-more-for-jwt-security-1234567890}")
     private String secret;
 }

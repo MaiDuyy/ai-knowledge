@@ -3,6 +3,9 @@ package com.security.security.service;
 import com.security.security.dto.RAGResponseDTO;
 import com.security.security.dtorequest.RAGQueryPayload;
 import com.security.security.entity.Document;
+import com.security.security.client.WorkspaceServiceClient;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JsonNode;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
@@ -15,12 +18,15 @@ import org.springframework.ai.chat.prompt.SystemPromptTemplate;
 import org.springframework.ai.google.genai.GoogleGenAiChatOptions;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.HashMap;
+import java.util.ArrayList;
 import java.util.stream.Collectors;
 
 @Service
@@ -45,6 +51,14 @@ public class RAGService {
     private final DocumentService documentService;
     private final ConversationService conversationService;
     private final ChatMemory chatMemory;
+    private final WorkspaceServiceClient workspaceServiceClient;
+    private final ObjectMapper objectMapper;
+
+    @Value("${rag.top-k:5}")
+    private int topK;
+
+    @Value("${rag.similarity-threshold:0.2}")
+    private double similarityThreshold;
 
     /**
      * Perform a RAG query based on knowledge-service request
@@ -52,15 +66,16 @@ public class RAGService {
     public RAGResponseDTO performRAGQuery(RAGQueryPayload payload) {
         log.info("Performing permission-aware RAG query for user: {}", payload.getUserId());
 
-        int maxResults = payload.getOptions() != null ? payload.getOptions().getMaxResults() : TOP_K;
-        double minScore = payload.getOptions() != null ? payload.getOptions().getMinScore() : SIMILARITY_THRESHOLD;
+        int maxResults = payload.getOptions() != null ? payload.getOptions().getMaxResults() : topK;
+        double minScore = payload.getOptions() != null ? payload.getOptions().getMinScore() : similarityThreshold;
 
         SearchRequest.Builder searchRequestBuiler = SearchRequest.builder()
                 .query(payload.getQuery())
                 .topK(maxResults)
                 .similarityThreshold(minScore);
 
-        String filterExpr = buildFilterExpression(payload.getUserPermissions(), payload.getUserId());
+        boolean[] partialResults = new boolean[]{false};
+        String filterExpr = buildFilterExpression(payload.getUserPermissions(), payload.getUserId(), partialResults);
         if (filterExpr != null && !filterExpr.trim().isEmpty()) {
             log.info("Applying RAG metadata filter expression: {}", filterExpr);
             searchRequestBuiler.filterExpression(filterExpr);
@@ -72,9 +87,14 @@ public class RAGService {
         log.info("Found {} relevant documents for RAG", relevantDocs.size());
 
         if (relevantDocs.isEmpty()) {
+            Map<String, Object> metadata = new HashMap<>();
+            if (partialResults[0]) {
+                metadata.put("partial_results", true);
+            }
             return RAGResponseDTO.builder()
                     .answer("I couldn't find any relevant information in the internal documents I have access to.")
                     .sources(Collections.emptyList())
+                    .metadata(metadata)
                     .build();
         }
 
@@ -116,14 +136,17 @@ public class RAGService {
                 })
                 .collect(Collectors.toList());
 
+        Map<String, Object> metadata = new HashMap<>();
+        if (partialResults[0]) {
+            metadata.put("partial_results", true);
+        }
+
         return RAGResponseDTO.builder()
                 .answer(answer)
                 .sources(sources)
+                .metadata(metadata)
                 .build();
     }
-
-    private static final int TOP_K = 5;
-    private static final double SIMILARITY_THRESHOLD = 0.2;
 
     /**
      * Generate answer using RAG + Chat Memory + Streaming
@@ -142,10 +165,11 @@ public class RAGService {
             // 2. Vector Search
             SearchRequest.Builder searchRequestBuiler = SearchRequest.builder()
                     .query(question)
-                    .topK(TOP_K)
-                    .similarityThreshold(SIMILARITY_THRESHOLD);
+                    .topK(topK)
+                    .similarityThreshold(similarityThreshold);
 
-            String filterExpr = buildFilterExpression(permissions, userId);
+            boolean[] partialResults = new boolean[]{false};
+            String filterExpr = buildFilterExpression(permissions, userId, partialResults);
             if (filterExpr != null && !filterExpr.trim().isEmpty()) {
                 log.info("Applying RAG metadata filter expression for stream: {}", filterExpr);
                 searchRequestBuiler.filterExpression(filterExpr);
@@ -156,6 +180,9 @@ public class RAGService {
             List<org.springframework.ai.document.Document> relevantDocs = vectorStore.similaritySearch(searchRequest);
 
             if (relevantDocs.isEmpty()) {
+                if (partialResults[0]) {
+                    return Flux.just("Không tìm thấy thông tin liên quan.\n\n*Chú ý: Hệ thống quản lý phòng ban hiện đang bảo trì. Kết quả tìm kiếm chỉ truy xuất dữ liệu trong Workspace này.*");
+                }
                 return Flux.just("Không tìm thấy thông tin liên quan.");
             }
 
@@ -177,8 +204,7 @@ public class RAGService {
 
             java.util.concurrent.atomic.AtomicBoolean jsonStarted = new java.util.concurrent.atomic.AtomicBoolean(false);
 
-            // 6. CALL LLM WITH MEMORY 🔥
-            return Flux.from(
+            Flux<String> answerStream = Flux.from(
                     chatClient.prompt()
                             .system(systemPrompt)
                             .user(userPrompt)
@@ -200,7 +226,14 @@ public class RAGService {
                         }
                         return "";
                     })
-                    .filter(token -> !token.isEmpty())
+                    .filter(token -> !token.isEmpty());
+
+            if (partialResults[0]) {
+                answerStream = answerStream.concatWith(Flux.just("\n\n*Chú ý: Hệ thống quản lý phòng ban hiện đang bảo trì. Kết quả tìm kiếm chỉ truy xuất dữ liệu trong Workspace này.*"));
+            }
+
+            // 6. CALL LLM WITH MEMORY 🔥
+            return answerStream
                     .doOnNext(token -> fullResponse.append(token))
                     .doOnComplete(() -> {
                         long duration = System.currentTimeMillis() - startTime;
@@ -297,12 +330,12 @@ public class RAGService {
                 """.formatted(context, question);
     }
 
-    private String buildFilterExpression(RAGQueryPayload.UserPermissionContext context, String userId) {
+    private String buildFilterExpression(RAGQueryPayload.UserPermissionContext context, String userId, boolean[] partialResults) {
         if (context == null) {
             return "collectionId == 'none'";
         }
 
-        // 1. If Super Admin or Admin, bypass filtering (scoped by workspaceId)
+        // 1. If Super Admin or Admin, check roles/level
         List<String> roles = context.getRoles();
         Integer roleLevel = context.getRoleLevel();
         boolean isAdmin = false;
@@ -320,11 +353,25 @@ public class RAGService {
             resolvedWorkspaceId = "default-workspace";
         }
 
-        StringBuilder filter = new StringBuilder();
-        filter.append("(workspaceId == '").append(resolvedWorkspaceId).append("' || workspaceId == '' || workspaceId == 'default-workspace')");
-
         if (isAdmin) {
-            return filter.toString();
+            // Admin can selection-filter the search scope via x-rag-scope header (in context.getRagScope())
+            String ragScope = context.getRagScope();
+            if (ragScope != null && !ragScope.trim().isEmpty()) {
+                try {
+                    JsonNode node = objectMapper.readTree(ragScope);
+                    String type = node.path("type").asText("");
+                    String id = node.path("id").asText("");
+                    if ("department".equalsIgnoreCase(type)) {
+                        return "((workspaceId == '' || workspaceId == 'default-workspace' || workspaceId == 'all') && departmentId == '" + id + "')";
+                    } else if ("workspace".equalsIgnoreCase(type)) {
+                        return "workspaceId == '" + id + "'";
+                    }
+                } catch (Exception e) {
+                    log.error("Failed to parse x-rag-scope: {}", ragScope, e);
+                }
+            }
+            // Default Admin scope: public in current workspace only
+            return "workspaceId == '" + resolvedWorkspaceId + "' && (classification == 'PUBLIC' || securityClassification == 'PUBLIC')";
         }
 
         // 2. Check if user is Guest
@@ -338,46 +385,56 @@ public class RAGService {
 
         if (isGuest) {
             // Guest can only access PUBLIC documents in current workspace
-            filter.append(" && (classification == 'PUBLIC' || securityClassification == 'PUBLIC')");
-            return filter.toString();
+            return "workspaceId == '" + resolvedWorkspaceId + "' && (classification == 'PUBLIC' || securityClassification == 'PUBLIC')";
         }
 
-        // 3. Normal Employee / Manager
-        filter.append(" && (");
-
-        // 3.1. General company-wide public/internal documents
-        filter.append("((classification == 'PUBLIC' || classification == 'INTERNAL' || securityClassification == 'PUBLIC' || securityClassification == 'INTERNAL') && (departmentId == ''))");
-
-        // 3.2. Documents uploaded by the user themselves
-        if (userId != null && !userId.trim().isEmpty()) {
-            filter.append(" || uploadedBy == '").append(userId).append("'");
-        }
-
-        // 3.3. Department & Role boundaries
-        if (context.getUserDepartments() != null && !context.getUserDepartments().isEmpty()) {
-            for (RAGQueryPayload.DepartmentRole dept : context.getUserDepartments()) {
-                filter.append(" || (departmentId == '").append(dept.getDepartmentId()).append("'");
-                if ("MEMBER".equalsIgnoreCase(dept.getRole())) {
-                    filter.append(" && allowedRoles != 'HEAD'");
+        // 3. Normal Employee / Manager / HEAD
+        // Fetch workspace metadata / departmentId using WorkspaceServiceClient
+        boolean isServiceFailure = false;
+        String workspaceDeptId = null;
+        if (resolvedWorkspaceId != null && !resolvedWorkspaceId.isEmpty() && !"default-workspace".equals(resolvedWorkspaceId)) {
+            try {
+                Map<String, Object> workspaceInfo = workspaceServiceClient.getWorkspace(resolvedWorkspaceId, userId);
+                if (workspaceInfo == null || workspaceInfo.isEmpty()) {
+                    isServiceFailure = true;
+                } else {
+                    workspaceDeptId = (String) workspaceInfo.get("departmentId");
                 }
-                filter.append(")");
+            } catch (Exception e) {
+                log.error("Failed to query workspace department from messaging-service for workspaceId={}", resolvedWorkspaceId, e);
+                isServiceFailure = true;
             }
         }
 
-        // 3.4. Collections they have explicit access to (backward compatibility)
-        List<String> collections = context.getAccessibleCollections();
-        if (collections != null && !collections.isEmpty()) {
-            filter.append(" || collectionId in [");
-            for (int i = 0; i < collections.size(); i++) {
-                filter.append("'").append(collections.get(i)).append("'");
-                if (i < collections.size() - 1) {
-                    filter.append(",");
-                }
-            }
-            filter.append("]");
+        if (isServiceFailure) {
+            partialResults[0] = true;
+            return "workspaceId == '" + resolvedWorkspaceId + "'";
         }
 
+        // Build normal filter: current workspace OR department-wide public/role files
+        String userRoleInDept = null;
+        if (workspaceDeptId != null && !workspaceDeptId.isEmpty() && context.getUserDepartments() != null) {
+            for (RAGQueryPayload.DepartmentRole deptRole : context.getUserDepartments()) {
+                if (deptRole.getDepartmentId() != null && deptRole.getDepartmentId().equals(workspaceDeptId)) {
+                    userRoleInDept = deptRole.getRole();
+                    break;
+                }
+            }
+        }
+
+        StringBuilder filter = new StringBuilder();
+        filter.append("(workspaceId == '").append(resolvedWorkspaceId).append("'");
+        
+        if (workspaceDeptId != null && !workspaceDeptId.isEmpty()) {
+            filter.append(" || ((workspaceId == '' || workspaceId == 'default-workspace' || workspaceId == 'all') && departmentId == '").append(workspaceDeptId).append("'");
+            boolean isLeader = "HEAD".equalsIgnoreCase(userRoleInDept) || "MANAGER".equalsIgnoreCase(userRoleInDept);
+            if (!isLeader) {
+                filter.append(" && allowedRoles != 'HEAD'");
+            }
+            filter.append(")");
+        }
         filter.append(")");
+
         return filter.toString();
     }
 

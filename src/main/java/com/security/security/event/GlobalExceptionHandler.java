@@ -27,6 +27,13 @@ import static org.springframework.http.HttpStatus.*;
 @Slf4j
 public class GlobalExceptionHandler {
 
+    @ExceptionHandler(com.security.security.exception.TooManyRequestsException.class)
+    public ResponseEntity<Response> handleTooManyRequestsException(com.security.security.exception.TooManyRequestsException ex, HttpServletRequest request) {
+        log.warn("Too many requests error: {}", ex.getMessage());
+        return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                .body(getResponse(request, Collections.emptyMap(), ex.getMessage(), HttpStatus.TOO_MANY_REQUESTS));
+    }
+
     @ExceptionHandler(org.springframework.security.access.AccessDeniedException.class)
     public ResponseEntity<Response> handleAccessDeniedException(org.springframework.security.access.AccessDeniedException ex, HttpServletRequest request) {
         log.warn("Access denied error: {}", ex.getMessage());

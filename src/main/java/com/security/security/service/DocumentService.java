@@ -5,7 +5,6 @@ import com.security.security.entity.Document;
 import com.security.security.entity.Embedding;
 import com.security.security.entity.enumeration.DocStatus;
 import com.security.security.entity.enumeration.DocType;
-import com.security.security.event.DocumentUploadedEvent;
 import com.security.security.event.NatsEventPublisher;
 import com.security.security.exception.ApiException;
 import com.security.security.repository.DocumentRepository;
@@ -20,7 +19,6 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -47,7 +45,6 @@ public class DocumentService {
 
     private final DocumentRepository documentRepository;
     private final VectorStore vectorStore;
-    private final ApplicationEventPublisher eventPublisher;
     private final TikaHtmlExtractor tikaHtmlExtractor;
     private final HtmlToMarkdownConverter htmlToMarkdownConverter;
     private final EmbeddingRepository embeddingRepository;
@@ -69,6 +66,62 @@ public class DocumentService {
                     .anyMatch(a -> a.equals("ROLE_ADMIN") || a.equals("ROLE_SUPER_ADMIN") || a.equals("ROLE_ORG_ADMIN") || a.contains("ADMIN"));
         }
         return false;
+    }
+
+    private static class ParsedUserPermissions {
+        boolean isAdmin = false;
+        List<String> deptIdsWhereHead = new ArrayList<>();
+        List<String> deptIdsWhereMember = new ArrayList<>();
+    }
+
+    private ParsedUserPermissions parseUserPermissions(String userRole, String userDepartments) {
+        ParsedUserPermissions permissions = new ParsedUserPermissions();
+        
+        // 1. Check admin status from userRole
+        if (userRole != null) {
+            String upper = userRole.toUpperCase();
+            if (upper.contains("SUPER_ADMIN") || upper.contains("ADMIN") || upper.contains("ORG_ADMIN")) {
+                permissions.isAdmin = true;
+            }
+        }
+        
+        // Double-check from SecurityContextHolder
+        var auth = org.springframework.security.core.context.SecurityContextHolder.getContext().getAuthentication();
+        if (auth != null) {
+            boolean hasAdminAuthority = auth.getAuthorities().stream()
+                    .map(org.springframework.security.core.GrantedAuthority::getAuthority)
+                    .anyMatch(a -> a.equals("ROLE_ADMIN") || a.equals("ROLE_SUPER_ADMIN") || a.equals("ROLE_ORG_ADMIN") || a.contains("ADMIN"));
+            if (hasAdminAuthority) {
+                permissions.isAdmin = true;
+            }
+        }
+        
+        // 2. Parse departments and roles
+        if (userDepartments != null && !userDepartments.trim().isEmpty()) {
+            try {
+                // Parse [{"departmentId": "...", "role": "..."}]
+                com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+                List<Map<String, String>> depts = mapper.readValue(
+                    userDepartments, 
+                    new com.fasterxml.jackson.core.type.TypeReference<List<Map<String, String>>>() {}
+                );
+                for (Map<String, String> dept : depts) {
+                    String deptId = dept.get("departmentId");
+                    String role = dept.get("role");
+                    if (deptId != null && !deptId.trim().isEmpty()) {
+                        if ("HEAD".equalsIgnoreCase(role) || "MANAGER".equalsIgnoreCase(role)) {
+                            permissions.deptIdsWhereHead.add(deptId);
+                        } else {
+                            permissions.deptIdsWhereMember.add(deptId);
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                log.error("Failed to parse x-user-departments header in DocumentService: {}", e.getMessage());
+            }
+        }
+        
+        return permissions;
     }
 
     private void validateWorkspaceAccess(String workspaceId, String userId) {
@@ -122,13 +175,23 @@ public class DocumentService {
 
     @Transactional
     public DocumentUploadResponse uploadDocument(MultipartFile file, String userId, Boolean preview, String parser, String workspaceId, String departmentId, String allowedRoles, String securityClassification) {
-        log.info("Uploading document for user: {}, preview: {}, parser: {}, workspaceId: {}, departmentId: {}, allowedRoles: {}, classification: {}", 
-                userId, preview, parser, workspaceId, departmentId, allowedRoles, securityClassification);
+        return uploadDocument(file, userId, preview, parser, workspaceId, departmentId, allowedRoles, securityClassification, null, null);
+    }
 
-        String resolvedWorkspaceId = workspaceId;
-        if (resolvedWorkspaceId == null || resolvedWorkspaceId.trim().isEmpty() || "all".equalsIgnoreCase(resolvedWorkspaceId.trim())) {
-            resolvedWorkspaceId = "default-workspace";
-        }
+    @Transactional
+    public DocumentUploadResponse uploadDocument(
+            MultipartFile file,
+            String userId,
+            Boolean preview,
+            String parser,
+            String workspaceId,
+            String departmentId,
+            String allowedRoles,
+            String securityClassification,
+            String userRole,
+            String userDepartments) {
+        log.info("Uploading document for user: {}, preview: {}, parser: {}, workspaceId: {}, departmentId: {}, allowedRoles: {}, classification: {}, role: {}, depts: {}", 
+                userId, preview, parser, workspaceId, departmentId, allowedRoles, securityClassification, userRole, userDepartments);
 
         if (file == null || file.isEmpty()) {
             throw new ApiException("File is empty");
@@ -142,142 +205,245 @@ public class DocumentService {
             throw new ApiException("Unsupported file type. Only PDF, DOCX, TXT are allowed.");
         }
 
+        // 1. Resolve workspaceId
+        String resolvedWorkspaceId = workspaceId;
+        if (resolvedWorkspaceId != null && resolvedWorkspaceId.trim().isEmpty()) {
+            resolvedWorkspaceId = null;
+        }
+        if ("all".equalsIgnoreCase(resolvedWorkspaceId)) {
+            resolvedWorkspaceId = null;
+        }
+
+        boolean isDeptLevel = (resolvedWorkspaceId == null);
+
+        // 2. Resolve departmentId & validate workspace access
+        String targetDeptId = (departmentId != null && !departmentId.isBlank()) ? departmentId : null;
+        if (!isDeptLevel && !"default-workspace".equals(resolvedWorkspaceId)) {
+            // Workspace-level upload: Validate access and fetch workspace info
+            Map<String, Object> workspaceMap = workspaceServiceClient.getWorkspace(resolvedWorkspaceId, userId);
+            if (workspaceMap.isEmpty()) {
+                log.warn("[Security] Access denied or workspace not found: User {} in Workspace {}", userId, resolvedWorkspaceId);
+                throw new AccessDeniedException("You do not have access to Workspace: " + resolvedWorkspaceId);
+            }
+            if (targetDeptId == null) {
+                targetDeptId = (String) workspaceMap.get("departmentId");
+            }
+        }
+
+        // 3. Permission checks
+        ParsedUserPermissions perms = parseUserPermissions(userRole, userDepartments);
+        boolean hasLeaderPrivilege = perms.isAdmin;
+        if (!hasLeaderPrivilege && targetDeptId != null && perms.deptIdsWhereHead.contains(targetDeptId)) {
+            hasLeaderPrivilege = true;
+        }
+
+        if (isDeptLevel && !hasLeaderPrivilege) {
+            throw new AccessDeniedException("Chỉ Trưởng phòng, Phó phòng và Quản trị viên mới có quyền upload tài liệu dùng chung cấp phòng ban.");
+        }
+
+        // 4. Save file to disk
+        String storedPath;
+        String safeName;
+        DocType docType;
         try {
-            // 1) Create upload directory if it doesn't exist
             Path uploadPath = Paths.get(uploadDir);
             if (!Files.exists(uploadPath)) {
                 Files.createDirectories(uploadPath);
             }
 
-            // 2) Sanitize original filename (remove any path parts)
             String originalName = file.getOriginalFilename();
-            String safeName = (originalName == null || originalName.isBlank())
+            safeName = (originalName == null || originalName.isBlank())
                     ? "file"
                     : Paths.get(originalName).getFileName().toString();
 
-            // 3) Unique filename
             String ext = getFileExtension(safeName);
-            DocType docType = resolveDocTypeByExtension(ext);
-
+            docType = resolveDocTypeByExtension(ext);
             if (docType == null) {
                 throw new ApiException("Unsupported file type. Only PDF, DOCX, TXT are allowed.");
             }
 
             String uniqueFileName = "doc_" + userId + "_" + UUID.randomUUID() + ext;
-
-            // 4) Save file (copy stream)
             Path targetPath = uploadPath.resolve(uniqueFileName).normalize();
-
-            // Optional safety: prevent path traversal
             if (!targetPath.startsWith(uploadPath.normalize())) {
                 throw new ApiException("Invalid file path");
             }
 
             Files.copy(file.getInputStream(), targetPath, StandardCopyOption.REPLACE_EXISTING);
-
-            log.info("Document uploaded successfully: {}", uniqueFileName);
-
-            String storedPath = targetPath.toString();
-
-            boolean isPreview = preview != null && preview;
-
-            Document document = Document.builder()
-                    .userId(userId)
-                    .workspaceId(resolvedWorkspaceId)          // Associate document with workspace
-                    .fileName(safeName)                 // tên gốc để hiển thị
-                    .fileSize((int) file.getSize())
-                    .filePath(storedPath)               // path file đã lưu
-                    .documentType(docType)
-                    .status(isPreview ? DocStatus.PREVIEW : DocStatus.PENDING)
-                    .chunkCount(0)
-                    .parserMethod(parser != null ? parser : "gemini")
-                    .departmentId(departmentId)
-                    .allowedRoles(allowedRoles != null && !allowedRoles.isBlank() ? allowedRoles : "ALL")
-                    .securityClassification(securityClassification != null && !securityClassification.isBlank() ? securityClassification : "INTERNAL")
-                    .build();
-
-            if (isPreview) {
-                // Parse immediately to extract raw Markdown
-                try {
-                    log.info("Immediately parsing document {} for preview", safeName);
-                    String markdown = null;
-
-                    try {
-                        if (doclingClient.isHealthy()) {
-                            log.info("[Preview] Docling is healthy. Using Docling API for '{}' with preferred parser: '{}'", safeName, document.getParserMethod());
-                            DoclingClient.DoclingResult doclingResult = doclingClient.convertToMarkdown(new FileSystemResource(storedPath), safeName, document.getParserMethod());
-                            if (doclingResult.success()) {
-                                markdown = doclingResult.markdown();
-                                log.info("[Preview] Successfully parsed with Docling: {} chars", markdown.length());
-                            } else {
-                                log.warn("[Preview] Docling parsing failed: {}. Falling back to Apache Tika.", doclingResult.errorMessage());
-                            }
-                        } else {
-                            log.info("[Preview] Docling is offline. Falling back to Apache Tika.");
-                        }
-                    } catch (Exception doclingEx) {
-                        log.warn("[Preview] Error calling Docling: {}. Falling back to Apache Tika.", doclingEx.getMessage());
-                    }
-
-                    if (markdown == null) {
-                        log.info("[Preview] Running Apache Tika fallback extraction.");
-                        TikaHtmlResult htmlResult = tikaHtmlExtractor.extract(new FileSystemResource(storedPath));
-                        String rawHtml = htmlResult.html();
-                        markdown = htmlToMarkdownConverter.convert(rawHtml);
-                    }
-                    document.setMarkdownContent(markdown);
-                } catch (Exception parseEx) {
-                    log.error("Failed to pre-parse document for preview: {}", parseEx.getMessage());
-                    document.setStatus(DocStatus.FAILED);
-                    document.setErrorMessage("Failed to pre-parse document: " + parseEx.getMessage());
-                }
-            }
-
-            Document saved = documentRepository.save(document);
-            natsEventPublisher.publishDocumentStatus(saved.getId(), saved.getUserId(), saved.getWorkspaceId(), saved.getStatus().name());
-
-            if (!isPreview && saved.getStatus() != DocStatus.FAILED) {
-                // Trigger async processing
-                eventPublisher.publishEvent(new DocumentUploadedEvent(this, saved));
-            }
-
-            return DocumentUploadResponse.builder()
-                    .documentId(saved.getId())
-                    .fileName(saved.getFileName())
-                    .status(String.valueOf(saved.getStatus()))
-                    .markdownContent(saved.getMarkdownContent())
-                    .message(isPreview 
-                            ? "Document uploaded and parsed for preview successfully."
-                            : "Document uploaded successfully. Processing started.")
-                    .build();
-
+            storedPath = targetPath.toString();
+            log.info("Document uploaded successfully to disk: {}", uniqueFileName);
         } catch (IOException e) {
-            log.error("Error uploading document for user {}: {}", userId, e.getMessage());
+            log.error("Error saving document to disk for user {}: {}", userId, e.getMessage());
             throw new ApiException("Failed to upload document. Please try again with a valid file.");
-        } catch (Exception e) {
-            log.error("Unexpected error uploading document for user {}: {}", userId, e.getMessage());
-            throw new ApiException("Failed to upload document due to an internal error.");
         }
+
+        boolean isPreview = preview != null && preview;
+
+        // Determine initial status based on role privileges and preview flag
+        DocStatus docStatus;
+        if (isPreview) {
+            docStatus = DocStatus.PREVIEW;
+        } else if (hasLeaderPrivilege) {
+            docStatus = DocStatus.PROCESSING;
+        } else {
+            docStatus = DocStatus.PENDING;
+        }
+
+        Document document = Document.builder()
+                .userId(userId)
+                .workspaceId(resolvedWorkspaceId)
+                .fileName(safeName)
+                .fileSize((int) file.getSize())
+                .filePath(storedPath)
+                .documentType(docType)
+                .status(docStatus)
+                .chunkCount(0)
+                .parserMethod(parser != null ? parser : "gemini")
+                .departmentId(targetDeptId)
+                .allowedRoles(allowedRoles != null && !allowedRoles.isBlank() ? allowedRoles : "ALL")
+                .securityClassification(securityClassification != null && !securityClassification.isBlank() ? securityClassification : "INTERNAL")
+                .build();
+
+        if (isPreview) {
+            // Parse immediately to extract raw Markdown for preview
+            try {
+                log.info("Immediately parsing document {} for preview", safeName);
+                String markdown = null;
+                try {
+                    if (doclingClient.isHealthy()) {
+                        DoclingClient.DoclingResult doclingResult = doclingClient.convertToMarkdown(
+                                new FileSystemResource(storedPath), safeName, document.getParserMethod());
+                        if (doclingResult.success()) {
+                            markdown = doclingResult.markdown();
+                        }
+                    }
+                } catch (Exception doclingEx) {
+                    log.warn("[Preview] Error calling Docling: {}. Falling back to Apache Tika.", doclingEx.getMessage());
+                }
+
+                if (markdown == null) {
+                    TikaHtmlResult htmlResult = tikaHtmlExtractor.extract(new FileSystemResource(storedPath));
+                    markdown = htmlToMarkdownConverter.convert(htmlResult.html());
+                }
+                document.setMarkdownContent(markdown);
+            } catch (Exception parseEx) {
+                log.error("Failed to pre-parse document for preview: {}", parseEx.getMessage());
+                document.setStatus(DocStatus.FAILED);
+                document.setErrorMessage("Failed to pre-parse document: " + parseEx.getMessage());
+            }
+        }
+
+        Document saved = documentRepository.save(document);
+        natsEventPublisher.publishDocumentStatus(saved.getId(), saved.getUserId(), saved.getWorkspaceId(), saved.getStatus().name());
+
+        // Trigger ETL pipeline immediately if status is PROCESSING
+        if (saved.getStatus() == DocStatus.PROCESSING) {
+            natsEventPublisher.publishDocumentIngestRequested(saved.getId(), saved.getUserId());
+        }
+
+        return DocumentUploadResponse.builder()
+                .documentId(saved.getId())
+                .fileName(saved.getFileName())
+                .status(saved.getStatus().name())
+                .markdownContent(saved.getMarkdownContent())
+                .message(isPreview 
+                        ? "Document uploaded and parsed for preview successfully."
+                        : (saved.getStatus() == DocStatus.PENDING 
+                            ? "Document uploaded successfully. Awaiting leader approval."
+                            : "Document uploaded successfully. Processing started."))
+                .build();
     }
 
     /**
      * Get documents scoped by workspaceId.
      * Falls back to company-wide listing if workspaceId is null/blank (backward compat).
      */
-    public List<Document> getDocuments(String userId, String workspaceId) {
-        validateWorkspaceAccess(workspaceId, userId);
-        if (workspaceId != null && !workspaceId.isBlank()) {
-            return documentRepository.findByWorkspaceIdOrderByCreatedAtDesc(workspaceId);
+    private List<Document> filterDocumentsByRole(List<Document> docs, String userRole, String userDepartments) {
+        ParsedUserPermissions perms = parseUserPermissions(userRole, userDepartments);
+        if (perms.isAdmin) {
+            return docs; // Admin sees everything
         }
-        return documentRepository.findAllByOrderByCreatedAtDesc();
+
+        List<Document> filtered = new java.util.ArrayList<>();
+        for (Document doc : docs) {
+            String allowed = doc.getAllowedRoles();
+            if (allowed == null || allowed.isBlank() || "ALL".equalsIgnoreCase(allowed)) {
+                filtered.add(doc);
+                continue;
+            }
+
+            String docDeptId = doc.getDepartmentId();
+            if (docDeptId != null && !docDeptId.isBlank()) {
+                if ("HEAD".equalsIgnoreCase(allowed)) {
+                    if (perms.deptIdsWhereHead.contains(docDeptId)) {
+                        filtered.add(doc);
+                    }
+                } else if ("MEMBER".equalsIgnoreCase(allowed)) {
+                    if (perms.deptIdsWhereMember.contains(docDeptId) || perms.deptIdsWhereHead.contains(docDeptId)) {
+                        filtered.add(doc);
+                    }
+                }
+            } else {
+                filtered.add(doc);
+            }
+        }
+        return filtered;
     }
 
-    public Page<Document> getDocuments(String userId, String workspaceId, Pageable pageable) {
+    /**
+     * Get documents scoped by workspaceId.
+     * Falls back to company-wide listing if workspaceId is null/blank (backward compat).
+     */
+    public List<Document> getDocuments(String userId, String workspaceId, String userRole, String userDepartments) {
         validateWorkspaceAccess(workspaceId, userId);
+        List<Document> docs;
         if (workspaceId != null && !workspaceId.isBlank()) {
-            return documentRepository.findByWorkspaceIdOrderByCreatedAtDesc(workspaceId, pageable);
+            String departmentId = null;
+            if (!"default-workspace".equals(workspaceId)) {
+                try {
+                    Map<String, Object> ws = workspaceServiceClient.getWorkspace(workspaceId, userId);
+                    if (ws != null && !ws.isEmpty()) {
+                        departmentId = (String) ws.get("departmentId");
+                    }
+                } catch (Exception e) {
+                    log.warn("Failed to get workspace department for workspaceId={}: {}", workspaceId, e.getMessage());
+                }
+            }
+            if (departmentId != null && !departmentId.isBlank()) {
+                docs = documentRepository.findByWorkspaceIdOrDepartmentIdAndWorkspaceIdEmpty(workspaceId, departmentId);
+            } else {
+                docs = documentRepository.findByWorkspaceIdOrderByCreatedAtDesc(workspaceId);
+            }
+        } else {
+            docs = documentRepository.findAllByOrderByCreatedAtDesc();
         }
-        return documentRepository.findAllByOrderByCreatedAtDesc(pageable);
+        return filterDocumentsByRole(docs, userRole, userDepartments);
+    }
+
+    public Page<Document> getDocuments(String userId, String workspaceId, Pageable pageable, String userRole, String userDepartments) {
+        validateWorkspaceAccess(workspaceId, userId);
+        Page<Document> page;
+        if (workspaceId != null && !workspaceId.isBlank()) {
+            String departmentId = null;
+            if (!"default-workspace".equals(workspaceId)) {
+                try {
+                    Map<String, Object> ws = workspaceServiceClient.getWorkspace(workspaceId, userId);
+                    if (ws != null && !ws.isEmpty()) {
+                        departmentId = (String) ws.get("departmentId");
+                    }
+                } catch (Exception e) {
+                    log.warn("Failed to get workspace department for workspaceId={}: {}", workspaceId, e.getMessage());
+                }
+            }
+            if (departmentId != null && !departmentId.isBlank()) {
+                page = documentRepository.findByWorkspaceIdOrDepartmentIdAndWorkspaceIdEmpty(workspaceId, departmentId, pageable);
+            } else {
+                page = documentRepository.findByWorkspaceIdOrderByCreatedAtDesc(workspaceId, pageable);
+            }
+        } else {
+            page = documentRepository.findAllByOrderByCreatedAtDesc(pageable);
+        }
+        List<Document> filteredList = filterDocumentsByRole(page.getContent(), userRole, userDepartments);
+        return new org.springframework.data.domain.PageImpl<>(filteredList, pageable, page.getTotalElements());
     }
 
     public List<Document> getUserDocuments(String userId) {
@@ -305,8 +471,31 @@ public class DocumentService {
         return doc;
     }
 
-    public org.springframework.core.io.Resource getDocumentFileResource(Long documentId, String userId) {
+    public Document getDocument(Long documentId, String userId, String userRole, String userDepartments) {
         Document doc = getDocument(documentId, userId);
+        String allowed = doc.getAllowedRoles();
+        if (allowed != null && !allowed.isBlank() && !"ALL".equalsIgnoreCase(allowed)) {
+            ParsedUserPermissions perms = parseUserPermissions(userRole, userDepartments);
+            if (!perms.isAdmin) {
+                String docDeptId = doc.getDepartmentId();
+                if (docDeptId != null && !docDeptId.isBlank()) {
+                    if ("HEAD".equalsIgnoreCase(allowed)) {
+                        if (!perms.deptIdsWhereHead.contains(docDeptId)) {
+                            throw new AccessDeniedException("Chỉ Trưởng phòng hoặc Quản trị viên mới được phép truy cập tài liệu này.");
+                        }
+                    } else if ("MEMBER".equalsIgnoreCase(allowed)) {
+                        if (!perms.deptIdsWhereMember.contains(docDeptId) && !perms.deptIdsWhereHead.contains(docDeptId)) {
+                            throw new AccessDeniedException("Chỉ thành viên thuộc phòng ban này mới được phép truy cập tài liệu.");
+                        }
+                    }
+                }
+            }
+        }
+        return doc;
+    }
+
+    public org.springframework.core.io.Resource getDocumentFileResource(Long documentId, String userId, String userRole, String userDepartments) {
+        Document doc = getDocument(documentId, userId, userRole, userDepartments);
         if (doc.getFilePath() == null) {
             throw new ApiException("Original file not found for this document");
         }
@@ -315,6 +504,10 @@ public class DocumentService {
             throw new ApiException("Original file not found on disk");
         }
         return new FileSystemResource(path);
+    }
+
+    public org.springframework.core.io.Resource getDocumentFileResource(Long documentId, String userId) {
+        return getDocumentFileResource(documentId, userId, null, null);
     }
 
     @Transactional
@@ -326,18 +519,24 @@ public class DocumentService {
             throw new ApiException("Permission denied. You can only delete documents you uploaded.");
         }
 
-        // Delete from VectorStore
-        try {
-            vectorStore.delete(String.format("documentId == '%s'", documentId));
-        } catch (Exception e) {
-            log.warn("Could not delete from VectorStore: {}", e.getMessage());
-        }
+        // Delete from VectorStore asynchronously (tách biệt transaction)
+        java.util.concurrent.CompletableFuture.runAsync(() -> {
+            try {
+                com.security.security.dtorequest.DeleteRequest deleteReq = new com.security.security.dtorequest.DeleteRequest(documentId);
+                vectorStore.delete(String.format("documentId == '%s'", deleteReq.getDocumentId()));
+            } catch (Exception e) {
+                log.warn("Could not delete from VectorStore: {}", e.getMessage());
+            }
+        });
 
         // Delete record
         documentRepository.delete(doc);
 
         // Delete file from disk
         deleteFileOnDisk(doc.getFilePath());
+
+        // Publish event to NATS for real-time frontend update
+        natsEventPublisher.publishDocumentStatus(doc.getId(), doc.getUserId(), doc.getWorkspaceId(), "DELETED");
 
         log.info("Document deleted: {}", documentId);
     }
@@ -574,6 +773,14 @@ public class DocumentService {
                 throw new IllegalStateException("No chunks produced from markdown");
             }
 
+            // Purge old chunks from VectorStore before loading new ones
+            try {
+                com.security.security.dtorequest.DeleteRequest deleteReq = new com.security.security.dtorequest.DeleteRequest(documentId);
+                vectorStore.delete(String.format("documentId == '%s'", deleteReq.getDocumentId()));
+            } catch (Exception e) {
+                log.warn("Could not delete old chunks from VectorStore during update: {}", e.getMessage());
+            }
+
             // G6: Load to DB & VectorStore
             embeddingRepository.deleteByDocumentId(documentId);
 
@@ -663,7 +870,42 @@ public class DocumentService {
             document.setStatus(DocStatus.PROCESSING);
             Document saved = documentRepository.save(document);
             natsEventPublisher.publishDocumentStatus(saved.getId(), saved.getUserId(), saved.getWorkspaceId(), "PROCESSING");
-            eventPublisher.publishEvent(new DocumentUploadedEvent(this, saved));
+            natsEventPublisher.publishDocumentIngestRequested(saved.getId(), saved.getUserId());
+            return saved;
+        }
+
+        return document;
+    }
+
+    @Transactional
+    public Document approveDocument(Long id, String userId, String userRole, String userDepartments) {
+        log.info("Approving document {} for user {}", id, userId);
+        Document document = documentRepository.findById(id)
+                .orElseThrow(() -> new ApiException("Document not found"));
+
+        // 1. Check leader/admin privilege first
+        ParsedUserPermissions perms = parseUserPermissions(userRole, userDepartments);
+        boolean hasLeaderPrivilege = perms.isAdmin;
+        String docDeptId = document.getDepartmentId();
+        if ((docDeptId == null || docDeptId.trim().isEmpty()) && document.getWorkspaceId() != null) {
+            Map<String, Object> ws = workspaceServiceClient.getWorkspace(document.getWorkspaceId(), userId);
+            if (!ws.isEmpty()) {
+                docDeptId = (String) ws.get("departmentId");
+            }
+        }
+        if (!hasLeaderPrivilege && docDeptId != null && perms.deptIdsWhereHead.contains(docDeptId)) {
+            hasLeaderPrivilege = true;
+        }
+
+        if (!hasLeaderPrivilege) {
+            throw new AccessDeniedException("Chỉ Trưởng phòng, Phó phòng và Quản trị viên mới có quyền duyệt tài liệu.");
+        }
+
+        if (document.getStatus() == DocStatus.PENDING || document.getStatus() == DocStatus.FAILED || document.getStatus() == DocStatus.PREVIEW) {
+            document.setStatus(DocStatus.PROCESSING);
+            Document saved = documentRepository.save(document);
+            natsEventPublisher.publishDocumentStatus(saved.getId(), saved.getUserId(), saved.getWorkspaceId(), "PROCESSING");
+            natsEventPublisher.publishDocumentIngestRequested(saved.getId(), saved.getUserId());
             return saved;
         }
 
@@ -695,6 +937,9 @@ public class DocumentService {
             document.setTags(tags);
         }
 
-        return documentRepository.save(document);
+        Document saved = documentRepository.save(document);
+        // Publish event to NATS for real-time frontend update
+        natsEventPublisher.publishDocumentStatus(saved.getId(), saved.getUserId(), saved.getWorkspaceId(), saved.getStatus().name());
+        return saved;
     }
 }

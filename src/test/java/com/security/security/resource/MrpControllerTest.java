@@ -16,8 +16,11 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.Spy;
-import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.security.access.AccessDeniedException;
+import org.springframework.http.ResponseEntity;
+import com.security.security.entity.SourceCompilationPlan;
+import org.mockito.Mockito;
+import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.lang.reflect.Method;
 import java.util.Collections;
@@ -158,4 +161,33 @@ class MrpControllerTest {
             }
         }).isInstanceOf(AccessDeniedException.class);
     }
+
+    @Test
+    @DisplayName("Should return 202 Accepted and the initial plan when compilation is triggered")
+    void compileDocument_ReturnsAccepted() {
+        Long documentId = 1L;
+        String workspaceId = "test-workspace";
+        String userId = "test-user";
+        boolean autoApprove = false;
+
+        SourceCompilationPlan mockPlan = SourceCompilationPlan.builder()
+                .id(100L)
+                .sourceDocumentId(documentId)
+                .status("PROCESSING")
+                .build();
+
+        Mockito.when(workspaceServiceClient.getWorkspace(workspaceId, userId))
+                .thenReturn(java.util.Map.of("id", (Object) workspaceId));
+
+        Mockito.when(mrpPipelineService.initiateCompile(documentId, workspaceId, userId, autoApprove))
+                .thenReturn(mockPlan);
+
+        ResponseEntity<SourceCompilationPlan> response = mrpController.compileDocument(
+                documentId, workspaceId, autoApprove, userId, "WORKSPACE_MEMBER");
+
+        assertThat(response.getStatusCodeValue()).isEqualTo(202);
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().getStatus()).isEqualTo("PROCESSING");
+    }
 }
+

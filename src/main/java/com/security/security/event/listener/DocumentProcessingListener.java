@@ -3,7 +3,6 @@ package com.security.security.event.listener;
 import com.security.security.entity.Document;
 import com.security.security.entity.Embedding;
 import com.security.security.entity.enumeration.DocStatus;
-import com.security.security.event.DocumentUploadedEvent;
 import com.security.security.event.NatsEventPublisher;
 import com.security.security.repository.DocumentRepository;
 import com.security.security.repository.EmbeddingRepository;
@@ -62,10 +61,7 @@ public class DocumentProcessingListener {
     //  MAIN EVENT HANDLER
     // =========================================================================
 
-    @EventListener
-    @Async
-    public void onDocumentUploaded(DocumentUploadedEvent event) {
-        Long docId = event.getDocument().getId();
+    public void processDocument(Long docId) {
         log.info("[ETL] ▶ Start doc={}", docId);
 
         Document document = documentRepository.findById(docId)
@@ -184,6 +180,14 @@ public class DocumentProcessingListener {
             if (chunkResults.isEmpty())
                 throw new IllegalStateException("No chunks produced");
 
+            // Purge old chunks from VectorStore before loading new ones
+            try {
+                com.security.security.dtorequest.DeleteRequest deleteReq = new com.security.security.dtorequest.DeleteRequest(docId);
+                vectorStore.delete(String.format("documentId == '%s'", deleteReq.getDocumentId()));
+            } catch (Exception e) {
+                log.warn("[ETL] Could not delete old chunks from VectorStore during update for docId={}: {}", docId, e.getMessage());
+            }
+
             // ── G6: Load ──────────────────────────────────────────────────────
             embeddingRepository.deleteByDocumentId(docId);
 
@@ -258,6 +262,7 @@ public class DocumentProcessingListener {
         } catch (Exception e) {
             log.error("[ETL] ✗ Failed doc={}: {}", docId, e.getMessage(), e);
             setStatus(document, DocStatus.FAILED, e.getMessage());
+            throw new RuntimeException("ETL processing failed for doc=" + docId, e);
         }
     }
 

@@ -19,6 +19,8 @@ import java.util.Map;
  * Exposes POST /agent/chat which streams Gemini + Function Calling responses.
  * Called by ws-gateway when socket event `chat:agent_query` is received.
  */
+import com.security.security.service.LlmRateLimiterService;
+
 @RestController
 @RequestMapping("/agent")
 @RequiredArgsConstructor
@@ -27,6 +29,7 @@ public class AgentController {
 
     private final AgentService agentService;
     private final ConversationService conversationService;
+    private final LlmRateLimiterService llmRateLimiterService;
 
     /**
      * Stream an agent response.
@@ -57,11 +60,18 @@ public class AgentController {
         final Long finalConversationId = conversationId;
         final String chatId = request.getChatId() != null ? request.getChatId() : "unknown";
 
-        return agentService.runAgent(finalConversationId, request.getMessage(), userId, chatId, request.getProvider(), request.getSkillId(), request.getWorkspaceId())
-                .onErrorResume(e -> {
-                    log.error("[AgentController] Agent error: {}", e.getMessage());
-                    return Flux.just("Đã xảy ra lỗi khi xử lý yêu cầu. Vui lòng thử lại.");
-                });
+        llmRateLimiterService.acquireAgentChat();
+        try {
+            return agentService.runAgent(finalConversationId, request.getMessage(), userId, chatId, request.getProvider(), request.getSkillId(), request.getWorkspaceId())
+                    .onErrorResume(e -> {
+                        log.error("[AgentController] Agent error: {}", e.getMessage());
+                        return Flux.just("Đã xảy ra lỗi khi xử lý yêu cầu. Vui lòng thử lại.");
+                    })
+                    .doFinally(signalType -> llmRateLimiterService.releaseAgentChat());
+        } catch (Exception e) {
+            llmRateLimiterService.releaseAgentChat();
+            throw e;
+        }
     }
 
     /**

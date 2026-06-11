@@ -16,6 +16,8 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 
 @Configuration
 @Slf4j
@@ -118,16 +120,25 @@ public class NatsConfig {
 
             // 2. AI_KNOWLEDGE_EVENTS Stream
             try {
-                jsm.getStreamInfo("AI_KNOWLEDGE_EVENTS");
-                log.info("[NATS] Stream 'AI_KNOWLEDGE_EVENTS' already exists.");
+                io.nats.client.api.StreamInfo streamInfo = jsm.getStreamInfo("AI_KNOWLEDGE_EVENTS");
+                log.info("[NATS] Stream 'AI_KNOWLEDGE_EVENTS' already exists. Updating subjects if necessary.");
+                List<String> subjects = new ArrayList<>(streamInfo.getConfiguration().getSubjects());
+                if (!subjects.contains("document.ingest.requested")) {
+                    subjects.add("document.ingest.requested");
+                    io.nats.client.api.StreamConfiguration updatedConfig = io.nats.client.api.StreamConfiguration.builder(streamInfo.getConfiguration())
+                            .subjects(subjects)
+                            .build();
+                    jsm.updateStream(updatedConfig);
+                    log.info("[NATS] Updated 'AI_KNOWLEDGE_EVENTS' stream configuration with subject 'document.ingest.requested'");
+                }
             } catch (io.nats.client.JetStreamApiException e) {
                 io.nats.client.api.StreamConfiguration streamConfig = io.nats.client.api.StreamConfiguration.builder()
                         .name("AI_KNOWLEDGE_EVENTS")
-                        .subjects("document.status.updated", "compilation.plan.updated", "wiki.draft.updated")
+                        .subjects("document.status.updated", "compilation.plan.updated", "wiki.draft.updated", "document.ingest.requested")
                         .storageType(io.nats.client.api.StorageType.File)
                         .build();
                 jsm.addStream(streamConfig);
-                log.info("[NATS] Created JetStream stream 'AI_KNOWLEDGE_EVENTS'");
+                log.info("[NATS] Created JetStream stream 'AI_KNOWLEDGE_EVENTS' with subjects including 'document.ingest.requested'");
             }
         } catch (Exception e) {
             log.warn("[NATS] Failed to initialize JetStream streams: {}", e.getMessage());

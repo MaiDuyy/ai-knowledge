@@ -58,7 +58,9 @@ public class WikiDraftService {
         }
 
         WikiPage targetPage;
+        boolean isUpdate = false;
         if (draft.getWikiPageId() != null) {
+            isUpdate = true;
             // This is an UPDATE action
             targetPage = wikiPageRepository.findById(draft.getWikiPageId())
                     .orElseThrow(() -> new IllegalArgumentException("Target WikiPage not found with ID: " + draft.getWikiPageId()));
@@ -90,19 +92,12 @@ public class WikiDraftService {
             // JPA handles @Version increments automatically
             targetPage = wikiPageRepository.save(targetPage);
 
-            // Sync Vector Store: Delete old vector and insert new one
-            try {
-                String docId = java.util.UUID.nameUUIDFromBytes(("wiki-" + targetPage.getId()).getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString();
-                vectorStore.delete(List.of(docId));
-            } catch (Exception e) {
-                log.warn("[WikiDraftService] Could not delete old embedding for page ID {}: {}", targetPage.getId(), e.getMessage());
-            }
-
         } else {
             // This is a CREATE action
             // Double check if a page with the same slug already exists in this workspace to prevent duplicates
             Optional<WikiPage> existingPage = wikiPageRepository.findBySlugAndWorkspaceId(draft.getSlug(), draft.getWorkspaceId());
             if (existingPage.isPresent()) {
+                isUpdate = true;
                 targetPage = existingPage.get();
                 log.info("[WikiDraftService] Matching slug '{}' already exists. Converting draft ID {} to UPDATE for page ID {}", 
                         draft.getSlug(), draftId, targetPage.getId());
@@ -119,13 +114,6 @@ public class WikiDraftService {
                 targetPage.setAllowedRoles(draft.getAllowedRoles() != null ? draft.getAllowedRoles() : "ALL");
                 targetPage.setSecurityClassification(draft.getSecurityClassification() != null ? draft.getSecurityClassification() : "INTERNAL");
                 targetPage = wikiPageRepository.save(targetPage);
-                
-                try {
-                    String docId = java.util.UUID.nameUUIDFromBytes(("wiki-" + targetPage.getId()).getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString();
-                    vectorStore.delete(List.of(docId));
-                } catch (Exception e) {
-                    log.warn("[WikiDraftService] Could not delete old embedding for page ID {}: {}", targetPage.getId(), e.getMessage());
-                }
             } else {
                 log.info("[WikiDraftService] Creating new WikiPage '{}' from draft", draft.getTitle());
                 targetPage = WikiPage.builder()
@@ -146,29 +134,42 @@ public class WikiDraftService {
             }
         }
 
-        // Vectorize the newly saved WikiPage
-        try {
-            Document vectorDoc = new Document(
-                    "Tiêu đề: " + targetPage.getTitle() + "\n\n" + targetPage.getContent(),
-                    Map.of(
-                            "wikiPageId", targetPage.getId().toString(),
-                            "workspaceId", targetPage.getWorkspaceId() != null ? targetPage.getWorkspaceId() : "",
-                            "departmentId", targetPage.getDepartmentId() != null ? targetPage.getDepartmentId() : "",
-                            "allowedRoles", targetPage.getAllowedRoles() != null ? targetPage.getAllowedRoles() : "ALL",
-                            "classification", targetPage.getSecurityClassification() != null ? targetPage.getSecurityClassification() : "INTERNAL",
-                            "securityClassification", targetPage.getSecurityClassification() != null ? targetPage.getSecurityClassification() : "INTERNAL",
-                            "type", "wiki"
-                    )
-            );
-            // Use targetPage.getId().toString() as vector ID to ensure we can delete it easily
-            // But standard Spring AI vectorStore.add doesn't take separate ID unless it's set in the document ID
-            String docId = java.util.UUID.nameUUIDFromBytes(("wiki-" + targetPage.getId()).getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString();
-            Document vectorDocWithId = new Document(docId, vectorDoc.getText(), vectorDoc.getMetadata());
-            vectorStore.add(List.of(vectorDocWithId));
-            log.info("[WikiDraftService] Vectorized WikiPage ID: {} successfully in VectorStore", targetPage.getId());
-        } catch (Exception e) {
-            log.error("[WikiDraftService] Error indexing WikiPage ID {} to VectorStore: {}", targetPage.getId(), e.getMessage(), e);
-        }
+        // Vectorize the newly saved WikiPage asynchronously (tách biệt transaction)
+        final WikiPage finalTargetPage = targetPage;
+        final boolean finalIsUpdate = isUpdate;
+        java.util.concurrent.CompletableFuture.runAsync(() -> {
+            log.info("[WikiDraftService] Starting async VectorStore sync for WikiPage ID: {}, isUpdate: {}", finalTargetPage.getId(), finalIsUpdate);
+            try {
+                if (finalIsUpdate) {
+                    try {
+                        vectorStore.delete(String.format("wikiPageId == '%s'", finalTargetPage.getId()));
+                        log.info("[WikiDraftService] Async deleted old embedding for page ID {}", finalTargetPage.getId());
+                    } catch (Exception ex) {
+                        log.warn("[WikiDraftService] Could not delete old embedding for page ID {} in async task: {}", finalTargetPage.getId(), ex.getMessage());
+                    }
+                }
+
+                Document vectorDoc = new Document(
+                        "Tiêu đề: " + finalTargetPage.getTitle() + "\n\n" + finalTargetPage.getContent(),
+                        Map.of(
+                                "wikiPageId", finalTargetPage.getId().toString(),
+                                "workspaceId", finalTargetPage.getWorkspaceId() != null ? finalTargetPage.getWorkspaceId() : "",
+                                "departmentId", finalTargetPage.getDepartmentId() != null ? finalTargetPage.getDepartmentId() : "",
+                                "allowedRoles", finalTargetPage.getAllowedRoles() != null ? finalTargetPage.getAllowedRoles() : "ALL",
+                                "classification", finalTargetPage.getSecurityClassification() != null ? finalTargetPage.getSecurityClassification() : "INTERNAL",
+                                "securityClassification", finalTargetPage.getSecurityClassification() != null ? finalTargetPage.getSecurityClassification() : "INTERNAL",
+                                "type", "wiki"
+                        )
+                );
+                // Use targetPage.getId().toString() as vector ID to ensure we can delete it easily
+                String docId = java.util.UUID.nameUUIDFromBytes(("wiki-" + finalTargetPage.getId()).getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString();
+                Document vectorDocWithId = new Document(docId, vectorDoc.getText(), vectorDoc.getMetadata());
+                vectorStore.add(List.of(vectorDocWithId));
+                log.info("[WikiDraftService] Vectorized WikiPage ID: {} successfully in VectorStore asynchronously", finalTargetPage.getId());
+            } catch (Exception e) {
+                log.error("[WikiDraftService] Error syncing WikiPage ID {} to VectorStore asynchronously: {}", finalTargetPage.getId(), e.getMessage(), e);
+            }
+        });
 
         // Refresh knowledge graph wiki links
         refreshLinks(targetPage.getId(), targetPage.getSlug(), targetPage.getContent());
