@@ -41,16 +41,11 @@ public class FilterChainConfiguration {
                         .permitAll()
                         .requestMatchers(
                                 "/favicon.ico",
-                                "/api/mrp/**", "/skills/**",
-                                "/api/settings/**",
-                                "/chat/ai/**", "/rag/**", "/chat/**",
-                                "/api/rag/**", "/api/documents/**",
-                                "/agent/**", "/documents/**",
-                                "/healthz", "/error")
+                                "/healthz",
+                                "/error")
                         .permitAll()
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
-//                        .anyRequest().authenticated()
-
+                        .anyRequest().authenticated()
                 )
                 .exceptionHandling(e -> e
                         .authenticationEntryPoint((req, res, ex) -> {
