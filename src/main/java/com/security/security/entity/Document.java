@@ -90,6 +90,13 @@ public class Document {
     @Builder.Default
     private String securityClassification = "INTERNAL";
 
+    @Column(name = "department_id", length = 100)
+    private String departmentId;
+
+    @Column(name = "allowed_roles", length = 100)
+    @Builder.Default
+    private String allowedRoles = "ALL"; // ALL, HEAD, MEMBER
+
     @Column(name = "tags")
     @Convert(converter = StringListConverter.class)
     @Builder.Default

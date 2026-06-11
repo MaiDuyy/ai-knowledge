@@ -30,6 +30,17 @@ public class WikiPage {
     @Column(name = "workspace_id", length = 50)
     private String workspaceId;
 
+    @Column(name = "department_id", length = 100)
+    private String departmentId;
+
+    @Column(name = "allowed_roles", length = 100)
+    @Builder.Default
+    private String allowedRoles = "ALL"; // ALL, HEAD, MEMBER
+
+    @Column(name = "security_classification", length = 50)
+    @Builder.Default
+    private String securityClassification = "INTERNAL"; // PUBLIC, INTERNAL, CONFIDENTIAL, RESTRICTED
+
     @Column(name = "tags")
     private String tags;
 
