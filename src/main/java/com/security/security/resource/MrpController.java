@@ -19,6 +19,8 @@ import org.springframework.data.domain.Sort;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.security.access.AccessDeniedException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.type.TypeReference;
 
 import java.util.List;
 import java.util.Map;
@@ -37,6 +39,7 @@ public class MrpController {
     private final com.security.security.repository.WikiLinkRepository wikiLinkRepository;
     private final WorkspaceServiceClient workspaceServiceClient;
     private final DocumentRepository documentRepository;
+    private final ObjectMapper objectMapper;
 
     /**
      * Helper method to validate user membership in workspace
@@ -50,6 +53,82 @@ public class MrpController {
             log.warn("[Security] Access denied or workspace not found: User {} in Workspace {}", userId, workspaceId);
             throw new AccessDeniedException("You do not have access to Workspace: " + workspaceId);
         }
+    }
+
+    private static class ParsedUserPermissions {
+        boolean isAdmin = false;
+        java.util.List<String> deptIdsWhereHead = new java.util.ArrayList<>();
+        java.util.List<String> deptIdsWhereMember = new java.util.ArrayList<>();
+    }
+
+    private ParsedUserPermissions parseUserPermissions(String userRolesHeader, String userDepartmentsHeader) {
+        ParsedUserPermissions permissions = new ParsedUserPermissions();
+        
+        // 1. Check admin status from roles
+        if (userRolesHeader != null) {
+            String upper = userRolesHeader.toUpperCase();
+            if (upper.contains("SUPER_ADMIN") || upper.contains("ADMIN") || upper.contains("ORG_ADMIN")) {
+                permissions.isAdmin = true;
+            }
+        }
+        
+        // 2. Parse departments and roles
+        if (userDepartmentsHeader != null && !userDepartmentsHeader.trim().isEmpty()) {
+            try {
+                // Parse [{"departmentId": "...", "role": "..."}]
+                java.util.List<java.util.Map<String, String>> depts = objectMapper.readValue(
+                    userDepartmentsHeader, 
+                    new TypeReference<java.util.List<java.util.Map<String, String>>>() {}
+                );
+                for (java.util.Map<String, String> dept : depts) {
+                    String deptId = dept.get("departmentId");
+                    String role = dept.get("role");
+                    if (deptId != null && !deptId.trim().isEmpty()) {
+                        if ("HEAD".equalsIgnoreCase(role) || "MANAGER".equalsIgnoreCase(role)) {
+                            permissions.deptIdsWhereHead.add(deptId);
+                        } else {
+                            permissions.deptIdsWhereMember.add(deptId);
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                log.error("Failed to parse x-user-departments header: {}", e.getMessage());
+            }
+        }
+        
+        // 3. Fallback dummy values to prevent empty lists in JPA IN clause (prevents SQL errors)
+        if (permissions.deptIdsWhereHead.isEmpty()) {
+            permissions.deptIdsWhereHead.add("DUMMY_DEPT_ID");
+        }
+        if (permissions.deptIdsWhereMember.isEmpty()) {
+            permissions.deptIdsWhereMember.add("DUMMY_DEPT_ID");
+        }
+        
+        return permissions;
+    }
+
+    private void checkPageAccess(WikiPage page, ParsedUserPermissions perm) {
+        if (perm.isAdmin) {
+            return;
+        }
+        if ("PUBLIC".equalsIgnoreCase(page.getSecurityClassification())) {
+            return;
+        }
+        if (page.getDepartmentId() == null || page.getDepartmentId().trim().isEmpty()) {
+            // INTERNAL company-wide pages are accessible by all internal users
+            if ("INTERNAL".equalsIgnoreCase(page.getSecurityClassification())) {
+                return;
+            }
+        } else {
+            String deptId = page.getDepartmentId();
+            if (perm.deptIdsWhereHead.contains(deptId)) {
+                return;
+            }
+            if (perm.deptIdsWhereMember.contains(deptId) && !"HEAD".equalsIgnoreCase(page.getAllowedRoles())) {
+                return;
+            }
+        }
+        throw new AccessDeniedException("You do not have permission to access this wiki page.");
     }
 
     /**
@@ -110,15 +189,28 @@ public class MrpController {
      */
     @GetMapping("/drafts")
     public ResponseEntity<?> getPendingDrafts(
+            @RequestParam(defaultValue = "default-workspace") String workspaceId,
             @RequestParam(required = false) Integer page,
-            @RequestParam(required = false) Integer size) {
-        log.info("[MrpController] Fetching pending drafts. page: {}, size: {}", page, size);
+            @RequestParam(required = false) Integer size,
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
+            @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
+        log.info("[MrpController] Fetching pending drafts. page: {}, size: {}, user: {}", page, size, userId);
+        
+        ParsedUserPermissions perm = parseUserPermissions(userRolesHeader, userDepartmentsHeader);
+        if (!perm.isAdmin) {
+            validateWorkspaceAccess(userId, workspaceId);
+        }
+
         if (page != null && size != null) {
             Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt"));
-            Page<WikiPageDraft> pagedDrafts = wikiDraftService.getPendingDrafts(pageable);
+            Page<WikiPageDraft> pagedDrafts = wikiPageDraftRepository.findAccessibleDraftsByStatus(
+                workspaceId, "PENDING", perm.isAdmin, perm.deptIdsWhereHead, perm.deptIdsWhereMember, pageable);
             return ResponseEntity.ok(pagedDrafts);
         }
-        List<WikiPageDraft> drafts = wikiDraftService.getPendingDrafts();
+        
+        List<WikiPageDraft> drafts = wikiPageDraftRepository.findAccessibleDraftsByStatus(
+            workspaceId, "PENDING", perm.isAdmin, perm.deptIdsWhereHead, perm.deptIdsWhereMember);
         return ResponseEntity.ok(drafts);
     }
 
@@ -129,12 +221,18 @@ public class MrpController {
     @GetMapping("/drafts/workspace/{workspaceId}")
     public ResponseEntity<List<WikiPageDraft>> getDraftsByWorkspace(
             @PathVariable String workspaceId,
-            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) {
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
+            @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
         log.info("[MrpController] Fetching drafts for workspace ID: {} by user: {}", workspaceId, userId);
         
-        validateWorkspaceAccess(userId, workspaceId);
+        ParsedUserPermissions perm = parseUserPermissions(userRolesHeader, userDepartmentsHeader);
+        if (!perm.isAdmin) {
+            validateWorkspaceAccess(userId, workspaceId);
+        }
         
-        List<WikiPageDraft> drafts = wikiDraftService.getDraftsByWorkspace(workspaceId);
+        List<WikiPageDraft> drafts = wikiPageDraftRepository.findAccessibleDrafts(
+            workspaceId, perm.isAdmin, perm.deptIdsWhereHead, perm.deptIdsWhereMember);
         return ResponseEntity.ok(drafts);
     }
 
@@ -210,17 +308,24 @@ public class MrpController {
             @RequestParam(defaultValue = "default-workspace") String workspaceId,
             @RequestParam(required = false) Integer page,
             @RequestParam(required = false) Integer size,
-            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) {
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
+            @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
         log.info("[MrpController] Fetching wiki pages for workspace: {}, page: {}, size: {}, user: {}", workspaceId, page, size, userId);
         
-        validateWorkspaceAccess(userId, workspaceId);
+        ParsedUserPermissions perm = parseUserPermissions(userRolesHeader, userDepartmentsHeader);
+        if (!perm.isAdmin) {
+            validateWorkspaceAccess(userId, workspaceId);
+        }
         
         if (page != null && size != null) {
             Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "updatedAt"));
-            Page<WikiPage> pagedWiki = wikiPageRepository.findByWorkspaceId(workspaceId, pageable);
+            Page<WikiPage> pagedWiki = wikiPageRepository.findAccessiblePages(
+                workspaceId, perm.isAdmin, perm.deptIdsWhereHead, perm.deptIdsWhereMember, pageable);
             return ResponseEntity.ok(pagedWiki);
         }
-        List<WikiPage> pages = wikiPageRepository.findByWorkspaceId(workspaceId);
+        List<WikiPage> pages = wikiPageRepository.findAccessiblePages(
+            workspaceId, perm.isAdmin, perm.deptIdsWhereHead, perm.deptIdsWhereMember);
         return ResponseEntity.ok(pages);
     }
 
@@ -231,20 +336,23 @@ public class MrpController {
     @GetMapping("/wiki/metadata")
     public ResponseEntity<List<com.security.security.dto.WikiPageMetadataDto>> getWikiMetadata(
             @RequestParam(defaultValue = "default-workspace") String workspaceId,
-            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) {
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
+            @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
         log.info("[MrpController] Fetching lightweight wiki metadata with parsed links for workspace: {} by user: {}", workspaceId, userId);
         
-        validateWorkspaceAccess(userId, workspaceId);
+        ParsedUserPermissions perm = parseUserPermissions(userRolesHeader, userDepartmentsHeader);
+        if (!perm.isAdmin) {
+            validateWorkspaceAccess(userId, workspaceId);
+        }
         
-        List<WikiPage> pages = wikiPageRepository.findByWorkspaceId(workspaceId);
+        List<WikiPageRepository.WikiPageMetadata> pages = wikiPageRepository.findAccessibleMetadata(
+            workspaceId, perm.isAdmin, perm.deptIdsWhereHead, perm.deptIdsWhereMember);
+            
         List<com.security.security.dto.WikiPageMetadataDto> dtos = pages.stream().map(page -> {
             List<String> dbLinks = wikiLinkRepository.findByFromPageId(page.getId()).stream()
                     .map(com.security.security.entity.WikiLink::getToSlug)
                     .toList();
-            // If the DB doesn't have links yet (e.g. legacy wiki pages), fall back to parsing from content
-            List<String> links = dbLinks.isEmpty() 
-                    ? com.security.security.dto.WikiPageMetadataDto.extractLinks(page.getContent())
-                    : dbLinks;
 
             return com.security.security.dto.WikiPageMetadataDto.builder()
                     .id(page.getId())
@@ -256,7 +364,7 @@ public class MrpController {
                     .version(page.getVersion())
                     .createdAt(page.getCreatedAt())
                     .updatedAt(page.getUpdatedAt())
-                    .links(links)
+                    .links(dbLinks)
                     .build();
         }).toList();
         return ResponseEntity.ok(dtos);
@@ -270,10 +378,15 @@ public class MrpController {
     public ResponseEntity<WikiPage> getWikiPageBySlug(
             @PathVariable String slug,
             @RequestParam(defaultValue = "default-workspace") String workspaceId,
-            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) {
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
+            @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
         log.info("[MrpController] Fetching wiki page slug: {} for workspace: {} by user: {}", slug, workspaceId, userId);
         
-        validateWorkspaceAccess(userId, workspaceId);
+        ParsedUserPermissions perm = parseUserPermissions(userRolesHeader, userDepartmentsHeader);
+        if (!perm.isAdmin) {
+            validateWorkspaceAccess(userId, workspaceId);
+        }
         
         String cleanSlug = slug;
         if (cleanSlug != null && cleanSlug.startsWith("/")) {
@@ -282,6 +395,9 @@ public class MrpController {
         
         WikiPage page = wikiPageRepository.findBySlugAndWorkspaceId(cleanSlug, workspaceId)
                 .orElseThrow(() -> new IllegalArgumentException("Wiki page not found with slug: " + slug));
+                
+        checkPageAccess(page, perm);
+        
         return ResponseEntity.ok(page);
     }
 
@@ -292,12 +408,21 @@ public class MrpController {
     @GetMapping("/wiki/id/{id}")
     public ResponseEntity<WikiPage> getWikiPageById(
             @PathVariable Long id,
-            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) {
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
+            @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
         log.info("[MrpController] Fetching wiki page ID: {} by user: {}", id, userId);
+        
+        ParsedUserPermissions perm = parseUserPermissions(userRolesHeader, userDepartmentsHeader);
         
         WikiPage page = wikiPageRepository.findById(id)
                 .orElseThrow(() -> new IllegalArgumentException("Wiki page not found with ID: " + id));
-        validateWorkspaceAccess(userId, page.getWorkspaceId());
+                
+        if (!perm.isAdmin) {
+            validateWorkspaceAccess(userId, page.getWorkspaceId());
+        }
+        
+        checkPageAccess(page, perm);
         
         return ResponseEntity.ok(page);
     }
