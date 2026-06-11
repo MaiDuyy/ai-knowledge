@@ -40,4 +40,23 @@ class SecurityIntegrationTest {
         mockMvc.perform(get("/healthz"))
                 .andExpect(status().isOk());
     }
+
+    @Test
+    @DisplayName("Should return 401 Unauthorized when x-user-id header is provided without valid gateway key")
+    void whenSpoofingUserIdWithoutGatewayKey_shouldReturnUnauthorized() throws Exception {
+        mockMvc.perform(get("/documents")
+                        .header("x-user-id", "admin")
+                        .header("x-user-role", "ADMIN"))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    @DisplayName("Should authenticate and allow access when valid gateway key and user headers are provided")
+    void whenProvidingValidGatewayKeyAndUserId_shouldAuthenticate() throws Exception {
+        mockMvc.perform(get("/documents")
+                        .header("x-internal-gateway-key", "test-gateway-key")
+                        .header("x-user-id", "test-user")
+                        .header("x-user-role", "WORKSPACE_MEMBER"))
+                .andExpect(status().isOk());
+    }
 }

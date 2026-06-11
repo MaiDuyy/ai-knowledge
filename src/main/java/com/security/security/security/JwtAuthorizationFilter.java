@@ -9,6 +9,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Component;
@@ -31,6 +32,9 @@ public class JwtAuthorizationFilter extends OncePerRequestFilter {
 
     private final JwtService jwtService;
 
+    @Value("${gateway.shared-key:default-gateway-secret-key-12345}")
+    private String gatewaySharedKey;
+
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
             throws ServletException, IOException {
@@ -38,7 +42,9 @@ public class JwtAuthorizationFilter extends OncePerRequestFilter {
         try {
             // ── Priority 1: x-user-id trusted internal header (from api-gateway) ──
             String internalUserId = request.getHeader("x-user-id");
-            if (internalUserId != null && !internalUserId.trim().isEmpty()) {
+            String gatewayKey = request.getHeader("x-internal-gateway-key");
+            if (internalUserId != null && !internalUserId.trim().isEmpty()
+                    && gatewaySharedKey != null && gatewaySharedKey.equals(gatewayKey)) {
                 String internalRole = request.getHeader("x-user-role");
                 String internalRoles = request.getHeader("x-user-roles");
                 
