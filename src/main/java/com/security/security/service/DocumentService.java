@@ -37,6 +37,9 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 
+import com.security.security.client.WorkspaceServiceClient;
+import org.springframework.security.access.AccessDeniedException;
+
 @Service
 @Slf4j
 @RequiredArgsConstructor
@@ -53,6 +56,34 @@ public class DocumentService {
     private final DoclingClient doclingClient;
     private final MrpPipelineService mrpPipelineService;
     private final NatsEventPublisher natsEventPublisher;
+    private final WorkspaceServiceClient workspaceServiceClient;
+
+    private boolean isSystemOrAdmin(String userId) {
+        if ("system-user".equals(userId)) {
+            return true;
+        }
+        var auth = org.springframework.security.core.context.SecurityContextHolder.getContext().getAuthentication();
+        if (auth != null) {
+            return auth.getAuthorities().stream()
+                    .map(org.springframework.security.core.GrantedAuthority::getAuthority)
+                    .anyMatch(a -> a.equals("ROLE_ADMIN") || a.equals("ROLE_SUPER_ADMIN") || a.equals("ROLE_ORG_ADMIN") || a.contains("ADMIN"));
+        }
+        return false;
+    }
+
+    private void validateWorkspaceAccess(String workspaceId, String userId) {
+        if (isSystemOrAdmin(userId)) {
+            return;
+        }
+        if (workspaceId == null || workspaceId.trim().isEmpty() || "default-workspace".equals(workspaceId)) {
+            return; // Allow public or default
+        }
+        var workspace = workspaceServiceClient.getWorkspace(workspaceId, userId);
+        if (workspace.isEmpty()) {
+            log.warn("[Security] Access denied or workspace not found: User {} in Workspace {}", userId, workspaceId);
+            throw new AccessDeniedException("You do not have access to Workspace: " + workspaceId);
+        }
+    }
 
     // Khuyến nghị set ABSOLUTE:
     // app.upload.dir=C:/data/myapp/uploads
@@ -234,6 +265,7 @@ public class DocumentService {
      * Falls back to company-wide listing if workspaceId is null/blank (backward compat).
      */
     public List<Document> getDocuments(String userId, String workspaceId) {
+        validateWorkspaceAccess(workspaceId, userId);
         if (workspaceId != null && !workspaceId.isBlank()) {
             return documentRepository.findByWorkspaceIdOrderByCreatedAtDesc(workspaceId);
         }
@@ -241,6 +273,7 @@ public class DocumentService {
     }
 
     public Page<Document> getDocuments(String userId, String workspaceId, Pageable pageable) {
+        validateWorkspaceAccess(workspaceId, userId);
         if (workspaceId != null && !workspaceId.isBlank()) {
             return documentRepository.findByWorkspaceIdOrderByCreatedAtDesc(workspaceId, pageable);
         }
@@ -266,9 +299,10 @@ public class DocumentService {
     }
 
     public Document getDocument(Long documentId, String userId) {
-        // Allow reading any document in the system
-        return documentRepository.findById(documentId)
+        Document doc = documentRepository.findById(documentId)
                 .orElseThrow(() -> new ApiException("Document not found"));
+        validateWorkspaceAccess(doc.getWorkspaceId(), userId);
+        return doc;
     }
 
     public org.springframework.core.io.Resource getDocumentFileResource(Long documentId, String userId) {
@@ -521,6 +555,8 @@ public class DocumentService {
         Document document = documentRepository.findById(documentId)
                 .orElseThrow(() -> new ApiException("Document not found"));
 
+        validateWorkspaceAccess(document.getWorkspaceId(), userId);
+
         if (!document.getUserId().equals(userId) && !userId.equals("system-user")) {
             throw new ApiException("Permission denied");
         }
@@ -610,11 +646,14 @@ public class DocumentService {
             throw new ApiException("Failed to ingest document: " + e.getMessage());
         }
     }
+
     @Transactional
     public Document approveDocument(Long id, String userId) {
         log.info("Approving document {} for user {}", id, userId);
         Document document = documentRepository.findById(id)
                 .orElseThrow(() -> new ApiException("Document not found"));
+
+        validateWorkspaceAccess(document.getWorkspaceId(), userId);
 
         if (!document.getUserId().equals(userId) && !userId.equals("system-user")) {
             throw new ApiException("Permission denied");
@@ -636,6 +675,8 @@ public class DocumentService {
         log.info("Updating metadata for document {} by user {}", id, userId);
         Document document = documentRepository.findById(id)
                 .orElseThrow(() -> new ApiException("Document not found"));
+
+        validateWorkspaceAccess(document.getWorkspaceId(), userId);
 
         if (!document.getUserId().equals(userId) && !userId.equals("system-user")) {
             throw new ApiException("Permission denied");

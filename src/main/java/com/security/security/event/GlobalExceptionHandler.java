@@ -27,6 +27,13 @@ import static org.springframework.http.HttpStatus.*;
 @Slf4j
 public class GlobalExceptionHandler {
 
+    @ExceptionHandler(org.springframework.security.access.AccessDeniedException.class)
+    public ResponseEntity<Response> handleAccessDeniedException(org.springframework.security.access.AccessDeniedException ex, HttpServletRequest request) {
+        log.warn("Access denied error: {}", ex.getMessage());
+        return ResponseEntity.status(FORBIDDEN)
+                .body(getResponse(request, Collections.emptyMap(), ex.getMessage(), FORBIDDEN));
+    }
+
     // 1. Xử lý lỗi logic nghiệp vụ (RuntimeException, ApiException)
     @ExceptionHandler({RuntimeException.class, ApiException.class})
     public ResponseEntity<Response> handleRuntimeException(RuntimeException ex, HttpServletRequest request) {

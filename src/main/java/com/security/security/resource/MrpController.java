@@ -243,13 +243,27 @@ public class MrpController {
     @PostMapping("/drafts/{draftId}/approve")
     public ResponseEntity<WikiPageDraft> approveDraft(
             @PathVariable Long draftId,
-            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) {
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
+            @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
         
         log.info("[MrpController] Approving draft ID: {} by user: {}", draftId, userId);
         
         WikiPageDraft draft = wikiPageDraftRepository.findById(draftId)
                 .orElseThrow(() -> new IllegalArgumentException("Draft not found with ID: " + draftId));
-        validateWorkspaceAccess(userId, draft.getWorkspaceId());
+
+        ParsedUserPermissions perm = parseUserPermissions(userRolesHeader, userDepartmentsHeader);
+        if (!perm.isAdmin) {
+            validateWorkspaceAccess(userId, draft.getWorkspaceId());
+        }
+
+        boolean isAuthorized = perm.isAdmin;
+        if (!isAuthorized && draft.getDepartmentId() != null && !draft.getDepartmentId().trim().isEmpty()) {
+            isAuthorized = perm.deptIdsWhereHead.contains(draft.getDepartmentId());
+        }
+        if (!isAuthorized) {
+            throw new AccessDeniedException("You do not have permission to review this wiki page draft.");
+        }
         
         WikiPageDraft approvedDraft = wikiDraftService.approveDraft(draftId, userId);
         return ResponseEntity.ok(approvedDraft);
@@ -263,14 +277,28 @@ public class MrpController {
     public ResponseEntity<WikiPageDraft> rejectDraft(
             @PathVariable Long draftId,
             @RequestBody Map<String, String> payload,
-            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) {
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
+            @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
         
         String reviewerNote = payload.getOrDefault("note", "Rejected by reviewer.");
         log.info("[MrpController] Rejecting draft ID: {} by user: {}, reason: {}", draftId, userId, reviewerNote);
         
         WikiPageDraft draft = wikiPageDraftRepository.findById(draftId)
                 .orElseThrow(() -> new IllegalArgumentException("Draft not found with ID: " + draftId));
-        validateWorkspaceAccess(userId, draft.getWorkspaceId());
+
+        ParsedUserPermissions perm = parseUserPermissions(userRolesHeader, userDepartmentsHeader);
+        if (!perm.isAdmin) {
+            validateWorkspaceAccess(userId, draft.getWorkspaceId());
+        }
+
+        boolean isAuthorized = perm.isAdmin;
+        if (!isAuthorized && draft.getDepartmentId() != null && !draft.getDepartmentId().trim().isEmpty()) {
+            isAuthorized = perm.deptIdsWhereHead.contains(draft.getDepartmentId());
+        }
+        if (!isAuthorized) {
+            throw new AccessDeniedException("You do not have permission to review this wiki page draft.");
+        }
         
         WikiPageDraft rejectedDraft = wikiDraftService.rejectDraft(draftId, userId, reviewerNote);
         return ResponseEntity.ok(rejectedDraft);
@@ -284,14 +312,28 @@ public class MrpController {
     public ResponseEntity<WikiPageDraft> requestChanges(
             @PathVariable Long draftId,
             @RequestBody Map<String, String> payload,
-            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) {
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
+            @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
         
         String reviewerNote = payload.getOrDefault("note", "Requires revision.");
         log.info("[MrpController] Requesting changes for draft ID: {} by user: {}, reason: {}", draftId, userId, reviewerNote);
         
         WikiPageDraft draft = wikiPageDraftRepository.findById(draftId)
                 .orElseThrow(() -> new IllegalArgumentException("Draft not found with ID: " + draftId));
-        validateWorkspaceAccess(userId, draft.getWorkspaceId());
+
+        ParsedUserPermissions perm = parseUserPermissions(userRolesHeader, userDepartmentsHeader);
+        if (!perm.isAdmin) {
+            validateWorkspaceAccess(userId, draft.getWorkspaceId());
+        }
+
+        boolean isAuthorized = perm.isAdmin;
+        if (!isAuthorized && draft.getDepartmentId() != null && !draft.getDepartmentId().trim().isEmpty()) {
+            isAuthorized = perm.deptIdsWhereHead.contains(draft.getDepartmentId());
+        }
+        if (!isAuthorized) {
+            throw new AccessDeniedException("You do not have permission to review this wiki page draft.");
+        }
         
         WikiPageDraft revisedDraft = wikiDraftService.requestChanges(draftId, userId, reviewerNote);
         return ResponseEntity.ok(revisedDraft);
