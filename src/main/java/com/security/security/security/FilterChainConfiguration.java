@@ -52,7 +52,7 @@ public class FilterChainConfiguration {
                             res.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
                             res.setContentType("application/json");
                             res.getWriter().write(
-                                    "{\"error\":\"Unauthorized access\",\"message\":\"" + ex.getMessage() + "\"}");
+                                    "{\"error\":\"Unauthorized access\",\"message\":\"Full authentication is required to access this resource.\"}");
                         }))
                 .addFilterBefore(jwtAuthorizationFilter, UsernamePasswordAuthenticationFilter.class)
                 .build();

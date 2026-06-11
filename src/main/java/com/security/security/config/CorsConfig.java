@@ -22,8 +22,6 @@ public class CorsConfig {
         config.setAllowCredentials(true);
 
         List<String> origins = new java.util.ArrayList<>(List.of(
-                "http://localhost:*",
-                "http://127.0.0.1:*",
                 "http://localhost:3002",
                 "https://nexus-ott-chat.vercel.app"
         ));
@@ -32,7 +30,7 @@ public class CorsConfig {
                 origins.add(origin.trim());
             }
         }
-        config.setAllowedOriginPatterns(origins);
+        config.setAllowedOrigins(origins);
 
         config.setAllowedHeaders(List.of("*"));
 

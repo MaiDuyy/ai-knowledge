@@ -253,10 +253,10 @@ public class DocumentService {
 
         } catch (IOException e) {
             log.error("Error uploading document for user {}: {}", userId, e.getMessage());
-            throw new ApiException("Failed to upload document: " + e.getMessage());
+            throw new ApiException("Failed to upload document. Please try again with a valid file.");
         } catch (Exception e) {
             log.error("Unexpected error uploading document for user {}: {}", userId, e.getMessage());
-            throw new ApiException("Failed to upload document: " + e.getMessage());
+            throw new ApiException("Failed to upload document due to an internal error.");
         }
     }
 
@@ -640,10 +640,10 @@ public class DocumentService {
         } catch (Exception e) {
             log.error("Failed to ingest document {}: {}", documentId, e.getMessage(), e);
             document.setStatus(DocStatus.FAILED);
-            document.setErrorMessage(e.getMessage());
+            document.setErrorMessage("Internal ingestion error");
             documentRepository.save(document);
             natsEventPublisher.publishDocumentStatus(document.getId(), document.getUserId(), document.getWorkspaceId(), "FAILED");
-            throw new ApiException("Failed to ingest document: " + e.getMessage());
+            throw new ApiException("Failed to ingest document due to an internal processing error.");
         }
     }
 

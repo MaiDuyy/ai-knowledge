@@ -20,6 +20,7 @@ import com.security.security.repository.WikiPageDraftRepository;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.options;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @SpringBootTest
@@ -240,5 +241,23 @@ class SecurityIntegrationTest {
                         .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
                         .content("{\"note\":\"Changes requested\"}"))
                 .andExpect(status().isForbidden());
+    }
+
+    @Test
+    @DisplayName("Should reject CORS requests from unauthorized wildcard origins")
+    void whenCorsRequestFromUnauthorizedOrigin_shouldNotAllow() throws Exception {
+        mockMvc.perform(options("/documents")
+                        .header("Origin", "http://localhost:9999")
+                        .header("Access-Control-Request-Method", "GET"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.header().doesNotExist("Access-Control-Allow-Origin"));
+    }
+
+    @Test
+    @DisplayName("Should allow CORS requests from authorized specific origins")
+    void whenCorsRequestFromAuthorizedOrigin_shouldAllow() throws Exception {
+        mockMvc.perform(options("/documents")
+                        .header("Origin", "http://localhost:3002")
+                        .header("Access-Control-Request-Method", "GET"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.header().string("Access-Control-Allow-Origin", "http://localhost:3002"));
     }
 }
