@@ -659,7 +659,7 @@ public class MrpPipelineService {
                         """, availableTitlesList, availableTitlesList);
 
                     String imageSection = "";
-                    List<String> imageMarkers = collectRelevantImageMarkers(keyClaims, fullText);
+                    List<String> imageMarkers = collectRelevantImageMarkers(keyClaims, fullText, normalizedPageType);
                     if (!imageMarkers.isEmpty()) {
                         imageSection = "\n## Images near this page's evidence\n"
                             + "The following image markers appear near the evidence for this page. "
@@ -725,7 +725,7 @@ public class MrpPipelineService {
                         """, availableTitlesList, availableTitlesList);
 
                     String imageSection = "";
-                    List<String> imageMarkers = collectRelevantImageMarkers(keyClaims, fullText);
+                    List<String> imageMarkers = collectRelevantImageMarkers(keyClaims, fullText, normalizedPageType);
                     if (!imageMarkers.isEmpty()) {
                         imageSection = "\n## Images near this page's evidence\n"
                             + "The following image markers appear near the evidence for this page. "
@@ -1110,36 +1110,48 @@ public class MrpPipelineService {
         return "[]";
     }
 
-    private List<String> collectRelevantImageMarkers(List<String> keyClaims, String fullText) {
+    private List<String> collectRelevantImageMarkers(List<String> keyClaims, String fullText, String pageType) {
         List<String> ordered = new ArrayList<>();
-        if (fullText == null || fullText.isEmpty() || keyClaims == null || keyClaims.isEmpty()) {
+        if (fullText == null || fullText.isEmpty()) {
             return ordered;
         }
         Set<String> seen = new HashSet<>();
         java.util.regex.Pattern imgPattern = java.util.regex.Pattern.compile("!\\[([^\\]]*)\\]\\(image://([0-9a-fA-F-]+)\\)");
-        int window = 1500;
 
-        for (String claim : keyClaims) {
-            String sourceContext = "";
-            int scIndex = claim.indexOf("[Source Context:");
-            if (scIndex >= 0) {
-                sourceContext = claim.substring(scIndex + 16, claim.length() - 1).trim();
+        boolean grabAll = "source".equalsIgnoreCase(pageType) || keyClaims == null || keyClaims.isEmpty();
+
+        if (!grabAll) {
+            int window = 1500;
+            for (String claim : keyClaims) {
+                String sourceContext = "";
+                int scIndex = claim.indexOf("[Source Context:");
+                if (scIndex >= 0) {
+                    sourceContext = claim.substring(scIndex + 16, claim.length() - 1).trim();
+                }
+                if (sourceContext.isEmpty()) {
+                    continue;
+                }
+
+                int offset = fullText.indexOf(sourceContext);
+                if (offset < 0) {
+                    continue;
+                }
+
+                int start = Math.max(0, offset - window);
+                int end = Math.min(fullText.length(), offset + sourceContext.length() + window);
+                String windowText = fullText.substring(start, end);
+
+                java.util.regex.Matcher matcher = imgPattern.matcher(windowText);
+                while (matcher.find()) {
+                    String marker = matcher.group(0);
+                    if (!seen.contains(marker)) {
+                        seen.add(marker);
+                        ordered.add(marker);
+                    }
+                }
             }
-            if (sourceContext.isEmpty()) {
-                
-                continue;
-            }
-
-            int offset = fullText.indexOf(sourceContext);
-            if (offset < 0) {
-                continue;
-            }
-
-            int start = Math.max(0, offset - window);
-            int end = Math.min(fullText.length(), offset + sourceContext.length() + window);
-            String windowText = fullText.substring(start, end);
-
-            java.util.regex.Matcher matcher = imgPattern.matcher(windowText);
+        } else {
+            java.util.regex.Matcher matcher = imgPattern.matcher(fullText);
             while (matcher.find()) {
                 String marker = matcher.group(0);
                 if (!seen.contains(marker)) {

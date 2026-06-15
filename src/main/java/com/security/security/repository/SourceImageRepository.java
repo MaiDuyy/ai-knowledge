@@ -13,4 +13,8 @@ public interface SourceImageRepository extends JpaRepository<SourceImage, UUID> 
     List<SourceImage> findByIdIn(List<UUID> ids);
     List<SourceImage> findBySourceId(Long sourceId);
     Optional<SourceImage> findBySourceIdAndImageIndex(Long sourceId, Integer imageIndex);
+
+    @org.springframework.data.jpa.repository.Modifying
+    @org.springframework.transaction.annotation.Transactional
+    void deleteBySourceId(Long sourceId);
 }

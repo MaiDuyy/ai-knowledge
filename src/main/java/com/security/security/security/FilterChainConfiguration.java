@@ -42,7 +42,8 @@ public class FilterChainConfiguration {
                         .requestMatchers(
                                 "/favicon.ico",
                                 "/healthz",
-                                "/error")
+                                "/error","/api/ocr/extract")
+
                         .permitAll()
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                         .anyRequest().authenticated()

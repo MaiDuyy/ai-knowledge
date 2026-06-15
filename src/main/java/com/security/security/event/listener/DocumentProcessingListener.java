@@ -21,6 +21,12 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
+import java.util.Collections;
+import java.util.Comparator;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.vectorstore.VectorStore;
@@ -53,6 +59,8 @@ public class DocumentProcessingListener {
 
     @Value("${app.upload.dir:uploads}")
     private String uploadDir;
+    @Value("${gemini.modle.image:gemini-1.5-flash}")
+    private String geminiModel;
 
     private static final int BATCH_SIZE     = 30;
     private static final int MIN_TOKENS     = 60;
@@ -85,7 +93,7 @@ public class DocumentProcessingListener {
             try {
                 if (doclingClient.isHealthy()) {
                     log.info("[ETL] Docling is healthy. Using Docling API for docId={}, fileName={} with preferred parser: '{}'", docId, document.getFileName(), document.getParserMethod());
-                    DoclingClient.DoclingResult doclingResult = doclingClient.convertToMarkdown(resource, document.getFileName(), document.getParserMethod());
+                    DoclingClient.DoclingResult doclingResult = doclingClient.convertToMarkdown(resource, document.getFileName(), document.getParserMethod(), docId);
                     if (doclingResult.success()) {
                         markdown = doclingResult.markdown();
                         log.info("[ETL] Successfully parsed docId={} with Docling. Markdown length: {}", docId, markdown.length());
@@ -131,41 +139,153 @@ public class DocumentProcessingListener {
                         Files.createDirectories(imagesDir);
                     }
                     
-                    List<SourceImage> savedImages = new ArrayList<>();
-                    for (ImageExtractionService.ExtractedImage extImg : extractedImages) {
-                        UUID imgId = UUID.randomUUID();
-                        String imgFilename = imgId.toString() + "." + extImg.getExtension();
-                        Path targetPath = imagesDir.resolve(imgFilename);
+                    ProcessedImageResult[] resultsArray = new ProcessedImageResult[extractedImages.size()];
+                    for (int idx = 0; idx < extractedImages.size(); idx++) {
+                        ProcessedImageResult def = new ProcessedImageResult();
+                        def.index = idx;
+                        def.skipped = true;
+                        resultsArray[idx] = def;
+                    }
+
+                    List<CompletableFuture<Void>> futures = new ArrayList<>();
+                    Semaphore captionSemaphore = new Semaphore(3); // Cap concurrency for caption calls
+                    ExecutorService imageExecutor = Executors.newVirtualThreadPerTaskExecutor();
+
+                    for (int idx = 0; idx < extractedImages.size(); idx++) {
+                        final int index = idx;
+                        final ImageExtractionService.ExtractedImage extImg = extractedImages.get(idx);
                         
-                        Files.write(targetPath, extImg.getBytes());
-                        
-                        // Generate caption using Gemini
-                        String caption = generateCaption(extImg.getBytes(), extImg.getContentType());
-                        
-                        SourceImage sourceImg = SourceImage.builder()
-                                .id(imgId)
-                                .source(document)
-                                .minioKey("images/" + imgFilename)
-                                .pageNumber(extImg.getPageNumber())
-                                .imageIndex(extImg.getImageIndex())
-                                .caption(caption)
-                                .contentType(extImg.getContentType())
-                                .sizeBytes(extImg.getBytes().length)
-                                .build();
+                        CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
+                            try {
+                                boolean isLogoOrHeader = false;
+                                if (extImg.getWidth() > 0 && extImg.getHeight() > 0) {
+                                    int w = extImg.getWidth();
+                                    int h = extImg.getHeight();
+                                    // Heuristic 1: Very small icon or logo (e.g. <= 80x80)
+                                    if (w <= 80 && h <= 80) {
+                                        isLogoOrHeader = true;
+                                    }
+                                    // Heuristic 2: Long horizontal/vertical lines or banners (aspect ratio > 8.0 or < 0.125)
+                                    double aspect = (double) w / h;
+                                    if (aspect > 8.0 || aspect < 0.125) {
+                                        isLogoOrHeader = true;
+                                    }
+                                }
+
+                                if (isLogoOrHeader) {
+                                    log.info("[ETL] Skipping logo/header image index={} due to heuristics (w={}, h={})", index, extImg.getWidth(), extImg.getHeight());
+                                    // Already initialized to skipped = true
+                                    return;
+                                }
+
+                                UUID imgId = UUID.randomUUID();
+                                String imgFilename = imgId.toString() + "." + extImg.getExtension();
+                                Path targetPath = imagesDir.resolve(imgFilename);
                                 
-                        sourceImageRepository.save(sourceImg);
-                        savedImages.add(sourceImg);
+                                // Generate caption using Gemini (under concurrency control)
+                                captionSemaphore.acquire();
+                                String caption;
+                                try {
+                                    caption = generateCaption(extImg.getBytes(), extImg.getContentType());
+                                } finally {
+                                    captionSemaphore.release();
+                                }
+
+                                boolean isIgnoredText = false;
+                                if (caption != null) {
+                                    String cleanCaption = caption.toLowerCase().trim();
+                                    if (cleanCaption.replaceAll("[^a-zA-Z]", "").equalsIgnoreCase("IGNORE")
+                                            || cleanCaption.contains("logo")
+                                            || cleanCaption.contains("biểu tượng")
+                                            || cleanCaption.contains("bieu tuong")
+                                            || cleanCaption.contains("header")
+                                            || cleanCaption.contains("footer")
+                                            || cleanCaption.contains("icon")
+                                            || cleanCaption.contains("banner")
+                                            || cleanCaption.contains("ảnh bìa")
+                                            || cleanCaption.contains("anh bia")
+                                            || cleanCaption.contains("trang trí")
+                                            || cleanCaption.contains("trang tri")) {
+                                        isIgnoredText = true;
+                                    }
+                                }
+
+                                if (isIgnoredText) {
+                                    log.info("[ETL] Skipping logo/header image index={} based on Gemini keyword detection in caption: '{}'", index, caption);
+                                    // Already initialized to skipped = true
+                                    return;
+                                }
+
+                                // Write to disk only if NOT skipped
+                                Files.write(targetPath, extImg.getBytes());
+
+                                SourceImage sourceImg = SourceImage.builder()
+                                        .id(imgId)
+                                        .source(document)
+                                        .minioKey("images/" + imgFilename)
+                                        .pageNumber(extImg.getPageNumber())
+                                        .imageIndex(extImg.getImageIndex())
+                                        .caption(caption)
+                                        .contentType(extImg.getContentType())
+                                        .sizeBytes(extImg.getBytes().length)
+                                        .build();
+                                        
+                                ProcessedImageResult result = new ProcessedImageResult();
+                                result.index = index;
+                                result.skipped = false;
+                                result.sourceImage = sourceImg;
+                                resultsArray[index] = result;
+                            } catch (Exception ex) {
+                                log.warn("[ETL] Failed to process extracted image idx={} for docId={}: {}", index, docId, ex.getMessage());
+                            }
+                        }, imageExecutor);
+                        futures.add(future);
+                    }
+
+                    CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+                    imageExecutor.shutdown();
+
+                    // Delete old source images first to prevent duplicates
+                    try {
+                        sourceImageRepository.deleteBySourceId(docId);
+                    } catch (Exception e) {
+                        log.warn("[ETL] Failed to delete old source images for docId={}: {}", docId, e.getMessage());
+                    }
+
+                    List<ProcessedImageResult> sortedResults = Arrays.asList(resultsArray);
+
+                    // Save non-skipped SourceImage records to the database
+                    List<SourceImage> imagesToSave = sortedResults.stream()
+                            .filter(r -> !r.skipped && r.sourceImage != null)
+                            .map(r -> r.sourceImage)
+                            .toList();
+                    if (!imagesToSave.isEmpty()) {
+                        sourceImageRepository.saveAll(imagesToSave);
                     }
                     
-                    // Append image reference tags at the end of the markdown
-                    StringBuilder inlineImgBuilder = new StringBuilder(markdown);
-                    inlineImgBuilder.append("\n\n---\n\n### Extracted Document Images\n\n");
-                    for (SourceImage img : savedImages) {
-                        String alt = sanitizeCaptionForAlt(img.getCaption());
-                        inlineImgBuilder.append(String.format("![%s](image://%s)\n\n", alt, img.getId().toString()));
+                    // Replace image placeholders in the markdown text in-place using sortedResults (1-to-1 matching)
+                    String updatedMarkdown = markdown;
+                    java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("!\\[(.*?)\\]\\((.*?)\\)");
+                    java.util.regex.Matcher matcher = pattern.matcher(updatedMarkdown);
+                    
+                    StringBuilder sb = new StringBuilder();
+                    int imgIndex = 0;
+                    while (matcher.find()) {
+                        String replacement = "";
+                        if (imgIndex < sortedResults.size()) {
+                            ProcessedImageResult r = sortedResults.get(imgIndex);
+                            if (!r.skipped && r.sourceImage != null) {
+                                SourceImage img = r.sourceImage;
+                                String alt = sanitizeCaptionForAlt(img.getCaption());
+                                replacement = String.format("![%s](image://%s)", alt, img.getId().toString());
+                            }
+                            imgIndex++;
+                        }
+                        matcher.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(replacement));
                     }
-                    markdown = inlineImgBuilder.toString();
-                    log.info("[ETL] Appended image references to markdown content for docId={}", docId);
+                    matcher.appendTail(sb);
+                    markdown = sb.toString();
+                    log.info("[ETL] Replaced inline image references in markdown content for docId={}", docId);
                 }
             } catch (Exception imgEx) {
                 log.warn("[ETL] Image extraction/processing failed for docId={}: {}", docId, imgEx.getMessage());
@@ -280,6 +400,14 @@ public class DocumentProcessingListener {
     private String generateCaption(byte[] imgBytes, String contentType) {
         try {
             if (chatModel == null) return "Extracted Image";
+            
+            // Check if contentType is supported by Gemini (png, jpeg, webp, heic, heif)
+            String mime = contentType.toLowerCase();
+            if (!mime.contains("png") && !mime.contains("jpeg") && !mime.contains("jpg") && !mime.contains("webp") && !mime.contains("heic") && !mime.contains("heif")) {
+                log.info("Skipping Gemini caption generation for unsupported image type: {}", contentType);
+                return "Extracted Image";
+            }
+            
             org.springframework.core.io.ByteArrayResource byteResource = 
                     new org.springframework.core.io.ByteArrayResource(imgBytes);
             org.springframework.ai.content.Media media = 
@@ -287,15 +415,16 @@ public class DocumentProcessingListener {
             org.springframework.ai.chat.client.ChatClient chatClient = 
                     org.springframework.ai.chat.client.ChatClient.builder(chatModel).build();
             
-            String systemPrompt = "You are a precise technical image description generator. Write a extremely short, precise description of the technical contents of the image in Vietnamese. Do NOT write any introduction or notes. Just return the description.";
+            String systemPrompt = "Analyze the image. If the image is a corporate logo, brand icon, page header, page footer, or decorative banner/line, you MUST reply with exactly the word 'IGNORE'. Otherwise, write a brief, 1-sentence description (maximum 10 words) of this image in Vietnamese. Do NOT write any intro, notes, or explanations. Keep it as short as possible.";
             
             org.springframework.ai.chat.model.ChatResponse response = chatClient.prompt()
                     .options(org.springframework.ai.google.genai.GoogleGenAiChatOptions.builder()
-                            .model("gemini-1.5-flash")
-                            .temperature(0.3)
+                            .model(geminiModel)
+                            .temperature(0.2)
+                            .maxOutputTokens(40)
                             .build())
                     .system(systemPrompt)
-                    .user(u -> u.text("Describe this technical image precisely:").media(media))
+                    .user(u -> u.text("Describe in max 10 words:").media(media))
                     .call()
                     .chatResponse();
                     
@@ -316,5 +445,11 @@ public class DocumentProcessingListener {
         String cleaned = caption.replace("\n", " ").replace("\r", " ");
         cleaned = cleaned.replace("[", "(").replace("]", ")");
         return cleaned.trim();
+    }
+
+    private static class ProcessedImageResult {
+        int index;
+        boolean skipped;
+        SourceImage sourceImage;
     }
 }

@@ -13,6 +13,7 @@ public interface EmbeddingRepository extends JpaRepository<Embedding, Long> {
 
     long countByDocumentId(Long documentId);
 
+    @org.springframework.transaction.annotation.Transactional
     void deleteByDocumentId(Long documentId);
 
     List<Embedding> findByDocumentId(Long documentId);

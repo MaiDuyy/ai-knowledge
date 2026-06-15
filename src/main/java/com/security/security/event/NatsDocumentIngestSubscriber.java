@@ -84,10 +84,11 @@ public class NatsDocumentIngestSubscriber {
             }
 
             log.info("[NATS Ingest Subscriber] Processing ingestion request for documentId={}", documentId);
+            msg.ack();
+            
             documentProcessingListener.processDocument(documentId);
 
-            log.info("[NATS Ingest Subscriber] Successfully processed documentId={}, sending ACK", documentId);
-            msg.ack();
+            log.info("[NATS Ingest Subscriber] Successfully processed documentId={}", documentId);
         } catch (Exception e) {
             log.error("[NATS Ingest Subscriber] Failed to process ingestion request for documentId={}: {}", documentId, e.getMessage(), e);
             // Do not call msg.ack() to allow JetStream to retry/redeliver the message

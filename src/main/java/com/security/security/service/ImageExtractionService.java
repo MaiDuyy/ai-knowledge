@@ -7,7 +7,11 @@ import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.pdmodel.PDResources;
 import org.apache.pdfbox.cos.COSName;
+import org.apache.pdfbox.pdmodel.graphics.PDXObject;
+import org.apache.pdfbox.pdmodel.graphics.form.PDFormXObject;
 import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
+import java.util.Set;
+import java.util.HashSet;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -42,6 +46,8 @@ public class ImageExtractionService {
         private String extension;
         private Integer pageNumber;
         private int imageIndex;
+        private int width;
+        private int height;
     }
 
     /**
@@ -68,7 +74,7 @@ public class ImageExtractionService {
      */
     public List<ExtractedImage> extractImagesFromPdf(byte[] fileData) throws Exception {
         List<ExtractedImage> images = new ArrayList<>();
-        int imageIndex = 0;
+        int[] imageIndex = new int[]{0};
 
         try (PDDocument document = PDDocument.load(fileData)) {
             for (int pageNum = 0; pageNum < document.getNumberOfPages(); pageNum++) {
@@ -76,45 +82,87 @@ public class ImageExtractionService {
                 PDResources resources = page.getResources();
                 if (resources == null) continue;
 
-                for (COSName name : resources.getXObjectNames()) {
-                    try {
-                        if (resources.isImageXObject(name)) {
-                            PDImageXObject image = (PDImageXObject) resources.getXObject(name);
-                            if (image == null || image.getImage() == null) continue;
-
-                            String format = "png";
-                            String ext = image.getSuffix();
-                            if (ext != null && !ext.isEmpty()) {
-                                format = ext.toLowerCase();
-                            }
-
-                            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                            ImageIO.write(image.getImage(), format, baos);
-                            byte[] imgBytes = baos.toByteArray();
-
-                            if (imgBytes.length < MIN_IMAGE_BYTES) {
-                                continue;
-                            }
-
-                            String contentType = mimeFromExt(format);
-
-                            images.add(new ExtractedImage(
-                                    imgBytes,
-                                    contentType,
-                                    format,
-                                    pageNum + 1,
-                                    imageIndex++
-                            ));
-                        }
-                    } catch (Exception ex) {
-                        log.warn("Failed to extract specific PDF image reference on page {}: {}", pageNum + 1, ex.getMessage());
-                    }
-                }
+                Set<String> processedNames = new HashSet<>();
+                extractImagesFromResources(resources, images, pageNum + 1, processedNames, imageIndex);
             }
         }
 
         log.info("Extracted {} images from PDF", images.size());
         return images;
+    }
+
+    private void extractImagesFromResources(
+            PDResources resources,
+            List<ExtractedImage> images,
+            int pageNumber,
+            Set<String> processedNames,
+            int[] imageIndex
+    ) {
+        if (resources == null) return;
+        for (COSName name : resources.getXObjectNames()) {
+            if (processedNames.contains(name.getName())) continue;
+            processedNames.add(name.getName());
+
+            try {
+                if (resources.isImageXObject(name)) {
+                    PDImageXObject image = (PDImageXObject) resources.getXObject(name);
+                    if (image == null || image.getImage() == null) continue;
+
+                    String format = "png";
+                    String ext = image.getSuffix();
+                    if (ext != null && !ext.isEmpty()) {
+                        String lowerExt = ext.toLowerCase();
+                        if (lowerExt.equals("jpg") || lowerExt.equals("jpeg") || lowerExt.equals("png") || lowerExt.equals("gif") || lowerExt.equals("webp")) {
+                            format = lowerExt;
+                        } else {
+                            format = "png"; // Convert non-web-friendly formats (like tiff, bmp) to png
+                        }
+                    }
+
+                    ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                    boolean success = ImageIO.write(image.getImage(), format, baos);
+                    if (!success) {
+                        baos.reset();
+                        success = ImageIO.write(image.getImage(), "png", baos);
+                        format = "png";
+                    }
+                    
+                    if (!success) {
+                        continue;
+                    }
+                    
+                    byte[] imgBytes = baos.toByteArray();
+                    if (imgBytes.length < MIN_IMAGE_BYTES) {
+                        continue;
+                    }
+
+                    String contentType = mimeFromExt(format);
+
+                    images.add(new ExtractedImage(
+                            imgBytes,
+                            contentType,
+                            format,
+                            pageNumber,
+                            imageIndex[0]++,
+                            image.getWidth(),
+                            image.getHeight()
+                    ));
+                } else {
+                    PDXObject xobject = resources.getXObject(name);
+                    if (xobject instanceof PDFormXObject) {
+                        extractImagesFromResources(
+                                ((PDFormXObject) xobject).getResources(),
+                                images,
+                                pageNumber,
+                                processedNames,
+                                imageIndex
+                        );
+                    }
+                }
+            } catch (Exception ex) {
+                log.warn("Failed to extract specific PDF image/form reference on page {}: {}", pageNumber, ex.getMessage());
+            }
+        }
     }
 
     /**
@@ -144,12 +192,26 @@ public class ImageExtractionService {
                         String ext = getFileExtension(name);
                         String contentType = mimeFromExt(ext);
 
+                        int width = 0;
+                        int height = 0;
+                        try (ByteArrayInputStream bais = new ByteArrayInputStream(imgBytes)) {
+                            java.awt.image.BufferedImage bi = ImageIO.read(bais);
+                            if (bi != null) {
+                                width = bi.getWidth();
+                                height = bi.getHeight();
+                            }
+                        } catch (Exception e) {
+                            log.warn("Failed to read image dimensions for DOCX media: {}", e.getMessage());
+                        }
+
                         images.add(new ExtractedImage(
                                 imgBytes,
                                 contentType,
                                 ext,
                                 null,
-                                imageIndex++
+                                imageIndex++,
+                                width,
+                                height
                         ));
                     } catch (Exception ex) {
                         log.warn("Failed to extract DOCX media entry {}: {}", name, ex.getMessage());

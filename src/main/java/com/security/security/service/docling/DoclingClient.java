@@ -2,10 +2,14 @@ package com.security.security.service.docling;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.security.security.entity.OcrResult;
+import com.security.security.repository.OcrResultRepository;
 import com.security.security.service.tika.HtmlToMarkdownConverter;
 import com.security.security.service.tika.TikaHtmlExtractor;
 import com.security.security.service.tika.TikaHtmlResult;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.pdfbox.pdmodel.PDDocument;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.core.io.Resource;
@@ -20,7 +24,11 @@ import org.springframework.ai.google.genai.GoogleGenAiChatOptions;
 import org.springframework.ai.content.Media;
 import org.springframework.util.MimeTypeUtils;
 
+import java.io.ByteArrayOutputStream;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Semaphore;
 
 /**
  * DoclingClient — Unified Document Converter Orchestrator.
@@ -45,6 +53,8 @@ public class DoclingClient {
     private final ChatModel chatModel;
     private final TikaHtmlExtractor tikaHtmlExtractor;
     private final HtmlToMarkdownConverter htmlToMarkdownConverter;
+    private final OcrResultRepository ocrResultRepository;
+    private final ExecutorService executorService;
 
     @Value("${spring.ai.google.genai.api-key:}")
     private String geminiApiKey;
@@ -75,7 +85,9 @@ public class DoclingClient {
             WebClient.Builder builder,
             ChatModel chatModel,
             TikaHtmlExtractor tikaHtmlExtractor,
-            HtmlToMarkdownConverter htmlToMarkdownConverter) {
+            HtmlToMarkdownConverter htmlToMarkdownConverter,
+            OcrResultRepository ocrResultRepository,
+            @Qualifier("mrpVirtualThreadExecutor") ExecutorService executorService) {
         this.webClient = builder
                 .baseUrl(baseUrl)
                 .defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
@@ -83,7 +95,9 @@ public class DoclingClient {
         this.chatModel = chatModel;
         this.tikaHtmlExtractor = tikaHtmlExtractor;
         this.htmlToMarkdownConverter = htmlToMarkdownConverter;
-        log.info("[DocumentConverter] Refactored DoclingClient initialized with Gemini + Tika support.");
+        this.ocrResultRepository = ocrResultRepository;
+        this.executorService = executorService;
+        log.info("[DocumentConverter] Refactored DoclingClient initialized with Gemini + Tika + page-by-page OCR support.");
     }
 
     // =========================================================================
@@ -99,7 +113,7 @@ public class DoclingClient {
      * @return DoclingResult with markdown string or error details
      */
     public DoclingResult convertToMarkdown(Resource resource, String filename) {
-        return convertToMarkdown(resource, filename, "gemini");
+        return convertToMarkdown(resource, filename, "gemini", null);
     }
 
     /**
@@ -112,8 +126,22 @@ public class DoclingClient {
      * @return DoclingResult with markdown string or error details
      */
     public DoclingResult convertToMarkdown(Resource resource, String filename, String parserMethod) {
+        return convertToMarkdown(resource, filename, parserMethod, null);
+    }
+
+    /**
+     * Convert any document resource to Markdown.
+     * Orchestrates between Method A (Google Gemini) and Method C (Apache Tika).
+     *
+     * @param resource Spring Resource (FileSystemResource or UrlResource)
+     * @param filename Original filename
+     * @param parserMethod The chosen parser: "gemini" or "tika"
+     * @param documentId Optional document ID for database caching of page-by-page OCR results
+     * @return DoclingResult with markdown string or error details
+     */
+    public DoclingResult convertToMarkdown(Resource resource, String filename, String parserMethod, Long documentId) {
         long start = System.currentTimeMillis();
-        log.info("[DocumentConverter] ▶ Converting: '{}' with parser: '{}'", filename, parserMethod);
+        log.info("[DocumentConverter] ▶ Converting: '{}' with parser: '{}', docId: {}", filename, parserMethod, documentId);
 
         String mimeType = getMimeType(filename);
         boolean hasGemini = chatModel != null && isGeminiConfigured();
@@ -124,8 +152,13 @@ public class DoclingClient {
             try {
                 String markdown;
                 if (isMultimodalSupported(mimeType)) {
-                    log.info("[DocumentConverter] Method A1: Sending '{}' as multimodal Media directly to Gemini", filename);
-                    markdown = convertWithGeminiMultimodal(resource, mimeType, filename);
+                    if (mimeType.equals("application/pdf")) {
+                        log.info("[DocumentConverter] Method A1 (PDF): Processing page-by-page for '{}'", filename);
+                        markdown = convertPdfPageByPageWithGemini(resource, filename, documentId);
+                    } else {
+                        log.info("[DocumentConverter] Method A1 (Non-PDF): Sending '{}' directly to Gemini", filename);
+                        markdown = convertWithGeminiMultimodal(resource, mimeType, filename);
+                    }
                 } else {
                     log.info("[DocumentConverter] Method A2: Office document '{}' - converting to HTML via Tika, then beautifying with Gemini", filename);
                     markdown = convertOfficeWithGemini(resource, filename);
@@ -137,7 +170,7 @@ public class DoclingClient {
                     return DoclingResult.success(markdown, "GEMINI_SUCCESS", elapsed);
                 }
             } catch (Exception e) {
-                log.warn("[DocumentConverter] Gemini conversion failed for '{}': {}. Falling back to Method C (Tika local).", filename, e.getMessage());
+                log.warn("[DocumentConverter] Gemini conversion failed for '{}': {}. Falling back to Method C (Tika local).", filename, e.getMessage(), e);
             }
         } else {
             if (forceTika) {
@@ -191,6 +224,178 @@ public class DoclingClient {
                 || mimeType.equals("text/html");
     }
 
+    private String convertPdfPageByPageWithGemini(Resource resource, String filename, Long documentId) throws Exception {
+        byte[] fileBytes;
+        try (var in = resource.getInputStream()) {
+            fileBytes = in.readAllBytes();
+        }
+
+        if (fileBytes.length == 0) {
+            throw new IllegalArgumentException("Resource file is empty");
+        }
+
+        // 1. Split PDF into single pages using PDFBox
+        List<byte[]> pageBytesList = new ArrayList<>();
+        try (PDDocument pdDocument = PDDocument.load(fileBytes)) {
+            int pageCount = pdDocument.getNumberOfPages();
+            log.info("[DocumentConverter] Splitting PDF '{}' into {} pages", filename, pageCount);
+            for (int i = 0; i < pageCount; i++) {
+                try (PDDocument singlePageDoc = new PDDocument()) {
+                    singlePageDoc.addPage(pdDocument.getPage(i));
+                    ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                    singlePageDoc.save(baos);
+                    pageBytesList.add(baos.toByteArray());
+                }
+            }
+        }
+
+        int totalPages = pageBytesList.size();
+        String[] pageMarkdowns = new String[totalPages];
+        List<CompletableFuture<Void>> futures = new ArrayList<>();
+        Semaphore geminiSemaphore = new Semaphore(5); // Cap concurrency at 5 calls to avoid rate limits
+
+        String systemPrompt = """
+            You are a precise document-to-markdown compiler.
+            Your ONLY job is to output the exact Markdown translation of the single-page document.
+            
+            CRITICAL RULES:
+            1. DO NOT write any introduction, notes, thoughts, explanations, self-corrections, planning, or summaries.
+            2. Your response MUST start immediately with the first character of the Markdown content (e.g., the title '# ...' or paragraph).
+            3. Do NOT wrap the Markdown in backticks like ```markdown ... ```.
+            4. Keep the exact text and reading order of the page. Do not summarize or rewrite.
+            5. Reconstruct headings (#, ##, ###, ####), bullet lists, and tables precisely. Use standard Markdown table syntax for tables.
+            6. Use standard LaTeX for mathematical equations if any.
+            """;
+
+        for (int i = 0; i < totalPages; i++) {
+            final int pageIndex = i;
+            final int pageNumber = i + 1;
+            final byte[] pageBytes = pageBytesList.get(i);
+
+            CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
+                long pageStart = System.currentTimeMillis();
+
+                // 2. Check DB Cache first if documentId is present
+                if (documentId != null) {
+                    Optional<OcrResult> cached = ocrResultRepository.findByDocumentIdAndPageNumber(documentId, pageNumber);
+                    if (cached.isPresent() && "COMPLETED".equals(cached.get().getStatus())) {
+                        log.debug("[DocumentConverter] Page {} / {} loaded from DB cache", pageNumber, totalPages);
+                        pageMarkdowns[pageIndex] = cached.get().getMarkdownContent();
+                        return;
+                    }
+                }
+
+                // Initialize/update OcrResult in DB to PROCESSING
+                OcrResult ocrResult = null;
+                if (documentId != null) {
+                    ocrResult = ocrResultRepository.findByDocumentIdAndPageNumber(documentId, pageNumber)
+                            .orElseGet(() -> OcrResult.builder()
+                                    .documentId(documentId)
+                                    .pageNumber(pageNumber)
+                                    .build());
+                    ocrResult.setStatus("PROCESSING");
+                    ocrResultRepository.save(ocrResult);
+                }
+
+                try {
+                    geminiSemaphore.acquire();
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException("Page OCR execution interrupted", ie);
+                }
+
+                try {
+                    int maxRetries = 3;
+                    int retryCount = 0;
+                    String pageMarkdown = null;
+                    Exception lastException = null;
+
+                    ByteArrayResource byteResource = new ByteArrayResource(pageBytes) {
+                        @Override
+                        public String getFilename() {
+                            return "page_" + pageNumber + ".pdf";
+                        }
+                    };
+                    Media media = new Media(MimeTypeUtils.parseMimeType("application/pdf"), byteResource);
+
+                    while (retryCount < maxRetries && pageMarkdown == null) {
+                        try {
+                            if (retryCount > 0) {
+                                long sleepMs = (long) Math.pow(2, retryCount) * 1000L;
+                                Thread.sleep(sleepMs);
+                                log.info("[DocumentConverter] Retrying page {} OCR (attempt {}) after {}ms delay", pageNumber, retryCount + 1, sleepMs);
+                            }
+
+                            ChatClient chatClient = ChatClient.builder(chatModel).build();
+                            ChatResponse response = chatClient.prompt()
+                                    .options(GoogleGenAiChatOptions.builder()
+                                            .model(geminiModel)
+                                            .temperature(0.0)
+                                            .build())
+                                    .system(systemPrompt)
+                                    .user(u -> u.text("Convert this page into Markdown format. DO NOT write any thinking process, notes, planning, or explanations. Start immediately with the Markdown content:").media(media))
+                                    .call()
+                                    .chatResponse();
+
+                            if (response != null && response.getResult() != null && response.getResult().getOutput() != null) {
+                                String text = response.getResult().getOutput().getText();
+                                if (text != null && !text.isBlank()) {
+                                    pageMarkdown = cleanMarkdown(text);
+                                }
+                            }
+                        } catch (Exception e) {
+                            lastException = e;
+                            retryCount++;
+                        }
+                    }
+
+                    if (pageMarkdown == null) {
+                        throw new RuntimeException("Failed to OCR page " + pageNumber + " after " + maxRetries + " attempts. Last error: " + (lastException != null ? lastException.getMessage() : "Unknown"));
+                    }
+
+                    long elapsed = System.currentTimeMillis() - pageStart;
+                    pageMarkdowns[pageIndex] = pageMarkdown;
+
+                    // Save completed page to DB
+                    if (ocrResult != null) {
+                        ocrResult.setStatus("COMPLETED");
+                        ocrResult.setMarkdownContent(pageMarkdown);
+                        ocrResult.setElapsedMs(elapsed);
+                        ocrResult.setErrorMessage(null);
+                        ocrResultRepository.save(ocrResult);
+                    }
+                } catch (Exception e) {
+                    log.error("[DocumentConverter] Failed to parse page {} of documentId {}: {}", pageNumber, documentId, e.getMessage(), e);
+                    pageMarkdowns[pageIndex] = "\n\n<!-- PAGE_ERROR: " + pageNumber + " - " + e.getMessage() + " -->\n\n";
+
+                    if (ocrResult != null) {
+                        ocrResult.setStatus("FAILED");
+                        ocrResult.setErrorMessage(e.getMessage());
+                        ocrResultRepository.save(ocrResult);
+                    }
+                } finally {
+                    geminiSemaphore.release();
+                }
+            }, executorService);
+
+            futures.add(future);
+        }
+
+        // Wait for all pages to finish
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+
+        // 3. Assemble all page markdowns
+        StringBuilder finalMarkdown = new StringBuilder();
+        for (int i = 0; i < totalPages; i++) {
+            if (i > 0) {
+                finalMarkdown.append("\n\n<!-- PAGE_BREAK: ").append(i + 1).append(" -->\n\n");
+            }
+            finalMarkdown.append(pageMarkdowns[i] != null ? pageMarkdowns[i] : "");
+        }
+
+        return finalMarkdown.toString();
+    }
+
     private String convertWithGeminiMultimodal(Resource resource, String mimeType, String filename) throws Exception {
         byte[] fileBytes;
         try (var in = resource.getInputStream()) {
@@ -221,7 +426,7 @@ public class DoclingClient {
             3. Do NOT wrap the Markdown in backticks like ```markdown ... ```.
             4. Keep the exact text and reading order of the document. Do not summarize or rewrite.
             5. Reconstruct headings (#, ##, ###, ####), bullet lists, and tables precisely. Use hierarchical heading levels: H1 (#) for main titles/chapters/major parts, H2 (##) for sections (e.g. "1. Giới thiệu"), H3 (###) for subsections (e.g. "1.1"), and H4 (####) for deep subsections (e.g. "1.1.1"). Use standard Markdown table syntax for tables.
-            6. Do NOT include image tags, raw image bytes, or picture placeholders.
+
             7. Use standard LaTeX for mathematical equations if any.
             """;
 

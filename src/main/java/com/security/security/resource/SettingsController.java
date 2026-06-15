@@ -45,7 +45,7 @@ public class SettingsController {
     @PatchMapping
     public ResponseEntity<Map<String, Object>> updateSettings(
             @RequestBody UpdateConfigRequest request,
-            @RequestHeader(value = "x-user-id", defaultValue = "admin") String userId) {
+            @RequestHeader(value = "x-user-id", defaultValue = "SUPER_ADMIN") String userId) {
 
         log.info("[SettingsController] Updating settings by user: {}, keys: {}", userId, request.settings().keySet());
         Map<String, Boolean> results = configService.setBatch(request.settings());

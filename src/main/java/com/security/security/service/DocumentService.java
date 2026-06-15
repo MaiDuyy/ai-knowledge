@@ -15,6 +15,10 @@ import com.security.security.service.tika.TikaHtmlResult;
 import com.security.security.service.tika.SemanticMarkdownChunker;
 import com.security.security.service.tika.DocumentProfiler;
 import com.security.security.service.docling.DoclingClient;
+import com.security.security.entity.SourceImage;
+import com.security.security.repository.SourceImageRepository;
+import com.security.security.service.ImageExtractionService;
+import org.springframework.ai.chat.model.ChatModel;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.vectorstore.VectorStore;
@@ -34,9 +38,16 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
 
 import com.security.security.client.WorkspaceServiceClient;
 import org.springframework.security.access.AccessDeniedException;
+
 
 @Service
 @Slf4j
@@ -54,7 +65,16 @@ public class DocumentService {
     private final MrpPipelineService mrpPipelineService;
     private final NatsEventPublisher natsEventPublisher;
     private final WorkspaceServiceClient workspaceServiceClient;
+    private final ImageExtractionService imageExtractionService;
+    private final SourceImageRepository sourceImageRepository;
+    private final ChatModel chatModel;
+    // Khuyến nghị set ABSOLUTE:
+    // app.upload.dir=C:/data/myapp/uploads
+    @Value("${app.upload.dir:uploads}")
+    private String uploadDir;
 
+    @Value("${gemini.modle.image}")
+    private String geminiModel;
     private boolean isSystemOrAdmin(String userId) {
         if ("system-user".equals(userId)) {
             return true;
@@ -138,10 +158,7 @@ public class DocumentService {
         }
     }
 
-    // Khuyến nghị set ABSOLUTE:
-    // app.upload.dir=C:/data/myapp/uploads
-    @Value("${app.upload.dir:uploads}")
-    private String uploadDir;
+
 
     private static final long MAX_FILE_SIZE = 52_428_800L; // 50MB
 
@@ -303,6 +320,8 @@ public class DocumentService {
                 .securityClassification(securityClassification != null && !securityClassification.isBlank() ? securityClassification : "INTERNAL")
                 .build();
 
+        Document saved = documentRepository.save(document);
+
         if (isPreview) {
             // Parse immediately to extract raw Markdown for preview
             try {
@@ -311,7 +330,7 @@ public class DocumentService {
                 try {
                     if (doclingClient.isHealthy()) {
                         DoclingClient.DoclingResult doclingResult = doclingClient.convertToMarkdown(
-                                new FileSystemResource(storedPath), safeName, document.getParserMethod());
+                                new FileSystemResource(storedPath), safeName, saved.getParserMethod(), saved.getId());
                         if (doclingResult.success()) {
                             markdown = doclingResult.markdown();
                         }
@@ -324,15 +343,26 @@ public class DocumentService {
                     TikaHtmlResult htmlResult = tikaHtmlExtractor.extract(new FileSystemResource(storedPath));
                     markdown = htmlToMarkdownConverter.convert(htmlResult.html());
                 }
-                document.setMarkdownContent(markdown);
+                saved.setMarkdownContent(markdown);
             } catch (Exception parseEx) {
                 log.error("Failed to pre-parse document for preview: {}", parseEx.getMessage());
-                document.setStatus(DocStatus.FAILED);
-                document.setErrorMessage("Failed to pre-parse document: " + parseEx.getMessage());
+                saved.setStatus(DocStatus.FAILED);
+                saved.setErrorMessage("Failed to pre-parse document: " + parseEx.getMessage());
+            }
+            saved = documentRepository.save(saved);
+        }
+
+        if (isPreview && saved.getStatus() == DocStatus.PREVIEW) {
+            String markdown = saved.getMarkdownContent();
+            if (markdown != null) {
+                String updatedMarkdown = extractAndSaveImages(saved, markdown);
+                if (!updatedMarkdown.equals(markdown)) {
+                    saved.setMarkdownContent(updatedMarkdown);
+                    saved = documentRepository.save(saved);
+                }
             }
         }
 
-        Document saved = documentRepository.save(document);
         natsEventPublisher.publishDocumentStatus(saved.getId(), saved.getUserId(), saved.getWorkspaceId(), saved.getStatus().name());
 
         // Trigger ETL pipeline immediately if status is PROCESSING
@@ -768,6 +798,12 @@ public class DocumentService {
 
         // Run chunking and loading synchronously
         try {
+            if (sourceImageRepository.findBySourceId(documentId).isEmpty()) {
+                markdownContent = extractAndSaveImages(document, markdownContent);
+                document.setMarkdownContent(markdownContent);
+                documentRepository.save(document);
+            }
+
             List<SemanticMarkdownChunker.ChunkResult> chunkResults = semanticMarkdownChunker.chunk(markdownContent);
             if (chunkResults.isEmpty()) {
                 throw new IllegalStateException("No chunks produced from markdown");
@@ -941,5 +977,227 @@ public class DocumentService {
         // Publish event to NATS for real-time frontend update
         natsEventPublisher.publishDocumentStatus(saved.getId(), saved.getUserId(), saved.getWorkspaceId(), saved.getStatus().name());
         return saved;
+    }
+
+    private String extractAndSaveImages(Document document, String markdown) {
+        try {
+            Path filePath = Paths.get(document.getFilePath());
+            if (!Files.exists(filePath)) {
+                return markdown;
+            }
+            byte[] fileBytes = Files.readAllBytes(filePath);
+            List<ImageExtractionService.ExtractedImage> extractedImages = 
+                    imageExtractionService.extractImages(fileBytes, document.getFileName());
+            
+            if (extractedImages != null && !extractedImages.isEmpty()) {
+                log.info("[DocumentService] Extracted {} inline images from document ID: {}", extractedImages.size(), document.getId());
+                
+                Path imagesDir = Paths.get(uploadDir).resolve("images");
+                if (!Files.exists(imagesDir)) {
+                    Files.createDirectories(imagesDir);
+                }
+                
+                ProcessedImageResult[] resultsArray = new ProcessedImageResult[extractedImages.size()];
+                for (int idx = 0; idx < extractedImages.size(); idx++) {
+                    ProcessedImageResult def = new ProcessedImageResult();
+                    def.index = idx;
+                    def.skipped = true;
+                    resultsArray[idx] = def;
+                }
+
+                List<CompletableFuture<Void>> futures = new ArrayList<>();
+                Semaphore captionSemaphore = new Semaphore(3); // Cap concurrency for caption calls
+                ExecutorService imageExecutor = Executors.newVirtualThreadPerTaskExecutor();
+
+                for (int idx = 0; idx < extractedImages.size(); idx++) {
+                    final int index = idx;
+                    final ImageExtractionService.ExtractedImage extImg = extractedImages.get(idx);
+                    
+                    CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
+                        try {
+                            boolean isLogoOrHeader = false;
+                            if (extImg.getWidth() > 0 && extImg.getHeight() > 0) {
+                                int w = extImg.getWidth();
+                                int h = extImg.getHeight();
+                                // Heuristic 1: Very small icon or logo (e.g. <= 80x80)
+                                if (w <= 80 && h <= 80) {
+                                    isLogoOrHeader = true;
+                                }
+                                // Heuristic 2: Long horizontal/vertical lines or banners (aspect ratio > 8.0 or < 0.125)
+                                double aspect = (double) w / h;
+                                if (aspect > 8.0 || aspect < 0.125) {
+                                    isLogoOrHeader = true;
+                                }
+                            }
+
+                            if (isLogoOrHeader) {
+                                log.info("[DocumentService] Skipping logo/header image index={} due to heuristics (w={}, h={})", index, extImg.getWidth(), extImg.getHeight());
+                                return;
+                            }
+
+                            UUID imgId = UUID.randomUUID();
+                            String imgFilename = imgId.toString() + "." + extImg.getExtension();
+                            Path targetPath = imagesDir.resolve(imgFilename);
+                            
+                            // Generate caption using Gemini (under concurrency control)
+                            captionSemaphore.acquire();
+                            String caption;
+                            try {
+                                caption = generateCaption(extImg.getBytes(), extImg.getContentType());
+                            } finally {
+                                captionSemaphore.release();
+                            }
+                            
+                            boolean isIgnoredText = false;
+                            if (caption != null) {
+                                String cleanCaption = caption.toLowerCase().trim();
+                                if (cleanCaption.replaceAll("[^a-zA-Z]", "").equalsIgnoreCase("IGNORE")
+                                        || cleanCaption.contains("logo")
+                                        || cleanCaption.contains("biểu tượng")
+                                        || cleanCaption.contains("bieu tuong")
+                                        || cleanCaption.contains("header")
+                                        || cleanCaption.contains("footer")
+                                        || cleanCaption.contains("icon")
+                                        || cleanCaption.contains("banner")
+                                        || cleanCaption.contains("ảnh bìa")
+                                        || cleanCaption.contains("anh bia")
+                                        || cleanCaption.contains("trang trí")
+                                        || cleanCaption.contains("trang tri")) {
+                                    isIgnoredText = true;
+                                }
+                            }
+
+                            if (isIgnoredText) {
+                                log.info("[DocumentService] Skipping logo/header image index={} based on Gemini keyword detection in caption: '{}'", index, caption);
+                                return;
+                            }
+
+                            // Write to disk only if NOT skipped
+                            Files.write(targetPath, extImg.getBytes());
+
+                            SourceImage sourceImg = SourceImage.builder()
+                                    .id(imgId)
+                                    .source(document)
+                                    .minioKey("images/" + imgFilename)
+                                    .pageNumber(extImg.getPageNumber())
+                                    .imageIndex(extImg.getImageIndex())
+                                    .caption(caption)
+                                    .contentType(extImg.getContentType())
+                                    .sizeBytes(extImg.getBytes().length)
+                                    .build();
+                                    
+                            ProcessedImageResult result = new ProcessedImageResult();
+                            result.index = index;
+                            result.skipped = false;
+                            result.sourceImage = sourceImg;
+                            resultsArray[index] = result;
+                        } catch (Exception ex) {
+                            log.warn("[DocumentService] Failed to process extracted image idx={} for docId={}: {}", index, document.getId(), ex.getMessage());
+                        }
+                    }, imageExecutor);
+                    futures.add(future);
+                }
+
+                CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+                imageExecutor.shutdown();
+
+                // Delete old source images first to prevent duplicates
+                try {
+                    sourceImageRepository.deleteBySourceId(document.getId());
+                } catch (Exception e) {
+                    log.warn("[DocumentService] Failed to delete old source images for docId={}: {}", document.getId(), e.getMessage());
+                }
+
+                List<ProcessedImageResult> sortedResults = Arrays.asList(resultsArray);
+
+                // Save non-skipped SourceImage records to the database
+                List<SourceImage> imagesToSave = sortedResults.stream()
+                        .filter(r -> !r.skipped && r.sourceImage != null)
+                        .map(r -> r.sourceImage)
+                        .toList();
+                if (!imagesToSave.isEmpty()) {
+                    sourceImageRepository.saveAll(imagesToSave);
+                }
+
+                // Replace image placeholders in the markdown text in-place using sortedResults (1-to-1 matching)
+                String updatedMarkdown = markdown;
+                java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("!\\[(.*?)\\]\\((.*?)\\)");
+                java.util.regex.Matcher matcher = pattern.matcher(updatedMarkdown);
+                
+                StringBuffer sb = new StringBuffer();
+                int imgIndex = 0;
+                while (matcher.find()) {
+                    String replacement = "";
+                    if (imgIndex < sortedResults.size()) {
+                        ProcessedImageResult r = sortedResults.get(imgIndex);
+                        if (!r.skipped && r.sourceImage != null) {
+                            SourceImage img = r.sourceImage;
+                            String alt = sanitizeCaptionForAlt(img.getCaption());
+                            replacement = String.format("![%s](image://%s)", alt, img.getId().toString());
+                        }
+                        imgIndex++;
+                    }
+                    matcher.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(replacement));
+                }
+                matcher.appendTail(sb);
+                return sb.toString();
+            }
+        } catch (Exception e) {
+            log.warn("[DocumentService] Image extraction/processing failed for docId={}: {}", document.getId(), e.getMessage());
+        }
+        return markdown;
+    }
+
+    private String generateCaption(byte[] imgBytes, String contentType) {
+        try {
+            if (chatModel == null) return "Extracted Image";
+            
+            String mime = contentType.toLowerCase();
+            if (!mime.contains("png") && !mime.contains("jpeg") && !mime.contains("jpg") && !mime.contains("webp") && !mime.contains("heic") && !mime.contains("heif")) {
+                log.info("Skipping Gemini caption generation for unsupported image type: {}", contentType);
+                return "Extracted Image";
+            }
+            
+            org.springframework.core.io.ByteArrayResource byteResource = 
+                    new org.springframework.core.io.ByteArrayResource(imgBytes);
+            org.springframework.ai.content.Media media = 
+                    new org.springframework.ai.content.Media(org.springframework.util.MimeTypeUtils.parseMimeType(contentType), byteResource);
+            org.springframework.ai.chat.client.ChatClient chatClient = 
+                    org.springframework.ai.chat.client.ChatClient.builder(chatModel).build();
+            
+            String systemPrompt = "Analyze the image. If the image is a corporate logo, brand icon, page header, page footer, or decorative banner/line, you MUST reply with exactly the word 'IGNORE'. Otherwise, write a brief, 1-sentence description (maximum 10 words) of this image in Vietnamese. Do NOT write any intro, notes, or explanations. Keep it as short as possible.";
+            
+            org.springframework.ai.chat.model.ChatResponse response = chatClient.prompt()
+                    .options(org.springframework.ai.google.genai.GoogleGenAiChatOptions.builder()
+                            .model(geminiModel)
+                            .temperature(0.2)
+                            .maxOutputTokens(40)
+                            .build())
+                    .system(systemPrompt)
+                    .user(u -> u.text("Describe in max 10 words:").media(media))
+                    .call()
+                    .chatResponse();
+                    
+            if (response != null && response.getResult() != null && response.getResult().getOutput() != null) {
+                String text = response.getResult().getOutput().getText();
+                if (text != null) {
+                    return text.trim();
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Failed to generate caption using Gemini: {}", e.getMessage());
+        }
+        return "Extracted Image";
+    }
+
+    private String sanitizeCaptionForAlt(String caption) {
+        if (caption == null) return "Extracted Image";
+        return caption.replace("\"", "'").replace("[", "").replace("]", "").replace("\n", " ").trim();
+    }
+
+    private static class ProcessedImageResult {
+        int index;
+        boolean skipped;
+        SourceImage sourceImage;
     }
 }
