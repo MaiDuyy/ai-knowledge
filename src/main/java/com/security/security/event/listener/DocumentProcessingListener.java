@@ -1,9 +1,11 @@
 package com.security.security.event.listener;
 
 import com.security.security.entity.Document;
+import com.security.security.entity.SourceImage;
 import com.security.security.entity.enumeration.DocStatus;
 import com.security.security.event.NatsEventPublisher;
 import com.security.security.repository.DocumentRepository;
+import com.security.security.repository.SourceImageRepository;
 import com.security.security.service.docling.DoclingClient;
 import com.security.security.service.ImageProcessingService;
 import com.security.security.service.EmbeddingService;
@@ -31,6 +33,7 @@ public class DocumentProcessingListener {
     private final DocumentProfiler        documentProfiler;
     private final NatsEventPublisher      natsEventPublisher;
     private final MrpPipelineService      mrpPipelineService;
+    private final SourceImageRepository   sourceImageRepository;
     private final org.springframework.data.redis.core.StringRedisTemplate redisTemplate;
 
     @org.springframework.context.event.EventListener
@@ -43,25 +46,84 @@ public class DocumentProcessingListener {
         try {
             setStatus(document, DocStatus.PROCESSING, null);
 
-            // ── G1: Ingestion / Markdown conversion ─────────────────────────
-            Resource resource;
-            if (document.getFileUrl() != null && !document.getFileUrl().isBlank()) {
-                log.info("[ETL][1] URL: {}", document.getFileUrl());
-                resource = new UrlResource(document.getFileUrl());
+            // ── Check for duplicate completed document ─────────────────────
+            Document duplicateDoc = null;
+            String fileHash = document.getFileHash();
+            if (fileHash != null && !fileHash.isEmpty()) {
+                // 1. Check Redis cache
+                if (redisTemplate != null) {
+                    try {
+                        String cachedIdStr = redisTemplate.opsForValue().get("doc:hash:" + fileHash);
+                        if (cachedIdStr != null) {
+                            Long cachedId = Long.valueOf(cachedIdStr);
+                            duplicateDoc = documentRepository.findById(cachedId).orElse(null);
+                        }
+                    } catch (Exception e) {
+                        log.error("[ETL] Failed to fetch duplicate from Redis: {}", e.getMessage());
+                    }
+                }
+                
+                // 2. Fallback to database
+                if (duplicateDoc == null) {
+                    List<Document> completedDocs = documentRepository.findByFileHashAndStatus(fileHash, DocStatus.COMPLETED);
+                    if (!completedDocs.isEmpty()) {
+                        duplicateDoc = completedDocs.get(0);
+                    }
+                }
+            }
+
+            String markdown;
+            if (duplicateDoc != null) {
+                log.info("[ETL] Duplicate completed document found: docId={}, using fast-path bypass.", duplicateDoc.getId());
+                markdown = duplicateDoc.getMarkdownContent();
+                
+                // Fetch and clone source images
+                List<SourceImage> originalImages = sourceImageRepository.findBySourceId(duplicateDoc.getId());
+                log.info("[ETL] Cloning {} source images from cached doc={}", originalImages.size(), duplicateDoc.getId());
+                for (SourceImage originalImage : originalImages) {
+                    java.util.UUID newImageId = java.util.UUID.randomUUID();
+                    SourceImage cloned = SourceImage.builder()
+                            .id(newImageId)
+                            .source(document)
+                            .minioKey(originalImage.getMinioKey())
+                            .pageNumber(originalImage.getPageNumber())
+                            .imageIndex(originalImage.getImageIndex())
+                            .caption(originalImage.getCaption())
+                            .contentType(originalImage.getContentType())
+                            .sizeBytes(originalImage.getSizeBytes())
+                            .build();
+                    sourceImageRepository.save(cloned);
+                    
+                    // Replace image reference in markdown
+                    if (markdown != null) {
+                        markdown = markdown.replace("image://" + originalImage.getId().toString(), "image://" + newImageId.toString());
+                    }
+                }
+                
+                if (markdown == null) {
+                    markdown = "";
+                }
             } else {
-                log.info("[ETL][1] Disk: {}", document.getFilePath());
-                resource = new FileSystemResource(document.getFilePath());
-            }
+                // ── G1: Ingestion / Markdown conversion ─────────────────────────
+                Resource resource;
+                if (document.getFileUrl() != null && !document.getFileUrl().isBlank()) {
+                    log.info("[ETL][1] URL: {}", document.getFileUrl());
+                    resource = new UrlResource(document.getFileUrl());
+                } else {
+                    log.info("[ETL][1] Disk: {}", document.getFilePath());
+                    resource = new FileSystemResource(document.getFilePath());
+                }
 
-            DoclingClient.DoclingResult doclingResult = doclingClient.convertToMarkdown(resource, document.getFileName(), document.getParserMethod(), docId);
-            if (!doclingResult.success()) {
-                throw new IllegalStateException("Docling parsing failed: " + doclingResult.errorMessage());
-            }
-            String markdown = doclingResult.markdown();
-            log.info("[ETL] Markdown converted successfully. Length: {}", markdown.length());
+                DoclingClient.DoclingResult doclingResult = doclingClient.convertToMarkdown(resource, document.getFileName(), document.getParserMethod(), docId);
+                if (!doclingResult.success()) {
+                    throw new IllegalStateException("Docling parsing failed: " + doclingResult.errorMessage());
+                }
+                markdown = doclingResult.markdown();
+                log.info("[ETL] Markdown converted successfully. Length: {}", markdown.length());
 
-            // ── Extract, caption and process inline images ──────────────────
-            markdown = imageProcessingService.processIngestImages(document, markdown);
+                // ── Extract, caption and process inline images ──────────────────
+                markdown = imageProcessingService.processIngestImages(document, markdown);
+            }
 
             if (markdown == null || markdown.length() < 60) {
                 throw new IllegalStateException("Extracted markdown is empty or too short, doc=" + docId);
