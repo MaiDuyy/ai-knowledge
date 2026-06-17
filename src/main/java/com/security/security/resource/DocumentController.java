@@ -43,13 +43,14 @@ public class DocumentController {
             @RequestParam(value = "departmentId", required = false) String departmentId,
             @RequestParam(value = "allowedRoles", required = false) String allowedRoles,
             @RequestParam(value = "securityClassification", required = false) String securityClassification,
+            @RequestParam(value = "folderPath", required = false) String folderPath,
             @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
             @RequestHeader(value = "x-user-role", required = false) String userRole,
             @RequestHeader(value = "x-user-departments", required = false) String userDepartments,
             @RequestHeader(value = "x-workspace-id", required = false) String workspaceIdHeader) throws IOException {
         // Resolve workspaceId: query param takes priority over header
         String workspaceId = (workspaceIdParam != null && !workspaceIdParam.isBlank()) ? workspaceIdParam : workspaceIdHeader;
-        DocumentUploadResponse response = documentService.uploadDocument(file, userId, preview, parser, workspaceId, departmentId, allowedRoles, securityClassification, userRole, userDepartments);
+        DocumentUploadResponse response = documentService.uploadDocument(file, userId, preview, parser, workspaceId, departmentId, allowedRoles, securityClassification, userRole, userDepartments, folderPath);
 
         return ResponseEntity.accepted().body(response);
     }
@@ -154,9 +155,10 @@ public class DocumentController {
     @DeleteMapping("/{id}")
     public ResponseEntity<Map<String, String>> deleteDocument(
             @PathVariable Long id,
-            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) {
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-role", required = false) String userRole) {
 
-        documentService.deleteDocument(id, userId);
+        documentService.deleteDocument(id, userId, userRole);
 
         return ResponseEntity.ok(Map.of("message", "Document deleted successfully"));
     }

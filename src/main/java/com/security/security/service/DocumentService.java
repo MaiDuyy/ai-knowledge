@@ -2,26 +2,27 @@ package com.security.security.service;
 
 import com.security.security.dto.DocumentUploadResponse;
 import com.security.security.entity.Document;
-import com.security.security.entity.Embedding;
 import com.security.security.entity.enumeration.DocStatus;
 import com.security.security.entity.enumeration.DocType;
 import com.security.security.event.NatsEventPublisher;
 import com.security.security.exception.ApiException;
 import com.security.security.repository.DocumentRepository;
-import com.security.security.repository.EmbeddingRepository;
-import com.security.security.service.tika.TikaHtmlExtractor;
-import com.security.security.service.tika.HtmlToMarkdownConverter;
-import com.security.security.service.tika.TikaHtmlResult;
-import com.security.security.service.tika.SemanticMarkdownChunker;
-import com.security.security.service.tika.DocumentProfiler;
-import com.security.security.service.docling.DoclingClient;
-import com.security.security.entity.SourceImage;
 import com.security.security.repository.SourceImageRepository;
-import com.security.security.service.ImageExtractionService;
-import org.springframework.ai.chat.model.ChatModel;
+import com.security.security.repository.SourceCompilationPlanRepository;
+import com.security.security.repository.SourceChunkExtractRepository;
+import com.security.security.repository.OcrResultRepository;
+import com.security.security.repository.WikiPageRepository;
+import com.security.security.repository.WikiPageDraftRepository;
+import com.security.security.repository.WikiLinkRepository;
+import com.security.security.entity.SourceImage;
+import com.security.security.entity.WikiPage;
+import com.security.security.service.docling.DoclingClient;
+import com.security.security.service.ImageProcessingService;
+import com.security.security.service.EmbeddingService;
+import com.security.security.service.tika.DocumentProfiler;
+import com.security.security.service.tika.SemanticMarkdownChunker;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.data.domain.Page;
@@ -39,11 +40,6 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.Collections;
-import java.util.Comparator;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Semaphore;
 
 import com.security.security.client.WorkspaceServiceClient;
 import org.springframework.security.access.AccessDeniedException;
@@ -55,26 +51,23 @@ import org.springframework.security.access.AccessDeniedException;
 public class DocumentService {
 
     private final DocumentRepository documentRepository;
-    private final VectorStore vectorStore;
-    private final TikaHtmlExtractor tikaHtmlExtractor;
-    private final HtmlToMarkdownConverter htmlToMarkdownConverter;
-    private final EmbeddingRepository embeddingRepository;
-    private final SemanticMarkdownChunker semanticMarkdownChunker;
+    private final EmbeddingService embeddingService;
     private final DocumentProfiler documentProfiler;
     private final DoclingClient doclingClient;
     private final MrpPipelineService mrpPipelineService;
     private final NatsEventPublisher natsEventPublisher;
     private final WorkspaceServiceClient workspaceServiceClient;
-    private final ImageExtractionService imageExtractionService;
+    private final ImageProcessingService imageProcessingService;
     private final SourceImageRepository sourceImageRepository;
-    private final ChatModel chatModel;
-    // Khuyến nghị set ABSOLUTE:
-    // app.upload.dir=C:/data/myapp/uploads
+    private final SourceCompilationPlanRepository sourceCompilationPlanRepository;
+    private final SourceChunkExtractRepository sourceChunkExtractRepository;
+    private final OcrResultRepository ocrResultRepository;
+    private final WikiPageRepository wikiPageRepository;
+    private final WikiPageDraftRepository wikiPageDraftRepository;
+    private final WikiLinkRepository wikiLinkRepository;
+
     @Value("${app.upload.dir:uploads}")
     private String uploadDir;
-
-    @Value("${gemini.modle.image}")
-    private String geminiModel;
     private boolean isSystemOrAdmin(String userId) {
         if ("system-user".equals(userId)) {
             return true;
@@ -207,8 +200,24 @@ public class DocumentService {
             String securityClassification,
             String userRole,
             String userDepartments) {
-        log.info("Uploading document for user: {}, preview: {}, parser: {}, workspaceId: {}, departmentId: {}, allowedRoles: {}, classification: {}, role: {}, depts: {}", 
-                userId, preview, parser, workspaceId, departmentId, allowedRoles, securityClassification, userRole, userDepartments);
+        return uploadDocument(file, userId, preview, parser, workspaceId, departmentId, allowedRoles, securityClassification, userRole, userDepartments, null);
+    }
+
+    @Transactional
+    public DocumentUploadResponse uploadDocument(
+            MultipartFile file,
+            String userId,
+            Boolean preview,
+            String parser,
+            String workspaceId,
+            String departmentId,
+            String allowedRoles,
+            String securityClassification,
+            String userRole,
+            String userDepartments,
+            String folderPath) {
+        log.info("Uploading document for user: {}, preview: {}, parser: {}, workspaceId: {}, departmentId: {}, allowedRoles: {}, classification: {}, role: {}, depts: {}, folderPath: {}", 
+                userId, preview, parser, workspaceId, departmentId, allowedRoles, securityClassification, userRole, userDepartments, folderPath);
 
         if (file == null || file.isEmpty()) {
             throw new ApiException("File is empty");
@@ -305,6 +314,14 @@ public class DocumentService {
             docStatus = DocStatus.PENDING;
         }
 
+        // Calculate SHA-256 hash of the uploaded file
+        String fileHash = "";
+        try {
+            fileHash = calculateSHA256(file.getBytes());
+        } catch (IOException e) {
+            log.error("Failed to read file bytes for hashing: {}", e.getMessage());
+        }
+
         Document document = Document.builder()
                 .userId(userId)
                 .workspaceId(resolvedWorkspaceId)
@@ -318,6 +335,8 @@ public class DocumentService {
                 .departmentId(targetDeptId)
                 .allowedRoles(allowedRoles != null && !allowedRoles.isBlank() ? allowedRoles : "ALL")
                 .securityClassification(securityClassification != null && !securityClassification.isBlank() ? securityClassification : "INTERNAL")
+                .fileHash(fileHash)
+                .folderPath(folderPath)
                 .build();
 
         Document saved = documentRepository.save(document);
@@ -326,41 +345,22 @@ public class DocumentService {
             // Parse immediately to extract raw Markdown for preview
             try {
                 log.info("Immediately parsing document {} for preview", safeName);
-                String markdown = null;
-                try {
-                    if (doclingClient.isHealthy()) {
-                        DoclingClient.DoclingResult doclingResult = doclingClient.convertToMarkdown(
-                                new FileSystemResource(storedPath), safeName, saved.getParserMethod(), saved.getId());
-                        if (doclingResult.success()) {
-                            markdown = doclingResult.markdown();
-                        }
-                    }
-                } catch (Exception doclingEx) {
-                    log.warn("[Preview] Error calling Docling: {}. Falling back to Apache Tika.", doclingEx.getMessage());
+                DoclingClient.DoclingResult doclingResult = doclingClient.convertToMarkdown(
+                        new FileSystemResource(storedPath), safeName, saved.getParserMethod(), saved.getId());
+                if (!doclingResult.success()) {
+                    throw new IllegalStateException("Docling parsing failed: " + doclingResult.errorMessage());
                 }
-
-                if (markdown == null) {
-                    TikaHtmlResult htmlResult = tikaHtmlExtractor.extract(new FileSystemResource(storedPath));
-                    markdown = htmlToMarkdownConverter.convert(htmlResult.html());
-                }
-                saved.setMarkdownContent(markdown);
+                String markdown = doclingResult.markdown();
+                
+                // Extract and save preview images (no Gemini, no heuristics filter)
+                String updatedMarkdown = imageProcessingService.processPreviewImages(saved, markdown);
+                saved.setMarkdownContent(updatedMarkdown);
             } catch (Exception parseEx) {
                 log.error("Failed to pre-parse document for preview: {}", parseEx.getMessage());
                 saved.setStatus(DocStatus.FAILED);
                 saved.setErrorMessage("Failed to pre-parse document: " + parseEx.getMessage());
             }
             saved = documentRepository.save(saved);
-        }
-
-        if (isPreview && saved.getStatus() == DocStatus.PREVIEW) {
-            String markdown = saved.getMarkdownContent();
-            if (markdown != null) {
-                String updatedMarkdown = extractAndSaveImages(saved, markdown);
-                if (!updatedMarkdown.equals(markdown)) {
-                    saved.setMarkdownContent(updatedMarkdown);
-                    saved = documentRepository.save(saved);
-                }
-            }
         }
 
         natsEventPublisher.publishDocumentStatus(saved.getId(), saved.getUserId(), saved.getWorkspaceId(), saved.getStatus().name());
@@ -542,33 +542,88 @@ public class DocumentService {
 
     @Transactional
     public void deleteDocument(Long documentId, String userId) {
-        Document doc = getDocument(documentId, userId);
-        
-        // Security logic: check owner before deleting
-        if (!doc.getUserId().equals(userId)) {
-            throw new ApiException("Permission denied. You can only delete documents you uploaded.");
+        deleteDocument(documentId, userId, null);
+    }
+
+    @Transactional
+    public void deleteDocument(Long documentId, String userId, String userRole) {
+        Document doc = documentRepository.findById(documentId)
+                .orElseThrow(() -> new ApiException("Document not found"));
+
+        // 1. Permission check: only system-user or SUPER_ADMIN
+        boolean isSuper = "system-user".equals(userId);
+        if (!isSuper && userRole != null) {
+            String upper = userRole.toUpperCase();
+            if (upper.contains("SUPER_ADMIN") || upper.contains("ROLE_SUPER_ADMIN")) {
+                isSuper = true;
+            }
+        }
+        if (!isSuper) {
+            var auth = org.springframework.security.core.context.SecurityContextHolder.getContext().getAuthentication();
+            if (auth != null) {
+                isSuper = auth.getAuthorities().stream()
+                        .map(org.springframework.security.core.GrantedAuthority::getAuthority)
+                        .anyMatch(a -> a.equals("ROLE_SUPER_ADMIN") || a.equals("SUPER_ADMIN"));
+            }
+        }
+        if (!isSuper) {
+            throw new AccessDeniedException("Chỉ Quản trị viên cấp cao (Super Admin) mới được phép xóa tài liệu.");
         }
 
-        // Delete from VectorStore asynchronously (tách biệt transaction)
-        java.util.concurrent.CompletableFuture.runAsync(() -> {
+        // 2. Validate state: do not delete if document is processing
+        if (doc.getStatus() == DocStatus.PROCESSING) {
+            throw new ApiException("Không thể xóa tài liệu đang trong quá trình xử lý (PROCESSING).");
+        }
+
+        // 3. Delete embeddings synchronously
+        try {
+            embeddingService.deleteByDocumentId(documentId);
+        } catch (Exception e) {
+            log.warn("Could not delete embeddings: {}", e.getMessage());
+        }
+
+        // 4. Delete related WikiPages and their associated drafts & links
+        List<WikiPage> wikiPages = wikiPageRepository.findBySourceDocumentId(documentId);
+        for (WikiPage page : wikiPages) {
             try {
-                com.security.security.dtorequest.DeleteRequest deleteReq = new com.security.security.dtorequest.DeleteRequest(documentId);
-                vectorStore.delete(String.format("documentId == '%s'", deleteReq.getDocumentId()));
+                wikiPageDraftRepository.deleteByWikiPageId(page.getId());
             } catch (Exception e) {
-                log.warn("Could not delete from VectorStore: {}", e.getMessage());
+                log.warn("Could not delete drafts for wiki page {}: {}", page.getId(), e.getMessage());
             }
-        });
+            try {
+                wikiLinkRepository.deleteByFromPageId(page.getId());
+            } catch (Exception e) {
+                log.warn("Could not delete wiki links from page {}: {}", page.getId(), e.getMessage());
+            }
+        }
+        if (!wikiPages.isEmpty()) {
+            wikiPageRepository.deleteBySourceDocumentId(documentId);
+        }
 
-        // Delete record
-        documentRepository.delete(doc);
+        // 5. Delete other logical associations
+        sourceCompilationPlanRepository.deleteBySourceDocumentId(documentId);
+        sourceChunkExtractRepository.deleteBySourceDocumentId(documentId);
+        ocrResultRepository.deleteByDocumentId(documentId);
 
-        // Delete file from disk
+        // 6. Delete extracted source images and files from disk
+        List<SourceImage> sourceImages = sourceImageRepository.findBySourceId(documentId);
+        for (SourceImage img : sourceImages) {
+            if (img.getMinioKey() != null) {
+                deleteFileOnDisk(Paths.get(uploadDir).resolve(img.getMinioKey()).toString());
+            }
+        }
+        sourceImageRepository.deleteBySourceId(documentId);
+
+        // 7. Delete original document file from disk
         deleteFileOnDisk(doc.getFilePath());
 
-        // Publish event to NATS for real-time frontend update
+        // 8. Delete document entity from database
+        documentRepository.delete(doc);
+
+        // 9. Publish event to NATS
         natsEventPublisher.publishDocumentStatus(doc.getId(), doc.getUserId(), doc.getWorkspaceId(), "DELETED");
 
-        log.info("Document deleted: {}", documentId);
+        log.info("Document and all related entities deleted: {}", documentId);
     }
 
     /* ===================== Helpers (giống style CVFileServiceImpl) ===================== */
@@ -798,73 +853,12 @@ public class DocumentService {
 
         // Run chunking and loading synchronously
         try {
-            if (sourceImageRepository.findBySourceId(documentId).isEmpty()) {
-                markdownContent = extractAndSaveImages(document, markdownContent);
-                document.setMarkdownContent(markdownContent);
-                documentRepository.save(document);
-            }
+            markdownContent = imageProcessingService.processIngestImages(document, markdownContent);
+            document.setMarkdownContent(markdownContent);
+            documentRepository.save(document);
 
-            List<SemanticMarkdownChunker.ChunkResult> chunkResults = semanticMarkdownChunker.chunk(markdownContent);
-            if (chunkResults.isEmpty()) {
-                throw new IllegalStateException("No chunks produced from markdown");
-            }
-
-            // Purge old chunks from VectorStore before loading new ones
-            try {
-                com.security.security.dtorequest.DeleteRequest deleteReq = new com.security.security.dtorequest.DeleteRequest(documentId);
-                vectorStore.delete(String.format("documentId == '%s'", deleteReq.getDocumentId()));
-            } catch (Exception e) {
-                log.warn("Could not delete old chunks from VectorStore during update: {}", e.getMessage());
-            }
-
-            // G6: Load to DB & VectorStore
-            embeddingRepository.deleteByDocumentId(documentId);
-
-            int batchSize = 30;
-            List<org.springframework.ai.document.Document> vBatch = new ArrayList<>(batchSize);
-            List<Embedding> eBatch = new ArrayList<>(batchSize);
-
-            for (int i = 0; i < chunkResults.size(); i++) {
-                SemanticMarkdownChunker.ChunkResult cr = chunkResults.get(i);
-
-                Map<String, Object> meta = new HashMap<>();
-                meta.put("documentId", document.getId().toString());
-                meta.put("userId", document.getUserId());
-                meta.put("fileName", document.getFileName());
-                meta.put("chunkIndex", String.valueOf(i));
-                meta.put("chunkTitle", cr.title());
-                meta.put("tokenCount", String.valueOf(semanticMarkdownChunker.estimateTokens(cr.text())));
-                meta.put("charCount", String.valueOf(cr.text().length()));
-                meta.put("classification", document.getSecurityClassification());
-                meta.put("securityClassification", document.getSecurityClassification());
-                meta.put("uploadedBy", document.getUserId());
-                meta.put("workspaceId", document.getWorkspaceId() != null ? document.getWorkspaceId() : "");
-                meta.put("departmentId", document.getDepartmentId() != null ? document.getDepartmentId() : "");
-                meta.put("allowedRoles", document.getAllowedRoles() != null ? document.getAllowedRoles() : "ALL");
-
-                vBatch.add(new org.springframework.ai.document.Document(cr.text(), meta));
-                eBatch.add(Embedding.builder()
-                        .documentId(document.getId())
-                        .chunkIndex(i)
-                        .chunkText(cr.text())
-                        .chunkTitle(cr.title())
-                        .tokenCount(semanticMarkdownChunker.estimateTokens(cr.text()))
-                        .charCount(cr.text().length())
-                        .build());
-
-                if (vBatch.size() >= batchSize) {
-                    vectorStore.add(new ArrayList<>(vBatch));
-                    embeddingRepository.saveAll(new ArrayList<>(eBatch));
-                    vBatch.clear();
-                    eBatch.clear();
-                }
-            }
-            if (!vBatch.isEmpty()) {
-                vectorStore.add(vBatch);
-                embeddingRepository.saveAll(eBatch);
-            }
-
-            log.info("Successfully ingested {} chunks for doc={}", chunkResults.size(), documentId);
+            // Chunking & Vector Store Loading
+            List<SemanticMarkdownChunker.ChunkResult> chunkResults = embeddingService.ingestMarkdown(document, markdownContent);
 
             // Profiling stats (docling-style)
             DocumentProfiler.ProfileResult profile = documentProfiler.profile(markdownContent, chunkResults);
@@ -879,6 +873,13 @@ public class DocumentService {
             document.setErrorMessage(null);
             documentRepository.save(document);
             natsEventPublisher.publishDocumentStatus(document.getId(), document.getUserId(), document.getWorkspaceId(), "COMPLETED");
+
+            // Trigger automatic compilation of Wiki pages
+            try {
+                mrpPipelineService.initiateCompile(document.getId(), document.getWorkspaceId(), userId, true);
+            } catch (Exception e) {
+                log.error("Failed to trigger wiki compilation for doc={}: {}", documentId, e.getMessage());
+            }
 
         } catch (Exception e) {
             log.error("Failed to ingest document {}: {}", documentId, e.getMessage(), e);
@@ -979,225 +980,20 @@ public class DocumentService {
         return saved;
     }
 
-    private String extractAndSaveImages(Document document, String markdown) {
+    private String calculateSHA256(byte[] bytes) {
         try {
-            Path filePath = Paths.get(document.getFilePath());
-            if (!Files.exists(filePath)) {
-                return markdown;
+            java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(bytes);
+            StringBuilder hexString = new StringBuilder();
+            for (byte b : hash) {
+                String hex = Integer.toHexString(0xff & b);
+                if (hex.length() == 1) hexString.append('0');
+                hexString.append(hex);
             }
-            byte[] fileBytes = Files.readAllBytes(filePath);
-            List<ImageExtractionService.ExtractedImage> extractedImages = 
-                    imageExtractionService.extractImages(fileBytes, document.getFileName());
-            
-            if (extractedImages != null && !extractedImages.isEmpty()) {
-                log.info("[DocumentService] Extracted {} inline images from document ID: {}", extractedImages.size(), document.getId());
-                
-                Path imagesDir = Paths.get(uploadDir).resolve("images");
-                if (!Files.exists(imagesDir)) {
-                    Files.createDirectories(imagesDir);
-                }
-                
-                ProcessedImageResult[] resultsArray = new ProcessedImageResult[extractedImages.size()];
-                for (int idx = 0; idx < extractedImages.size(); idx++) {
-                    ProcessedImageResult def = new ProcessedImageResult();
-                    def.index = idx;
-                    def.skipped = true;
-                    resultsArray[idx] = def;
-                }
-
-                List<CompletableFuture<Void>> futures = new ArrayList<>();
-                Semaphore captionSemaphore = new Semaphore(3); // Cap concurrency for caption calls
-                ExecutorService imageExecutor = Executors.newVirtualThreadPerTaskExecutor();
-
-                for (int idx = 0; idx < extractedImages.size(); idx++) {
-                    final int index = idx;
-                    final ImageExtractionService.ExtractedImage extImg = extractedImages.get(idx);
-                    
-                    CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
-                        try {
-                            boolean isLogoOrHeader = false;
-                            if (extImg.getWidth() > 0 && extImg.getHeight() > 0) {
-                                int w = extImg.getWidth();
-                                int h = extImg.getHeight();
-                                // Heuristic 1: Very small icon or logo (e.g. <= 80x80)
-                                if (w <= 80 && h <= 80) {
-                                    isLogoOrHeader = true;
-                                }
-                                // Heuristic 2: Long horizontal/vertical lines or banners (aspect ratio > 8.0 or < 0.125)
-                                double aspect = (double) w / h;
-                                if (aspect > 8.0 || aspect < 0.125) {
-                                    isLogoOrHeader = true;
-                                }
-                            }
-
-                            if (isLogoOrHeader) {
-                                log.info("[DocumentService] Skipping logo/header image index={} due to heuristics (w={}, h={})", index, extImg.getWidth(), extImg.getHeight());
-                                return;
-                            }
-
-                            UUID imgId = UUID.randomUUID();
-                            String imgFilename = imgId.toString() + "." + extImg.getExtension();
-                            Path targetPath = imagesDir.resolve(imgFilename);
-                            
-                            // Generate caption using Gemini (under concurrency control)
-                            captionSemaphore.acquire();
-                            String caption;
-                            try {
-                                caption = generateCaption(extImg.getBytes(), extImg.getContentType());
-                            } finally {
-                                captionSemaphore.release();
-                            }
-                            
-                            boolean isIgnoredText = false;
-                            if (caption != null) {
-                                String cleanCaption = caption.toLowerCase().trim();
-                                if (cleanCaption.replaceAll("[^a-zA-Z]", "").equalsIgnoreCase("IGNORE")
-                                        || cleanCaption.contains("logo")
-                                        || cleanCaption.contains("biểu tượng")
-                                        || cleanCaption.contains("bieu tuong")
-                                        || cleanCaption.contains("header")
-                                        || cleanCaption.contains("footer")
-                                        || cleanCaption.contains("icon")
-                                        || cleanCaption.contains("banner")
-                                        || cleanCaption.contains("ảnh bìa")
-                                        || cleanCaption.contains("anh bia")
-                                        || cleanCaption.contains("trang trí")
-                                        || cleanCaption.contains("trang tri")) {
-                                    isIgnoredText = true;
-                                }
-                            }
-
-                            if (isIgnoredText) {
-                                log.info("[DocumentService] Skipping logo/header image index={} based on Gemini keyword detection in caption: '{}'", index, caption);
-                                return;
-                            }
-
-                            // Write to disk only if NOT skipped
-                            Files.write(targetPath, extImg.getBytes());
-
-                            SourceImage sourceImg = SourceImage.builder()
-                                    .id(imgId)
-                                    .source(document)
-                                    .minioKey("images/" + imgFilename)
-                                    .pageNumber(extImg.getPageNumber())
-                                    .imageIndex(extImg.getImageIndex())
-                                    .caption(caption)
-                                    .contentType(extImg.getContentType())
-                                    .sizeBytes(extImg.getBytes().length)
-                                    .build();
-                                    
-                            ProcessedImageResult result = new ProcessedImageResult();
-                            result.index = index;
-                            result.skipped = false;
-                            result.sourceImage = sourceImg;
-                            resultsArray[index] = result;
-                        } catch (Exception ex) {
-                            log.warn("[DocumentService] Failed to process extracted image idx={} for docId={}: {}", index, document.getId(), ex.getMessage());
-                        }
-                    }, imageExecutor);
-                    futures.add(future);
-                }
-
-                CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
-                imageExecutor.shutdown();
-
-                // Delete old source images first to prevent duplicates
-                try {
-                    sourceImageRepository.deleteBySourceId(document.getId());
-                } catch (Exception e) {
-                    log.warn("[DocumentService] Failed to delete old source images for docId={}: {}", document.getId(), e.getMessage());
-                }
-
-                List<ProcessedImageResult> sortedResults = Arrays.asList(resultsArray);
-
-                // Save non-skipped SourceImage records to the database
-                List<SourceImage> imagesToSave = sortedResults.stream()
-                        .filter(r -> !r.skipped && r.sourceImage != null)
-                        .map(r -> r.sourceImage)
-                        .toList();
-                if (!imagesToSave.isEmpty()) {
-                    sourceImageRepository.saveAll(imagesToSave);
-                }
-
-                // Replace image placeholders in the markdown text in-place using sortedResults (1-to-1 matching)
-                String updatedMarkdown = markdown;
-                java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("!\\[(.*?)\\]\\((.*?)\\)");
-                java.util.regex.Matcher matcher = pattern.matcher(updatedMarkdown);
-                
-                StringBuffer sb = new StringBuffer();
-                int imgIndex = 0;
-                while (matcher.find()) {
-                    String replacement = "";
-                    if (imgIndex < sortedResults.size()) {
-                        ProcessedImageResult r = sortedResults.get(imgIndex);
-                        if (!r.skipped && r.sourceImage != null) {
-                            SourceImage img = r.sourceImage;
-                            String alt = sanitizeCaptionForAlt(img.getCaption());
-                            replacement = String.format("![%s](image://%s)", alt, img.getId().toString());
-                        }
-                        imgIndex++;
-                    }
-                    matcher.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(replacement));
-                }
-                matcher.appendTail(sb);
-                return sb.toString();
-            }
+            return hexString.toString();
         } catch (Exception e) {
-            log.warn("[DocumentService] Image extraction/processing failed for docId={}: {}", document.getId(), e.getMessage());
+            log.error("Failed to calculate SHA-256 hash: {}", e.getMessage());
+            return "";
         }
-        return markdown;
-    }
-
-    private String generateCaption(byte[] imgBytes, String contentType) {
-        try {
-            if (chatModel == null) return "Extracted Image";
-            
-            String mime = contentType.toLowerCase();
-            if (!mime.contains("png") && !mime.contains("jpeg") && !mime.contains("jpg") && !mime.contains("webp") && !mime.contains("heic") && !mime.contains("heif")) {
-                log.info("Skipping Gemini caption generation for unsupported image type: {}", contentType);
-                return "Extracted Image";
-            }
-            
-            org.springframework.core.io.ByteArrayResource byteResource = 
-                    new org.springframework.core.io.ByteArrayResource(imgBytes);
-            org.springframework.ai.content.Media media = 
-                    new org.springframework.ai.content.Media(org.springframework.util.MimeTypeUtils.parseMimeType(contentType), byteResource);
-            org.springframework.ai.chat.client.ChatClient chatClient = 
-                    org.springframework.ai.chat.client.ChatClient.builder(chatModel).build();
-            
-            String systemPrompt = "Analyze the image. If the image is a corporate logo, brand icon, page header, page footer, or decorative banner/line, you MUST reply with exactly the word 'IGNORE'. Otherwise, write a brief, 1-sentence description (maximum 10 words) of this image in Vietnamese. Do NOT write any intro, notes, or explanations. Keep it as short as possible.";
-            
-            org.springframework.ai.chat.model.ChatResponse response = chatClient.prompt()
-                    .options(org.springframework.ai.google.genai.GoogleGenAiChatOptions.builder()
-                            .model(geminiModel)
-                            .temperature(0.2)
-                            .maxOutputTokens(40)
-                            .build())
-                    .system(systemPrompt)
-                    .user(u -> u.text("Describe in max 10 words:").media(media))
-                    .call()
-                    .chatResponse();
-                    
-            if (response != null && response.getResult() != null && response.getResult().getOutput() != null) {
-                String text = response.getResult().getOutput().getText();
-                if (text != null) {
-                    return text.trim();
-                }
-            }
-        } catch (Exception e) {
-            log.warn("Failed to generate caption using Gemini: {}", e.getMessage());
-        }
-        return "Extracted Image";
-    }
-
-    private String sanitizeCaptionForAlt(String caption) {
-        if (caption == null) return "Extracted Image";
-        return caption.replace("\"", "'").replace("[", "").replace("]", "").replace("\n", " ").trim();
-    }
-
-    private static class ProcessedImageResult {
-        int index;
-        boolean skipped;
-        SourceImage sourceImage;
     }
 }
