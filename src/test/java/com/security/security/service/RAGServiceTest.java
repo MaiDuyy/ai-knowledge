@@ -60,6 +60,8 @@ class RAGServiceTest {
     @Test
     @DisplayName("Should build filter expression correctly for Admin (Default Scope)")
     void buildFilterExpression_Admin_ReturnsWorkspaceFilterOnly() throws Exception {
+        when(workspaceServiceClient.getWorkspace("workspace-abc", "user-123")).thenReturn(Map.of("id", "workspace-abc"));
+
         RAGQueryPayload.UserPermissionContext context = RAGQueryPayload.UserPermissionContext.builder()
                 .roles(Arrays.asList("ADMIN"))
                 .workspaceId("workspace-abc")
@@ -67,13 +69,15 @@ class RAGServiceTest {
 
         boolean[] partialResults = new boolean[]{false};
         String filter = invokeBuildFilter(context, "user-123", partialResults);
-        assertThat(filter).isEqualTo("workspaceId == 'workspace-abc' && (classification == 'PUBLIC' || securityClassification == 'PUBLIC')");
+        assertThat(filter).isEqualTo("workspaceId == 'workspace-abc'");
         assertThat(partialResults[0]).isFalse();
     }
 
     @Test
     @DisplayName("Should build filter expression correctly for Admin with Workspace Scope")
     void buildFilterExpression_Admin_WorkspaceScope() throws Exception {
+        when(workspaceServiceClient.getWorkspace("workspace-abc", "user-123")).thenReturn(Map.of("id", "workspace-abc"));
+
         // Mock ObjectMapper parsing of x-rag-scope
         com.fasterxml.jackson.databind.node.ObjectNode scopeJson = new ObjectMapper().createObjectNode();
         scopeJson.put("type", "workspace");
@@ -95,6 +99,8 @@ class RAGServiceTest {
     @Test
     @DisplayName("Should build filter expression correctly for Admin with Department Scope")
     void buildFilterExpression_Admin_DepartmentScope() throws Exception {
+        when(workspaceServiceClient.getWorkspace("workspace-abc", "user-123")).thenReturn(Map.of("id", "workspace-abc"));
+
         com.fasterxml.jackson.databind.node.ObjectNode scopeJson = new ObjectMapper().createObjectNode();
         scopeJson.put("type", "department");
         scopeJson.put("id", "dept-target-123");
@@ -115,6 +121,8 @@ class RAGServiceTest {
     @Test
     @DisplayName("Should build filter expression correctly for Guest")
     void buildFilterExpression_Guest_ReturnsPublicClassificationFilter() throws Exception {
+        when(workspaceServiceClient.getWorkspace("workspace-abc", "user-123")).thenReturn(Map.of("id", "workspace-abc"));
+
         RAGQueryPayload.UserPermissionContext context = RAGQueryPayload.UserPermissionContext.builder()
                 .roles(Arrays.asList("EXTERNAL_GUEST"))
                 .workspaceId("workspace-abc")

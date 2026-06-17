@@ -47,40 +47,40 @@ public class JwtAuthorizationFilter extends OncePerRequestFilter {
                     && gatewaySharedKey != null && gatewaySharedKey.equals(gatewayKey)) {
                 String internalRole = request.getHeader("x-user-role");
                 String internalRoles = request.getHeader("x-user-roles");
-                
+
                 log.debug("[Auth] Internal request: userId={}, role={}, roles={}", internalUserId, internalRole, internalRoles);
 
                 UserDTO user = new UserDTO();
                 user.setUserId(internalUserId);
                 user.setEmail(internalUserId);
-                
+
                 String role = internalRole != null ? internalRole : "WORKSPACE_MEMBER";
                 user.setRole(role);
-                
+
                 // 1. Xử lý Roles từ Gateway (loại bỏ ký tự JSON)
-                String cleanedRoles = (internalRoles != null && !internalRoles.trim().isEmpty()) 
+                String cleanedRoles = (internalRoles != null && !internalRoles.trim().isEmpty())
                     ? internalRoles.replace("[", "").replace("]", "").replace("\"", "").replace(" ", "")
                     : "";
 
                 // 2. Xây dựng danh sách quyền (Authorities)
                 StringBuilder authBuilder = new StringBuilder();
-                
+
                 // Thêm các quyền mặc định cho Document
                 authBuilder.append("document:create,document:read,document:update,document:delete");
-                
+
                 // Thêm các roles từ Gateway (nếu có)
                 if (!cleanedRoles.isEmpty()) {
                     authBuilder.append(",").append(cleanedRoles);
                 }
-                
+
                 // Thêm Role hiện tại với prefix ROLE_ (Bắt buộc cho hasRole() trong Spring Security)
                 authBuilder.append(",ROLE_").append(role);
-                
+
                 // Xử lý đặc biệt cho ADMIN / SUPER_ADMIN
                 if ("SUPER_ADMIN".equals(role) || "ADMIN".equals(role) || cleanedRoles.contains("ADMIN")) {
                     authBuilder.append(",system:admin,kb:manage,user:manage");
                 }
-                
+
                 String finalAuthorities = authBuilder.toString();
                 user.setAuthorities(finalAuthorities);
                 user.setEnabled(true);
@@ -94,30 +94,31 @@ public class JwtAuthorizationFilter extends OncePerRequestFilter {
                 var authorities = commaSeparatedStringToAuthorityList(finalAuthorities);
                 Authentication authentication = getAuthentication(user, authorities, request);
                 SecurityContextHolder.getContext().setAuthentication(authentication);
-                return;
-            }
-
-            // ── Priority 2: JWT cookie or Authorization Bearer ──
-            String token = getToken(request);
-
-            if (token != null && !token.trim().isEmpty()) {
-                log.debug("Processing JWT token for request: {}", request.getRequestURI());
-
-                var user = jwtService.getTokenData(token, TokenData::getUser);
-                var authorities = jwtService.getTokenData(token, TokenData::getAuthorities);
-                var isValid = jwtService.getTokenData(token, TokenData::isValid);
-
-                if (isValid && user != null) {
-                    RequestContext.setUserId(user.getUserId());
-                    Authentication authentication = getAuthentication(user, authorities, request);
-                    SecurityContextHolder.getContext().setAuthentication(authentication);
-                    log.debug("Successfully authenticated user: {}", user.getEmail());
-                } else {
-                    log.warn("Invalid JWT token for user: {}", user != null ? user.getEmail() : "unknown");
-                    SecurityContextHolder.clearContext();
-                }
+                // NOTE: Do NOT return here — fall through to filterChain.doFilter() in finally
+                // so both normal and async-dispatched threads continue the filter chain.
             } else {
-                log.debug("No JWT token found for request: {}", request.getRequestURI());
+                // ── Priority 2: JWT cookie or Authorization Bearer ──
+                String token = getToken(request);
+
+                if (token != null && !token.trim().isEmpty()) {
+                    log.debug("Processing JWT token for request: {}", request.getRequestURI());
+
+                    var user = jwtService.getTokenData(token, TokenData::getUser);
+                    var authorities = jwtService.getTokenData(token, TokenData::getAuthorities);
+                    var isValid = jwtService.getTokenData(token, TokenData::isValid);
+
+                    if (isValid && user != null) {
+                        RequestContext.setUserId(user.getUserId());
+                        Authentication authentication = getAuthentication(user, authorities, request);
+                        SecurityContextHolder.getContext().setAuthentication(authentication);
+                        log.debug("Successfully authenticated user: {}", user.getEmail());
+                    } else {
+                        log.warn("Invalid JWT token for user: {}", user != null ? user.getEmail() : "unknown");
+                        SecurityContextHolder.clearContext();
+                    }
+                } else {
+                    log.debug("No JWT token found for request: {}", request.getRequestURI());
+                }
             }
         } catch (Exception e) {
             log.error("JWT Authorization failed for request {}: {}", request.getRequestURI(), e.getMessage());
@@ -164,4 +165,17 @@ public class JwtAuthorizationFilter extends OncePerRequestFilter {
 
         return publicPaths.stream().anyMatch(path::startsWith);
     }
+
+    /**
+     * Return false so this filter also runs on Tomcat ASYNC dispatches.
+     * By default OncePerRequestFilter skips async dispatches, which causes
+     * SecurityContext to be empty when Tomcat dispatches the SSE write to
+     * a new thread → AnonymousAuthenticationFilter → Access Denied.
+     */
+    @Override
+    protected boolean shouldNotFilterAsyncDispatch() {
+        return false;
+    }
+
 }
+
