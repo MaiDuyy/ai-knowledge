@@ -41,6 +41,8 @@ class DocumentServiceUploadPermissionTest {
     @Mock private NatsEventPublisher natsEventPublisher;
     @Mock private WorkspaceServiceClient workspaceServiceClient;
     @Mock private DoclingClient doclingClient;
+    @Mock private org.springframework.data.redis.core.StringRedisTemplate redisTemplate;
+    @Mock private org.springframework.data.redis.core.ValueOperations<String, String> valueOperations;
 
     @InjectMocks
     private DocumentService documentService;
@@ -50,6 +52,7 @@ class DocumentServiceUploadPermissionTest {
 
     @BeforeEach
     void setUp() {
+        lenient().when(redisTemplate.opsForValue()).thenReturn(valueOperations);
         ReflectionTestUtils.setField(documentService, "uploadDir", tempDir.toString());
     }
 
@@ -189,6 +192,43 @@ class DocumentServiceUploadPermissionTest {
         Document savedDoc = docCaptor.getValue();
         assertThat(savedDoc.getFileHash()).isEqualTo("bf0ecbdb9b814248d086c9b69cf26182d9d4138f2ad3d0637c4555fc8cbf68e5");
         assertThat(savedDoc.getFolderPath()).isEqualTo("HR/Policies");
+    }
+
+    @Test
+    @DisplayName("uploadDocument queries Redis cache and database for file hash")
+    void uploadDocument_checksRedisAndDbCache() throws IOException {
+        MockMultipartFile file = new MockMultipartFile(
+                "file", "doc.pdf", "application/pdf", "dummy content".getBytes());
+
+        when(workspaceServiceClient.getWorkspace("ws-1", "user-1")).thenReturn(Map.of(
+                "id", "ws-1",
+                "departmentId", "dept-1"
+        ));
+
+        when(documentRepository.save(any(Document.class))).thenAnswer(inv -> {
+            Document doc = inv.getArgument(0);
+            doc.setId(501L);
+            return doc;
+        });
+
+        // Mock cache miss in Redis
+        when(valueOperations.get("doc:hash:bf0ecbdb9b814248d086c9b69cf26182d9d4138f2ad3d0637c4555fc8cbf68e5"))
+                .thenReturn(null);
+
+        // Mock DB query response
+        when(documentRepository.findByFileHashAndStatus("bf0ecbdb9b814248d086c9b69cf26182d9d4138f2ad3d0637c4555fc8cbf68e5", DocStatus.COMPLETED))
+                .thenReturn(java.util.Collections.emptyList());
+
+        DocumentUploadResponse response = documentService.uploadDocument(
+                file, "user-1", false, "gemini",
+                "ws-1", "dept-1", "ALL", "INTERNAL",
+                "WORKSPACE_MEMBER", "[{\"departmentId\":\"dept-1\",\"role\":\"HEAD\"}]",
+                "HR/Policies"
+        );
+
+        assertThat(response.getDocumentId()).isEqualTo(501L);
+        verify(valueOperations).get("doc:hash:bf0ecbdb9b814248d086c9b69cf26182d9d4138f2ad3d0637c4555fc8cbf68e5");
+        verify(documentRepository).findByFileHashAndStatus("bf0ecbdb9b814248d086c9b69cf26182d9d4138f2ad3d0637c4555fc8cbf68e5", DocStatus.COMPLETED);
     }
 }
 

@@ -65,6 +65,7 @@ public class DocumentService {
     private final WikiPageRepository wikiPageRepository;
     private final WikiPageDraftRepository wikiPageDraftRepository;
     private final WikiLinkRepository wikiLinkRepository;
+    private final org.springframework.data.redis.core.StringRedisTemplate redisTemplate;
 
     @Value("${app.upload.dir:uploads}")
     private String uploadDir;
@@ -320,6 +321,28 @@ public class DocumentService {
             fileHash = calculateSHA256(file.getBytes());
         } catch (IOException e) {
             log.error("Failed to read file bytes for hashing: {}", e.getMessage());
+        }
+
+        // Check Redis/DB cache for duplicate completed document
+        String cachedDocId = null;
+        if (redisTemplate != null) {
+            try {
+                cachedDocId = redisTemplate.opsForValue().get("doc:hash:" + fileHash);
+                if (cachedDocId != null) {
+                    log.info("Duplicate document detected in Redis cache: hash={}, cachedDocId={}", fileHash, cachedDocId);
+                }
+            } catch (Exception e) {
+                log.error("Failed to query Redis for file hash: {}", e.getMessage());
+            }
+        }
+
+        if (cachedDocId == null) {
+            // Fallback to database query
+            List<Document> existing = documentRepository.findByFileHashAndStatus(fileHash, DocStatus.COMPLETED);
+            if (!existing.isEmpty()) {
+                cachedDocId = String.valueOf(existing.get(0).getId());
+                log.info("Duplicate document detected in Database: hash={}, cachedDocId={}", fileHash, cachedDocId);
+            }
         }
 
         Document document = Document.builder()

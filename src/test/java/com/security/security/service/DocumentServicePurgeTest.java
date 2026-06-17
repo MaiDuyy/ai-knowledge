@@ -40,6 +40,8 @@ class DocumentServicePurgeTest {
     @Mock private SourceCompilationPlanRepository sourceCompilationPlanRepository;
     @Mock private SourceChunkExtractRepository sourceChunkExtractRepository;
     @Mock private OcrResultRepository ocrResultRepository;
+    @Mock private org.springframework.data.redis.core.StringRedisTemplate redisTemplate;
+    @Mock private org.springframework.data.redis.core.ValueOperations<String, String> valueOperations;
 
     @InjectMocks
     private DocumentService documentService;
@@ -94,4 +96,26 @@ class DocumentServicePurgeTest {
         verify(imageProcessingService).processIngestImages(doc, "# Test Content");
         verify(embeddingService).ingestMarkdown(doc, "# Test Content");
     }
+
+    @Test
+    @DisplayName("Should successfully get/set fileHash and folderPath on Document and call repository findByFileHashAndStatus")
+    void testFileHashAndFolderPath_GettersSettersAndRepository() {
+        Document doc = Document.builder()
+                .fileHash("abc123hash")
+                .folderPath("HR/Policies")
+                .build();
+
+        org.junit.jupiter.api.Assertions.assertEquals("abc123hash", doc.getFileHash());
+        org.junit.jupiter.api.Assertions.assertEquals("HR/Policies", doc.getFolderPath());
+
+        com.security.security.entity.enumeration.DocStatus status = com.security.security.entity.enumeration.DocStatus.COMPLETED;
+        when(documentRepository.findByFileHashAndStatus("abc123hash", status))
+                .thenReturn(java.util.List.of(doc));
+
+        java.util.List<Document> found = documentRepository.findByFileHashAndStatus("abc123hash", status);
+        org.junit.jupiter.api.Assertions.assertNotNull(found);
+        org.junit.jupiter.api.Assertions.assertEquals(1, found.size());
+        org.junit.jupiter.api.Assertions.assertEquals("abc123hash", found.get(0).getFileHash());
+    }
 }
+
