@@ -432,6 +432,69 @@ public class MrpController {
     }
 
     /**
+     * Lấy đồ thị liên kết tri thức (Wiki Graph) của Workspace.
+     * GET /api/mrp/wiki/graph?workspaceId=...
+     */
+    @GetMapping("/wiki/graph")
+    public ResponseEntity<com.security.security.dto.WikiGraphDto> getWikiGraph(
+            @RequestParam(defaultValue = "default-workspace") String workspaceId,
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
+            @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
+        log.info("[MrpController] Fetching wiki link graph for workspace: {} by user: {}", workspaceId, userId);
+        
+        ParsedUserPermissions perm = parseUserPermissions(userRolesHeader, userDepartmentsHeader);
+        if (!perm.isAdmin) {
+            validateWorkspaceAccess(userId, workspaceId);
+        }
+        
+        // 1. Fetch accessible pages (lightweight metadata)
+        List<WikiPageRepository.WikiPageMetadata> pages = wikiPageRepository.findAccessibleMetadata(
+            workspaceId, perm.isAdmin, perm.deptIdsWhereHead, perm.deptIdsWhereMember);
+            
+        // 2. Map pages to Node DTOs and build a set of accessible slugs
+        java.util.Set<String> accessibleSlugs = new java.util.HashSet<>();
+        List<com.security.security.dto.WikiGraphDto.NodeDto> nodes = pages.stream().map(page -> {
+            accessibleSlugs.add(page.getSlug());
+            return com.security.security.dto.WikiGraphDto.NodeDto.builder()
+                .slug(page.getSlug())
+                .title(page.getTitle())
+                .pageType(page.getPageType())
+                .build();
+        }).collect(java.util.stream.Collectors.toList());
+        
+        // 3. Fetch all edges for the accessible pages
+        List<Long> pageIds = pages.stream().map(WikiPageRepository.WikiPageMetadata::getId).collect(java.util.stream.Collectors.toList());
+        List<com.security.security.dto.WikiGraphDto.EdgeDto> edges = new java.util.ArrayList<>();
+        
+        if (!pageIds.isEmpty()) {
+            List<com.security.security.entity.WikiLink> dbLinks = wikiLinkRepository.findByFromPageIdIn(pageIds);
+            
+            // Map the source page IDs to their slugs for building edges
+            Map<Long, String> pageIdToSlugMap = pages.stream()
+                .collect(java.util.stream.Collectors.toMap(WikiPageRepository.WikiPageMetadata::getId, WikiPageRepository.WikiPageMetadata::getSlug));
+                
+            for (com.security.security.entity.WikiLink link : dbLinks) {
+                String fromSlug = pageIdToSlugMap.get(link.getFromPageId());
+                String toSlug = link.getToSlug();
+                
+                // Only include the edge if both source and target pages are accessible in the current workspace
+                if (fromSlug != null && accessibleSlugs.contains(toSlug)) {
+                    edges.add(com.security.security.dto.WikiGraphDto.EdgeDto.builder()
+                        .from(fromSlug)
+                        .to(toSlug)
+                        .build());
+                }
+            }
+        }
+        
+        return ResponseEntity.ok(com.security.security.dto.WikiGraphDto.builder()
+            .nodes(nodes)
+            .edges(edges)
+            .build());
+    }
+
+    /**
      * Lấy chi tiết một trang Wiki theo slug.
      * GET /api/mrp/wiki/slug/{slug}?workspaceId=...
      */

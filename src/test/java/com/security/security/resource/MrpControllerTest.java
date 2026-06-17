@@ -189,5 +189,67 @@ class MrpControllerTest {
         assertThat(response.getBody()).isNotNull();
         assertThat(response.getBody().getStatus()).isEqualTo("PROCESSING");
     }
+
+    @Test
+    @DisplayName("Should return Wiki graph nodes and edges for accessible pages")
+    void getWikiGraph_ReturnsGraphData() {
+        String workspaceId = "test-workspace";
+        String userId = "test-user";
+        String userRoles = "MEMBER";
+
+        // Mock workspace access
+        Mockito.when(workspaceServiceClient.getWorkspace(workspaceId, userId))
+                .thenReturn(java.util.Map.of("id", (Object) workspaceId));
+
+        // Mock two accessible pages
+        WikiPageRepository.WikiPageMetadata page1 = Mockito.mock(WikiPageRepository.WikiPageMetadata.class);
+        Mockito.when(page1.getId()).thenReturn(1L);
+        Mockito.when(page1.getSlug()).thenReturn("slug-1");
+        Mockito.when(page1.getTitle()).thenReturn("Title 1");
+        Mockito.when(page1.getPageType()).thenReturn("concept");
+
+        WikiPageRepository.WikiPageMetadata page2 = Mockito.mock(WikiPageRepository.WikiPageMetadata.class);
+        Mockito.when(page2.getId()).thenReturn(2L);
+        Mockito.when(page2.getSlug()).thenReturn("slug-2");
+        Mockito.when(page2.getTitle()).thenReturn("Title 2");
+        Mockito.when(page2.getPageType()).thenReturn("entity");
+
+        Mockito.when(wikiPageRepository.findAccessibleMetadata(
+                Mockito.eq(workspaceId), Mockito.eq(false), Mockito.anyList(), Mockito.anyList()))
+                .thenReturn(java.util.List.of(page1, page2));
+
+        // Mock links: link from 1 to 2 (valid), link from 1 to 3 (invalid/not accessible)
+        com.security.security.entity.WikiLink link1 = com.security.security.entity.WikiLink.builder()
+                .id(10L)
+                .fromPageId(1L)
+                .toSlug("slug-2")
+                .build();
+        com.security.security.entity.WikiLink link2 = com.security.security.entity.WikiLink.builder()
+                .id(11L)
+                .fromPageId(1L)
+                .toSlug("slug-3") // slug-3 is not accessible/doesn't exist
+                .build();
+
+        Mockito.when(wikiLinkRepository.findByFromPageIdIn(java.util.List.of(1L, 2L)))
+                .thenReturn(java.util.List.of(link1, link2));
+
+        // Execute
+        ResponseEntity<?> response = mrpController.getWikiGraph(workspaceId, userId, userRoles, null);
+
+        assertThat(response.getStatusCodeValue()).isEqualTo(200);
+        com.security.security.dto.WikiGraphDto body = (com.security.security.dto.WikiGraphDto) response.getBody();
+        assertThat(body).isNotNull();
+        
+        // Verify nodes (both accessible pages are included)
+        assertThat(body.getNodes()).hasSize(2);
+        assertThat(body.getNodes().get(0).getSlug()).isEqualTo("slug-1");
+        assertThat(body.getNodes().get(1).getSlug()).isEqualTo("slug-2");
+
+        // Verify edges (only link to slug-2 is included, link to slug-3 is filtered out)
+        assertThat(body.getEdges()).hasSize(1);
+        assertThat(body.getEdges().get(0).getFrom()).isEqualTo("slug-1");
+        assertThat(body.getEdges().get(0).getTo()).isEqualTo("slug-2");
+    }
 }
+
 

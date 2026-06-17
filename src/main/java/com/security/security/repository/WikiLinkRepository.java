@@ -11,4 +11,5 @@ public interface WikiLinkRepository extends JpaRepository<WikiLink, Long> {
     List<WikiLink> findByFromPageId(Long fromPageId);
     List<WikiLink> findByToSlug(String toSlug);
     void deleteByFromPageId(Long fromPageId);
+    List<WikiLink> findByFromPageIdIn(List<Long> fromPageIds);
 }
