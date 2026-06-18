@@ -48,8 +48,16 @@ public class DocumentController {
             @RequestHeader(value = "x-user-role", required = false) String userRole,
             @RequestHeader(value = "x-user-departments", required = false) String userDepartments,
             @RequestHeader(value = "x-workspace-id", required = false) String workspaceIdHeader) throws IOException {
-        // Resolve workspaceId: query param takes priority over header
-        String workspaceId = (workspaceIdParam != null && !workspaceIdParam.isBlank()) ? workspaceIdParam : workspaceIdHeader;
+        // Resolve workspaceId: explicit param wins; if departmentId is set with no param,
+        // it's a department-level upload (null workspace) — don't fall back to header.
+        String workspaceId;
+        if (workspaceIdParam != null && !workspaceIdParam.isBlank()) {
+            workspaceId = workspaceIdParam;
+        } else if (departmentId != null && !departmentId.isBlank()) {
+            workspaceId = null;
+        } else {
+            workspaceId = workspaceIdHeader;
+        }
         DocumentUploadResponse response = documentService.uploadDocument(file, userId, preview, parser, workspaceId, departmentId, allowedRoles, securityClassification, userRole, userDepartments, folderPath);
 
         return ResponseEntity.accepted().body(response);
@@ -237,7 +245,7 @@ public class DocumentController {
     }
 
     /**
-     * Update document metadata (security classification, departmentId, allowedRoles, tags)
+     * Update document metadata (security classification, departmentId, allowedRoles, tags, folderPath, workspaceId)
      */
     @PatchMapping("/{id}/metadata")
     public ResponseEntity<Document> updateMetadata(
@@ -247,8 +255,10 @@ public class DocumentController {
         String securityClassification = (String) payload.get("securityClassification");
         String departmentId = (String) payload.get("departmentId");
         String allowedRoles = (String) payload.get("allowedRoles");
+        String folderPath = (String) payload.get("folderPath");
+        String workspaceId = (String) payload.get("workspaceId");
         List<String> tags = (List<String>) payload.get("tags");
-        Document doc = documentService.updateDocumentMetadata(id, securityClassification, departmentId, allowedRoles, tags, userId);
+        Document doc = documentService.updateDocumentMetadata(id, securityClassification, departmentId, allowedRoles, tags, folderPath, workspaceId, userId);
         return ResponseEntity.ok(doc);
     }
 

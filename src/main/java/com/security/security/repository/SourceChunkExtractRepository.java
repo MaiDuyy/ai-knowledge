@@ -12,4 +12,8 @@ public interface SourceChunkExtractRepository extends JpaRepository<SourceChunkE
     List<SourceChunkExtract> findBySourceDocumentId(Long sourceDocumentId);
     Optional<SourceChunkExtract> findBySourceDocumentIdAndChunkIndex(Long sourceDocumentId, Integer chunkIndex);
     List<SourceChunkExtract> findBySourceDocumentIdAndStatus(Long sourceDocumentId, String status);
+
+    @org.springframework.data.jpa.repository.Modifying
+    @org.springframework.transaction.annotation.Transactional
+    void deleteBySourceDocumentId(Long sourceDocumentId);
 }

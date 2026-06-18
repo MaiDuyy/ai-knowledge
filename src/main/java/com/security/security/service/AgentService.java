@@ -121,6 +121,8 @@ public class AgentService {
 
                 LlmProvider provider = llmFactory.getProvider(providerName);
 
+                final Long finalConversationId = conversationId;
+
                 return Flux.from(provider.streamChat(systemWithContext, strictUserMessage, toolConfig, conversationId.toString()))
                                 .map(token -> {
                                         if (jsonStarted.get())
@@ -134,23 +136,24 @@ public class AgentService {
                                 })
                                 .filter(token -> !token.isEmpty())
                                 .doOnNext(fullResponse::append)
-                                .doOnComplete(() -> {
-                                        // Persist assistant response to DB
-                                        conversationService.saveMessage(
-                                                        conversationId,
-                                                        "assistant",
-                                                        fullResponse.toString(),
-                                                        null,
-                                                        null);
-
-                                        // Auto-generate title if it's the first message pair
-                                        java.util.List<com.security.security.entity.Message> msgs = conversationService.getMessages(conversationId);
-                                        if (msgs.size() <= 2) {
-                                                conversationService.updateConversationTitle(conversationId, message);
+                                .doOnError(e -> log.error("[Agent] Stream error: {}", e.getMessage()))
+                                .onErrorResume(e -> Flux.empty())
+                                .doFinally(signal -> {
+                                        if (fullResponse.length() > 0) {
+                                                conversationService.saveMessage(
+                                                                finalConversationId,
+                                                                "assistant",
+                                                                fullResponse.toString(),
+                                                                null,
+                                                                null);
                                         }
 
-                                        log.info("[Agent] Completed. chars={}", fullResponse.length());
-                                })
-                                .doOnError(e -> log.error("[Agent] Error during agent run", e));
+                                        java.util.List<com.security.security.entity.Message> msgs = conversationService.getMessages(finalConversationId);
+                                        if (msgs.size() <= 2) {
+                                                conversationService.updateConversationTitle(finalConversationId, message);
+                                        }
+
+                                        log.info("[Agent] Finished (signal={}). chars={}", signal, fullResponse.length());
+                                });
         }
 }

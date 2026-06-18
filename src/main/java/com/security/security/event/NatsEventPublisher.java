@@ -50,7 +50,7 @@ public class NatsEventPublisher {
         Map<String, Object> payload = new HashMap<>();
         payload.put("documentId", documentId);
         payload.put("userId", userId != null ? userId : "system-user");
-        payload.put("workspaceId", workspaceId != null ? workspaceId : "default-workspace");
+        payload.put("workspaceId", workspaceId);
         payload.put("status", status);
 
         publishEvent("document.status.updated", payload);
@@ -63,7 +63,7 @@ public class NatsEventPublisher {
         Map<String, Object> payload = new HashMap<>();
         payload.put("planId", planId);
         payload.put("sourceDocumentId", documentId);
-        payload.put("workspaceId", workspaceId != null ? workspaceId : "default-workspace");
+        payload.put("workspaceId", workspaceId);
         payload.put("status", status);
         payload.put("userId", userId != null ? userId : "system-user");
 
@@ -78,7 +78,7 @@ public class NatsEventPublisher {
         payload.put("draftId", draftId);
         payload.put("title", title);
         payload.put("slug", slug);
-        payload.put("workspaceId", workspaceId != null ? workspaceId : "default-workspace");
+        payload.put("workspaceId", workspaceId);
         payload.put("status", status);
         payload.put("userId", userId != null ? userId : "system-user");
 

@@ -15,6 +15,8 @@ import org.springframework.stereotype.Service;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Collectors;
+import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 
@@ -28,6 +30,7 @@ public class WikiDraftService {
     private final VectorStore vectorStore;
     private final com.security.security.repository.WikiLinkRepository wikiLinkRepository;
     private final NatsEventPublisher natsEventPublisher;
+    private final ChatClient chatClient;
 
     /**
      * Propose a new draft for a Wiki page
@@ -35,6 +38,14 @@ public class WikiDraftService {
     @Transactional
     public WikiPageDraft proposeDraft(WikiPageDraft draft) {
         log.info("[WikiDraftService] Proposing draft for slug: {}, workspace: {}", draft.getSlug(), draft.getWorkspaceId());
+        
+        // Conflict Detection: check if another draft with status PENDING exists for the same slug and workspaceId
+        List<WikiPageDraft> existingPendingDrafts = wikiPageDraftRepository.findBySlugAndWorkspaceId(draft.getSlug(), draft.getWorkspaceId());
+        boolean hasPending = existingPendingDrafts.stream().anyMatch(d -> "PENDING".equals(d.getStatus()));
+        if (hasPending) {
+            throw new IllegalStateException("A pending draft already exists for the slug: " + draft.getSlug() + " in this workspace.");
+        }
+
         draft.setStatus("PENDING");
         WikiPageDraft saved = wikiPageDraftRepository.save(draft);
         natsEventPublisher.publishWikiDraftUpdated(saved.getId(), saved.getTitle(), saved.getSlug(), saved.getWorkspaceId(), saved.getStatus(), saved.getAuthorId());
@@ -95,7 +106,7 @@ public class WikiDraftService {
         } else {
             // This is a CREATE action
             // Double check if a page with the same slug already exists in this workspace to prevent duplicates
-            Optional<WikiPage> existingPage = wikiPageRepository.findBySlugAndWorkspaceId(draft.getSlug(), draft.getWorkspaceId());
+            Optional<WikiPage> existingPage = wikiPageRepository.fetchBySlugAndWorkspaceId(draft.getSlug(), draft.getWorkspaceId());
             if (existingPage.isPresent()) {
                 isUpdate = true;
                 targetPage = existingPage.get();
@@ -296,5 +307,34 @@ public class WikiDraftService {
      */
     public List<WikiPageDraft> getDraftsByWorkspace(String workspaceId) {
         return wikiPageDraftRepository.findByWorkspaceId(workspaceId);
+    }
+
+    /**
+     * Auto link draft content by inserting double bracket links around keywords matching existing slugs
+     */
+    public String autoLinkDraftContent(String content, String workspaceId) {
+        List<WikiPage> pages = wikiPageRepository.findByWorkspaceId(workspaceId);
+        if (pages.isEmpty()) {
+            return content;
+        }
+        List<String> slugs = pages.stream().map(WikiPage::getSlug).collect(Collectors.toList());
+        
+        String systemPrompt = """
+            You are an AI Co-Editor helping to insert internal wiki links.
+            Your task is to analyze the provided markdown content and identify terms, concepts, or exact matches that correspond to the list of allowed slugs.
+            For any identified keyword, wrap it in double brackets with its matching slug, like this: [[slug]].
+            If a term matches a slug but is written differently in the text (e.g. capitalized, plural, or translated), wrap the text and reference the slug, like this: [[slug|original text]].
+            Only link terms that correspond to the provided list of allowed slugs. Do not invent slugs.
+            Do not add extra explanations or commentary, return ONLY the updated markdown content.
+            
+            Allowed slugs:
+            %s
+            """.formatted(slugs.toString());
+
+        return chatClient.prompt()
+                .system(systemPrompt)
+                .user(content)
+                .call()
+                .content();
     }
 }

@@ -17,12 +17,18 @@ public interface WikiPageDraftRepository extends JpaRepository<WikiPageDraft, Lo
     Page<WikiPageDraft> findByStatus(String status, Pageable pageable);
     List<WikiPageDraft> findByWorkspaceId(String workspaceId);
     List<WikiPageDraft> findByWikiPageId(Long wikiPageId);
+
+    @org.springframework.data.jpa.repository.Modifying
+    @org.springframework.transaction.annotation.Transactional
+    void deleteByWikiPageId(Long wikiPageId);
+
     List<WikiPageDraft> findBySlugAndWorkspaceId(String slug, String workspaceId);
 
-    @Query("SELECT wd FROM WikiPageDraft wd WHERE (wd.workspaceId = :workspaceId OR (wd.workspaceId = 'all' AND :workspaceId != 'default-workspace')) AND ("
+    @Query("SELECT wd FROM WikiPageDraft wd WHERE ((wd.workspaceId = :workspaceId OR (:workspaceId IN ('default-workspace', 'workspace-default') AND (wd.workspaceId = '' OR wd.workspaceId IS NULL OR wd.workspaceId = 'default-workspace' OR wd.workspaceId = 'workspace-default')))"
+         + " OR (wd.workspaceId = 'all' AND :workspaceId != 'default-workspace')) AND ("
          + ":isAdmin = true OR "
          + "wd.securityClassification = 'PUBLIC' OR "
-         + "(wd.workspaceId = :workspaceId AND wd.allowedRoles != 'HEAD') OR "
+         + "((wd.workspaceId = :workspaceId OR (:workspaceId IN ('default-workspace', 'workspace-default') AND (wd.workspaceId = '' OR wd.workspaceId IS NULL OR wd.workspaceId = 'default-workspace' OR wd.workspaceId = 'workspace-default'))) AND wd.allowedRoles != 'HEAD') OR "
          + "(wd.securityClassification = 'INTERNAL' AND (wd.departmentId IS NULL OR wd.departmentId = '')) OR "
          + "(wd.departmentId IN :deptIdsWhereHead) OR "
          + "(wd.departmentId IN :deptIdsWhereMember AND wd.allowedRoles != 'HEAD')"
@@ -34,10 +40,11 @@ public interface WikiPageDraftRepository extends JpaRepository<WikiPageDraft, Lo
         @Param("deptIdsWhereMember") List<String> deptIdsWhereMember
     );
 
-    @Query("SELECT wd FROM WikiPageDraft wd WHERE (wd.workspaceId = :workspaceId OR (wd.workspaceId = 'all' AND :workspaceId != 'default-workspace')) AND wd.status = :status AND ("
+    @Query("SELECT wd FROM WikiPageDraft wd WHERE ((wd.workspaceId = :workspaceId OR (:workspaceId IN ('default-workspace', 'workspace-default') AND (wd.workspaceId = '' OR wd.workspaceId IS NULL OR wd.workspaceId = 'default-workspace' OR wd.workspaceId = 'workspace-default')))"
+         + " OR (wd.workspaceId = 'all' AND :workspaceId != 'default-workspace')) AND wd.status = :status AND ("
          + ":isAdmin = true OR "
          + "wd.securityClassification = 'PUBLIC' OR "
-         + "(wd.workspaceId = :workspaceId AND wd.allowedRoles != 'HEAD') OR "
+         + "((wd.workspaceId = :workspaceId OR (:workspaceId IN ('default-workspace', 'workspace-default') AND (wd.workspaceId = '' OR wd.workspaceId IS NULL OR wd.workspaceId = 'default-workspace' OR wd.workspaceId = 'workspace-default'))) AND wd.allowedRoles != 'HEAD') OR "
          + "(wd.securityClassification = 'INTERNAL' AND (wd.departmentId IS NULL OR wd.departmentId = '')) OR "
          + "(wd.departmentId IN :deptIdsWhereHead) OR "
          + "(wd.departmentId IN :deptIdsWhereMember AND wd.allowedRoles != 'HEAD')"
@@ -50,10 +57,11 @@ public interface WikiPageDraftRepository extends JpaRepository<WikiPageDraft, Lo
         @Param("deptIdsWhereMember") List<String> deptIdsWhereMember
     );
 
-    @Query("SELECT wd FROM WikiPageDraft wd WHERE (wd.workspaceId = :workspaceId OR (wd.workspaceId = 'all' AND :workspaceId != 'default-workspace')) AND wd.status = :status AND ("
+    @Query("SELECT wd FROM WikiPageDraft wd WHERE ((wd.workspaceId = :workspaceId OR (:workspaceId IN ('default-workspace', 'workspace-default') AND (wd.workspaceId = '' OR wd.workspaceId IS NULL OR wd.workspaceId = 'default-workspace' OR wd.workspaceId = 'workspace-default')))"
+         + " OR (wd.workspaceId = 'all' AND :workspaceId != 'default-workspace')) AND wd.status = :status AND ("
          + ":isAdmin = true OR "
          + "wd.securityClassification = 'PUBLIC' OR "
-         + "(wd.workspaceId = :workspaceId AND wd.allowedRoles != 'HEAD') OR "
+         + "((wd.workspaceId = :workspaceId OR (:workspaceId IN ('default-workspace', 'workspace-default') AND (wd.workspaceId = '' OR wd.workspaceId IS NULL OR wd.workspaceId = 'default-workspace' OR wd.workspaceId = 'workspace-default'))) AND wd.allowedRoles != 'HEAD') OR "
          + "(wd.securityClassification = 'INTERNAL' AND (wd.departmentId IS NULL OR wd.departmentId = '')) OR "
          + "(wd.departmentId IN :deptIdsWhereHead) OR "
          + "(wd.departmentId IN :deptIdsWhereMember AND wd.allowedRoles != 'HEAD')"

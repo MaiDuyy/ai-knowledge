@@ -410,34 +410,65 @@ public class DocumentService {
      * Get documents scoped by workspaceId.
      * Falls back to company-wide listing if workspaceId is null/blank (backward compat).
      */
-    private List<Document> filterDocumentsByRole(List<Document> docs, String userRole, String userDepartments) {
+    private List<Document> filterDocumentsByRole(List<Document> docs, String userId, String requestedWorkspaceId, String userRole, String userDepartments) {
         ParsedUserPermissions perms = parseUserPermissions(userRole, userDepartments);
         if (perms.isAdmin) {
-            return docs; // Admin sees everything
+            return docs;
         }
 
         List<Document> filtered = new java.util.ArrayList<>();
         for (Document doc : docs) {
+            String docDeptId = doc.getDepartmentId();
+            String docWsId = doc.getWorkspaceId();
             String allowed = doc.getAllowedRoles();
-            if (allowed == null || allowed.isBlank() || "ALL".equalsIgnoreCase(allowed)) {
+
+            boolean isGlobalScope = (docDeptId == null || docDeptId.isBlank())
+                && (docWsId == null || docWsId.isBlank()
+                    || "default-workspace".equalsIgnoreCase(docWsId)
+                    || "workspace-default".equalsIgnoreCase(docWsId));
+
+            // Rule 1: Global scope (no dept, default/empty workspace) → visible to all users
+            if (isGlobalScope) {
                 filtered.add(doc);
                 continue;
             }
 
-            String docDeptId = doc.getDepartmentId();
-            if (docDeptId != null && !docDeptId.isBlank()) {
-                if ("HEAD".equalsIgnoreCase(allowed)) {
-                    if (perms.deptIdsWhereHead.contains(docDeptId)) {
-                        filtered.add(doc);
-                    }
-                } else if ("MEMBER".equalsIgnoreCase(allowed)) {
-                    if (perms.deptIdsWhereMember.contains(docDeptId) || perms.deptIdsWhereHead.contains(docDeptId)) {
-                        filtered.add(doc);
+            // Workspace-specific validation for global queries
+            if (requestedWorkspaceId == null || requestedWorkspaceId.isBlank() || "all".equalsIgnoreCase(requestedWorkspaceId)) {
+                if (docWsId != null && !docWsId.isBlank()
+                        && !"default-workspace".equalsIgnoreCase(docWsId)
+                        && !"workspace-default".equalsIgnoreCase(docWsId)) {
+                    try {
+                        var ws = workspaceServiceClient.getWorkspace(docWsId, userId);
+                        if (ws.isEmpty()) {
+                            continue; // No access to this workspace, exclude
+                        }
+                    } catch (Exception e) {
+                        log.warn("Failed to check workspace access for workspaceId={} and userId={}: {}", docWsId, userId, e.getMessage());
+                        continue; // Exclude on error to be safe
                     }
                 }
-            } else {
-                filtered.add(doc);
             }
+
+            // Rules 2+3+4: Department-scoped → must be a member of that department
+            if (docDeptId != null && !docDeptId.isBlank()) {
+                boolean isHead = perms.deptIdsWhereHead.contains(docDeptId);
+                boolean isMember = perms.deptIdsWhereMember.contains(docDeptId);
+
+                if (!isHead && !isMember) continue;
+
+                if (allowed == null || allowed.isBlank() || "ALL".equalsIgnoreCase(allowed)) {
+                    filtered.add(doc);
+                } else if ("HEAD".equalsIgnoreCase(allowed) && isHead) {
+                    filtered.add(doc);
+                } else if ("MEMBER".equalsIgnoreCase(allowed) && (isMember || isHead)) {
+                    filtered.add(doc);
+                }
+                continue;
+            }
+
+            // Workspace-specific but no department → workspace access already validated (or checked above)
+            filtered.add(doc);
         }
         return filtered;
     }
@@ -469,7 +500,7 @@ public class DocumentService {
         } else {
             docs = documentRepository.findAllByOrderByCreatedAtDesc();
         }
-        return filterDocumentsByRole(docs, userRole, userDepartments);
+        return filterDocumentsByRole(docs, userId, workspaceId, userRole, userDepartments);
     }
 
     public Page<Document> getDocuments(String userId, String workspaceId, Pageable pageable, String userRole, String userDepartments) {
@@ -495,7 +526,7 @@ public class DocumentService {
         } else {
             page = documentRepository.findAllByOrderByCreatedAtDesc(pageable);
         }
-        List<Document> filteredList = filterDocumentsByRole(page.getContent(), userRole, userDepartments);
+        List<Document> filteredList = filterDocumentsByRole(page.getContent(), userId, workspaceId, userRole, userDepartments);
         return new org.springframework.data.domain.PageImpl<>(filteredList, pageable, page.getTotalElements());
     }
 
@@ -526,24 +557,35 @@ public class DocumentService {
 
     public Document getDocument(Long documentId, String userId, String userRole, String userDepartments) {
         Document doc = getDocument(documentId, userId);
+        ParsedUserPermissions perms = parseUserPermissions(userRole, userDepartments);
+        if (perms.isAdmin) return doc;
+
+        String docDeptId = doc.getDepartmentId();
+        String docWsId = doc.getWorkspaceId();
         String allowed = doc.getAllowedRoles();
-        if (allowed != null && !allowed.isBlank() && !"ALL".equalsIgnoreCase(allowed)) {
-            ParsedUserPermissions perms = parseUserPermissions(userRole, userDepartments);
-            if (!perms.isAdmin) {
-                String docDeptId = doc.getDepartmentId();
-                if (docDeptId != null && !docDeptId.isBlank()) {
-                    if ("HEAD".equalsIgnoreCase(allowed)) {
-                        if (!perms.deptIdsWhereHead.contains(docDeptId)) {
-                            throw new AccessDeniedException("Chỉ Trưởng phòng hoặc Quản trị viên mới được phép truy cập tài liệu này.");
-                        }
-                    } else if ("MEMBER".equalsIgnoreCase(allowed)) {
-                        if (!perms.deptIdsWhereMember.contains(docDeptId) && !perms.deptIdsWhereHead.contains(docDeptId)) {
-                            throw new AccessDeniedException("Chỉ thành viên thuộc phòng ban này mới được phép truy cập tài liệu.");
-                        }
-                    }
-                }
+
+        boolean isGlobalScope = (docDeptId == null || docDeptId.isBlank())
+            && (docWsId == null || docWsId.isBlank()
+                || "default-workspace".equalsIgnoreCase(docWsId)
+                || "workspace-default".equalsIgnoreCase(docWsId));
+
+        if (isGlobalScope) return doc;
+
+        if (docDeptId != null && !docDeptId.isBlank()) {
+            boolean isHead = perms.deptIdsWhereHead.contains(docDeptId);
+            boolean isMember = perms.deptIdsWhereMember.contains(docDeptId);
+
+            if (!isHead && !isMember) {
+                throw new AccessDeniedException("Bạn không thuộc phòng ban được phép truy cập tài liệu này.");
+            }
+            if ("HEAD".equalsIgnoreCase(allowed) && !isHead) {
+                throw new AccessDeniedException("Chỉ Trưởng phòng hoặc Quản trị viên mới được phép truy cập tài liệu này.");
+            }
+            if ("MEMBER".equalsIgnoreCase(allowed) && !isMember && !isHead) {
+                throw new AccessDeniedException("Chỉ thành viên thuộc phòng ban này mới được phép truy cập tài liệu.");
             }
         }
+
         return doc;
     }
 
@@ -974,7 +1016,17 @@ public class DocumentService {
 
     @Transactional
     public Document updateDocumentMetadata(Long id, String securityClassification, String departmentId, String allowedRoles, List<String> tags, String userId) {
-        log.info("Updating metadata for document {} by user {}", id, userId);
+        return updateDocumentMetadata(id, securityClassification, departmentId, allowedRoles, tags, null, userId);
+    }
+
+    @Transactional
+    public Document updateDocumentMetadata(Long id, String securityClassification, String departmentId, String allowedRoles, List<String> tags, String folderPath, String userId) {
+        return updateDocumentMetadata(id, securityClassification, departmentId, allowedRoles, tags, folderPath, null, userId);
+    }
+
+    @Transactional
+    public Document updateDocumentMetadata(Long id, String securityClassification, String departmentId, String allowedRoles, List<String> tags, String folderPath, String workspaceId, String userId) {
+        log.info("Updating metadata for document {} by user {}, folderPath: {}, workspaceId: {}", id, userId, folderPath, workspaceId);
         Document document = documentRepository.findById(id)
                 .orElseThrow(() -> new ApiException("Document not found"));
 
@@ -995,6 +1047,12 @@ public class DocumentService {
         }
         if (tags != null) {
             document.setTags(tags);
+        }
+        if (folderPath != null) {
+            document.setFolderPath(folderPath);
+        }
+        if (workspaceId != null) {
+            document.setWorkspaceId(workspaceId.trim().isEmpty() ? null : workspaceId);
         }
 
         Document saved = documentRepository.save(document);

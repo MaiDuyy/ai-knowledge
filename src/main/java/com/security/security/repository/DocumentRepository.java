@@ -35,19 +35,24 @@ public interface DocumentRepository extends JpaRepository<Document, Long> {
     Page<Document> findCompletedByOrderByCreatedAtDesc(Pageable pageable);
 
     // Workspace-scoped queries (Department → Workspace → Document flow)
+    @Query("SELECT d FROM Document d WHERE d.workspaceId = ?1 OR (?1 IN ('default-workspace', 'workspace-default') AND (d.workspaceId = '' OR d.workspaceId IS NULL OR d.workspaceId = 'default-workspace' OR d.workspaceId = 'workspace-default')) ORDER BY d.createdAt DESC")
     List<Document> findByWorkspaceIdOrderByCreatedAtDesc(String workspaceId);
+
+    @Query("SELECT d FROM Document d WHERE d.workspaceId = ?1 OR (?1 IN ('default-workspace', 'workspace-default') AND (d.workspaceId = '' OR d.workspaceId IS NULL OR d.workspaceId = 'default-workspace' OR d.workspaceId = 'workspace-default')) ORDER BY d.createdAt DESC")
     Page<Document> findByWorkspaceIdOrderByCreatedAtDesc(String workspaceId, Pageable pageable);
 
-    @Query("SELECT d FROM Document d WHERE d.workspaceId = ?1 OR ((d.workspaceId = '' OR d.workspaceId IS NULL OR d.workspaceId = 'default-workspace' OR d.workspaceId = 'all') AND d.departmentId = ?2) ORDER BY d.createdAt DESC")
+    @Query("SELECT d FROM Document d WHERE d.workspaceId = ?1 OR ((d.workspaceId = '' OR d.workspaceId IS NULL OR d.workspaceId = 'default-workspace' OR d.workspaceId = 'workspace-default' OR d.workspaceId = 'all') AND (d.departmentId = ?2 OR d.departmentId IS NULL OR d.departmentId = '')) ORDER BY d.createdAt DESC")
     List<Document> findByWorkspaceIdOrDepartmentIdAndWorkspaceIdEmpty(String workspaceId, String departmentId);
 
-    @Query("SELECT d FROM Document d WHERE d.workspaceId = ?1 OR ((d.workspaceId = '' OR d.workspaceId IS NULL OR d.workspaceId = 'default-workspace' OR d.workspaceId = 'all') AND d.departmentId = ?2) ORDER BY d.createdAt DESC")
+    @Query("SELECT d FROM Document d WHERE d.workspaceId = ?1 OR ((d.workspaceId = '' OR d.workspaceId IS NULL OR d.workspaceId = 'default-workspace' OR d.workspaceId = 'workspace-default' OR d.workspaceId = 'all') AND (d.departmentId = ?2 OR d.departmentId IS NULL OR d.departmentId = '')) ORDER BY d.createdAt DESC")
     Page<Document> findByWorkspaceIdOrDepartmentIdAndWorkspaceIdEmpty(String workspaceId, String departmentId, Pageable pageable);
 
-    @Query("SELECT d FROM Document d WHERE d.workspaceId = ?1 AND d.status = 'COMPLETED' ORDER BY d.createdAt DESC")
+    @Query("SELECT d FROM Document d WHERE (d.workspaceId = ?1 OR (?1 IN ('default-workspace', 'workspace-default') AND (d.workspaceId = '' OR d.workspaceId IS NULL OR d.workspaceId = 'default-workspace' OR d.workspaceId = 'workspace-default'))) AND d.status = 'COMPLETED' ORDER BY d.createdAt DESC")
     List<Document> findCompletedByWorkspaceIdOrderByCreatedAtDesc(String workspaceId);
 
-    @Query("SELECT d FROM Document d WHERE d.workspaceId = ?1 AND d.status = 'COMPLETED' ORDER BY d.createdAt DESC")
+    @Query("SELECT d FROM Document d WHERE (d.workspaceId = ?1 OR (?1 IN ('default-workspace', 'workspace-default') AND (d.workspaceId = '' OR d.workspaceId IS NULL OR d.workspaceId = 'default-workspace' OR d.workspaceId = 'workspace-default'))) AND d.status = 'COMPLETED' ORDER BY d.createdAt DESC")
     Page<Document> findCompletedByWorkspaceIdOrderByCreatedAtDesc(String workspaceId, Pageable pageable);
+
+    List<Document> findByFileHashAndStatus(String fileHash, com.security.security.entity.enumeration.DocStatus status);
 }
 

@@ -36,6 +36,7 @@ public class FilterChainConfiguration {
                 .cors(AbstractHttpConfigurer::disable)
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
+                        .dispatcherTypeMatchers(jakarta.servlet.DispatcherType.ASYNC).permitAll()
                         .requestMatchers(org.springframework.boot.autoconfigure.security.servlet.PathRequest
                                 .toStaticResources().atCommonLocations())
                         .permitAll()

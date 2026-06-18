@@ -21,17 +21,61 @@ import java.util.Map;
 public class WorkspaceServiceClient {
 
     private final String messagingBaseUrl;
+    private final String identityBaseUrl;
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
 
     public WorkspaceServiceClient(
-            @Value("${messaging.service.url:http://localhost:3020}") String messagingBaseUrl) {
+            @Value("${messaging.service.url:http://localhost:3020}") String messagingBaseUrl,
+            @Value("${identity.service.url:http://localhost:3010}") String identityBaseUrl) {
         this.messagingBaseUrl = messagingBaseUrl;
+        this.identityBaseUrl = identityBaseUrl;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(5))
                 .build();
         this.objectMapper = new ObjectMapper();
     }
+
+    /**
+     * Get department metadata.
+     * Returns a Map containing department details, or an empty Map if not found.
+     */
+    @org.springframework.cache.annotation.Cacheable(
+            value = "workspaceDepartment",
+            key = "#departmentId",
+            unless = "#result == null || #result.isEmpty()"
+    )
+    public Map<String, Object> getDepartment(String departmentId, String userId) {
+        try {
+            String url = identityBaseUrl + "/departments/" + departmentId;
+            HttpRequest req = buildGet(url, userId);
+            HttpResponse<String> res = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+
+            if (res.statusCode() != 200) {
+                log.warn("[WorkspaceServiceClient] getDepartment failed with HTTP {} for departmentId={}, userId={}", 
+                        res.statusCode(), departmentId, userId);
+                return Map.of();
+            }
+
+            JsonNode root = objectMapper.readTree(res.body());
+            JsonNode data = root.path("data");
+            if (data.isMissingNode() || data.isNull()) {
+                return Map.of();
+            }
+
+            // Return a mutable or immutable map containing department info
+            java.util.Map<String, Object> map = new java.util.HashMap<>();
+            map.put("id", data.path("id").asText(""));
+            map.put("name", data.path("name").asText(""));
+            map.put("description", data.path("description").asText(""));
+            return map;
+        } catch (Exception e) {
+            log.error("[WorkspaceServiceClient] Error fetching departmentId={} for userId={}: {}", 
+                    departmentId, userId, e.getMessage());
+            return Map.of();
+        }
+    }
+
 
     /**
      * Get workspace metadata and check if the user has access.

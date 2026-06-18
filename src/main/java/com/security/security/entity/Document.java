@@ -102,6 +102,12 @@ public class Document {
     @Builder.Default
     private List<String> tags = new ArrayList<>();
 
+    @Column(name = "file_hash", length = 64)
+    private String fileHash;
+
+    @Column(name = "folder_path", columnDefinition = "TEXT")
+    private String folderPath;
+
     @Column(name = "error_message", columnDefinition = "TEXT")
     private String errorMessage;
 

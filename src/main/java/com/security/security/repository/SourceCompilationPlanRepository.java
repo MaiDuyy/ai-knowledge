@@ -15,6 +15,10 @@ import java.util.Optional;
 public interface SourceCompilationPlanRepository extends JpaRepository<SourceCompilationPlan, Long> {
     Optional<SourceCompilationPlan> findBySourceDocumentId(Long sourceDocumentId);
 
+    @org.springframework.data.jpa.repository.Modifying
+    @org.springframework.transaction.annotation.Transactional
+    void deleteBySourceDocumentId(Long sourceDocumentId);
+
     @Query("SELECT p FROM SourceCompilationPlan p JOIN Document d ON p.sourceDocumentId = d.id WHERE d.workspaceId = :workspaceId")
     List<SourceCompilationPlan> findByWorkspaceId(@Param("workspaceId") String workspaceId);
 

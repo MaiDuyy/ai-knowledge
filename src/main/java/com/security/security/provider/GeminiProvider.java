@@ -126,7 +126,12 @@ public class GeminiProvider implements LlmProvider {
             spec = spec.tools(tools);
         }
 
-        return spec.stream().content();
+        return spec.stream().content()
+                .onErrorResume(e -> {
+                    log.warn("[GeminiProvider] Stream interrupted ({}): {}",
+                            e.getClass().getSimpleName(), e.getMessage());
+                    return Flux.empty();
+                });
     }
 
     // ── callChat ──────────────────────────────────────────────────────────────

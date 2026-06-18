@@ -153,9 +153,11 @@ public class MrpPipelineService {
                 .orElseThrow(() -> new IllegalArgumentException("Document not found with ID: " + documentId));
 
         // Kế thừa workspaceId trực tiếp từ tài liệu gốc (Document) để bảo mật và đồng bộ dữ liệu theo đúng flow
-        String finalWorkspaceId = (doc.getWorkspaceId() != null && !doc.getWorkspaceId().trim().isEmpty()) 
-                ? doc.getWorkspaceId() 
-                : (workspaceId != null ? workspaceId : "default-workspace");
+        String finalWorkspaceId = (doc.getWorkspaceId() != null && !doc.getWorkspaceId().trim().isEmpty())
+                ? doc.getWorkspaceId()
+                : (doc.getDepartmentId() != null && !doc.getDepartmentId().isBlank()
+                    ? null
+                    : (workspaceId != null ? workspaceId : "default-workspace"));
 
         log.info("[MRP Pipeline] Workspace được xác định cho tiến trình: {}", finalWorkspaceId);
 
@@ -386,7 +388,7 @@ public class MrpPipelineService {
 
             for (String subject : uniqueSubjects) {
                 String slug = slugify(subject);
-                Optional<WikiPage> existingPage = wikiPageRepository.findBySlugAndWorkspaceId(slug, finalWorkspaceId);
+                Optional<WikiPage> existingPage = wikiPageRepository.fetchBySlugAndWorkspaceId(slug, finalWorkspaceId);
 
                 Map<String, Object> planItem = new HashMap<>();
                 planItem.put("title", subject);
@@ -432,7 +434,7 @@ public class MrpPipelineService {
                 sourceTitle = sourceTitle.trim();
 
                 String sourceSlug = "source/" + slugify(sourceTitle);
-                Optional<WikiPage> existingSourcePage = wikiPageRepository.findBySlugAndWorkspaceId(sourceSlug, finalWorkspaceId);
+                Optional<WikiPage> existingSourcePage = wikiPageRepository.fetchBySlugAndWorkspaceId(sourceSlug, finalWorkspaceId);
 
                 Map<String, Object> sourcePlanItem = new HashMap<>();
                 sourcePlanItem.put("title", sourceTitle);
@@ -566,7 +568,9 @@ public class MrpPipelineService {
             // Lấy workspaceId trực tiếp từ document gốc để đảm bảo tính đồng bộ tuyệt đối trong toàn bộ flow
             String finalWorkspaceId = (doc != null && doc.getWorkspaceId() != null && !doc.getWorkspaceId().trim().isEmpty())
                     ? doc.getWorkspaceId()
-                    : (workspaceId != null ? workspaceId : "default-workspace");
+                    : (doc != null && doc.getDepartmentId() != null && !doc.getDepartmentId().isBlank()
+                        ? null
+                        : (workspaceId != null ? workspaceId : "default-workspace"));
 
             log.info("[MRP Pipeline] [Refine Phase] Workspace được xác định để tạo Draft: {}", finalWorkspaceId);
             
