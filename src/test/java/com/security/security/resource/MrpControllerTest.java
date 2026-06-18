@@ -55,39 +55,33 @@ class MrpControllerTest {
     @InjectMocks
     private MrpController mrpController;
 
-    private Method parseMethod;
     private Method checkAccessMethod;
 
     @BeforeEach
     void setUp() throws Exception {
-        parseMethod = MrpController.class.getDeclaredMethod("parseUserPermissions", String.class, String.class);
-        parseMethod.setAccessible(true);
-
         checkAccessMethod = MrpController.class.getDeclaredMethod("checkPageAccess", WikiPage.class, 
-                Class.forName("com.security.security.resource.MrpController$ParsedUserPermissions"));
+                com.security.security.dto.UserPermissionContext.class);
         checkAccessMethod.setAccessible(true);
     }
 
     @Test
     @DisplayName("Should parse headers correctly for Admin")
     void parseUserPermissions_Admin_SetsIsAdminTrue() throws Exception {
-        Object permissions = parseMethod.invoke(mrpController, "ADMIN", null);
+        com.security.security.dto.UserPermissionContext permissions = 
+                com.security.security.service.PermissionUtils.parse("ADMIN", null, objectMapper);
         
-        boolean isAdmin = (boolean) permissions.getClass().getDeclaredField("isAdmin").get(permissions);
-        assertThat(isAdmin).isTrue();
+        assertThat(permissions.isAdmin()).isTrue();
     }
 
     @Test
     @DisplayName("Should parse headers correctly for Departments")
     void parseUserPermissions_Departments_PopulatesDeptLists() throws Exception {
         String departmentsJson = "[{\"departmentId\":\"dept-123\",\"role\":\"HEAD\"},{\"departmentId\":\"dept-456\",\"role\":\"MEMBER\"}]";
-        Object permissions = parseMethod.invoke(mrpController, "MEMBER", departmentsJson);
+        com.security.security.dto.UserPermissionContext permissions = 
+                com.security.security.service.PermissionUtils.parse("MEMBER", departmentsJson, objectMapper);
 
-        java.util.List<String> headList = (java.util.List<String>) permissions.getClass().getDeclaredField("deptIdsWhereHead").get(permissions);
-        java.util.List<String> memberList = (java.util.List<String>) permissions.getClass().getDeclaredField("deptIdsWhereMember").get(permissions);
-
-        assertThat(headList).contains("dept-123");
-        assertThat(memberList).contains("dept-456");
+        assertThat(permissions.getDeptIdsWhereHead()).contains("dept-123");
+        assertThat(permissions.getDeptIdsWhereMember()).contains("dept-456");
     }
 
     @Test
@@ -99,7 +93,8 @@ class MrpControllerTest {
                 .allowedRoles("HEAD")
                 .build();
 
-        Object perm = parseMethod.invoke(mrpController, "MEMBER", null);
+        com.security.security.dto.UserPermissionContext perm = 
+                com.security.security.service.PermissionUtils.parse("MEMBER", null, objectMapper);
 
         // Should not throw exception
         checkAccessMethod.invoke(mrpController, page, perm);
@@ -114,7 +109,8 @@ class MrpControllerTest {
                 .allowedRoles("HEAD")
                 .build();
 
-        Object perm = parseMethod.invoke(mrpController, "MEMBER", null);
+        com.security.security.dto.UserPermissionContext perm = 
+                com.security.security.service.PermissionUtils.parse("MEMBER", null, objectMapper);
 
         assertThatThrownBy(() -> {
             try {
@@ -135,7 +131,8 @@ class MrpControllerTest {
                 .build();
 
         String departmentsJson = "[{\"departmentId\":\"dept-vip\",\"role\":\"HEAD\"}]";
-        Object perm = parseMethod.invoke(mrpController, "MEMBER", departmentsJson);
+        com.security.security.dto.UserPermissionContext perm = 
+                com.security.security.service.PermissionUtils.parse("MEMBER", departmentsJson, objectMapper);
 
         // Should not throw exception
         checkAccessMethod.invoke(mrpController, page, perm);
@@ -151,7 +148,8 @@ class MrpControllerTest {
                 .build();
 
         String departmentsJson = "[{\"departmentId\":\"dept-vip\",\"role\":\"MEMBER\"}]";
-        Object perm = parseMethod.invoke(mrpController, "MEMBER", departmentsJson);
+        com.security.security.dto.UserPermissionContext perm = 
+                com.security.security.service.PermissionUtils.parse("MEMBER", departmentsJson, objectMapper);
 
         assertThatThrownBy(() -> {
             try {
@@ -183,7 +181,7 @@ class MrpControllerTest {
                 .thenReturn(mockPlan);
 
         ResponseEntity<SourceCompilationPlan> response = mrpController.compileDocument(
-                documentId, workspaceId, autoApprove, userId, "WORKSPACE_MEMBER");
+                documentId, workspaceId, autoApprove, userId, "WORKSPACE_MEMBER", null);
 
         assertThat(response.getStatusCodeValue()).isEqualTo(202);
         assertThat(response.getBody()).isNotNull();
@@ -215,7 +213,7 @@ class MrpControllerTest {
         Mockito.when(page2.getPageType()).thenReturn("entity");
 
         Mockito.when(wikiPageRepository.findAccessibleMetadata(
-                Mockito.eq(workspaceId), Mockito.eq(false), Mockito.anyList(), Mockito.anyList()))
+                Mockito.eq(workspaceId), Mockito.any(), Mockito.eq(false), Mockito.anyList(), Mockito.anyList()))
                 .thenReturn(java.util.List.of(page1, page2));
 
         // Mock links: link from 1 to 2 (valid), link from 1 to 3 (invalid/not accessible)

@@ -47,6 +47,9 @@ public class SourceChunkExtract {
     @Column(name = "error_message", columnDefinition = "TEXT")
     private String errorMessage;
 
+    @Column(name = "content_hash", length = 64)
+    private String contentHash;
+
     @CreationTimestamp
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;

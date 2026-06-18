@@ -43,6 +43,7 @@ class DocumentServiceUploadPermissionTest {
     @Mock private DoclingClient doclingClient;
     @Mock private org.springframework.data.redis.core.StringRedisTemplate redisTemplate;
     @Mock private org.springframework.data.redis.core.ValueOperations<String, String> valueOperations;
+    @org.mockito.Spy private com.fasterxml.jackson.databind.ObjectMapper objectMapper = new com.fasterxml.jackson.databind.ObjectMapper();
 
     @InjectMocks
     private DocumentService documentService;

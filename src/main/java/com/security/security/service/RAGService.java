@@ -77,13 +77,15 @@ public class RAGService {
 
         int maxResults = payload.getOptions() != null ? payload.getOptions().getMaxResults() : topK;
         double minScore = payload.getOptions() != null ? payload.getOptions().getMinScore() : similarityThreshold;
+        String pageType = payload.getOptions() != null ? payload.getOptions().getPageType() : null;
 
         List<org.springframework.ai.document.Document> relevantDocs = executeHybridSearchAndExpansion(
                 payload.getQuery(),
                 payload.getUserPermissions(),
                 payload.getUserId(),
                 maxResults,
-                minScore
+                minScore,
+                pageType
         );
         log.info("Found {} relevant documents for RAG", relevantDocs.size());
 
@@ -352,21 +354,18 @@ public class RAGService {
         }
 
         // 1. Resolve workspaceId
-        String resolvedWorkspaceId = context.getWorkspaceId();
-        if (resolvedWorkspaceId == null || resolvedWorkspaceId.trim().isEmpty() || "all".equalsIgnoreCase(resolvedWorkspaceId.trim())) {
-            resolvedWorkspaceId = "default-workspace";
-        }
+        String resolvedWorkspaceId = ScopeNormalizer.normalizeWorkspace(context.getWorkspaceId());
 
         // 2. Fetch workspace departmentId using WorkspaceServiceClient
         boolean isServiceFailure = false;
-        String workspaceDeptId = null;
-        if (resolvedWorkspaceId != null && !resolvedWorkspaceId.isEmpty() && !"default-workspace".equals(resolvedWorkspaceId)) {
+        String workspaceDeptId = "GLOBAL";
+        if (!"GLOBAL".equals(resolvedWorkspaceId)) {
             try {
                 Map<String, Object> workspaceInfo = workspaceServiceClient.getWorkspace(resolvedWorkspaceId, userId);
                 if (workspaceInfo == null || workspaceInfo.isEmpty()) {
                     isServiceFailure = true;
                 } else {
-                    workspaceDeptId = (String) workspaceInfo.get("departmentId");
+                    workspaceDeptId = ScopeNormalizer.normalizeDepartment((String) workspaceInfo.get("departmentId"));
                 }
             } catch (Exception e) {
                 log.error("Failed to query workspace department from messaging-service for workspaceId={}", resolvedWorkspaceId, e);
@@ -401,7 +400,7 @@ public class RAGService {
                     String type = node.path("type").asText("");
                     String id = node.path("id").asText("");
                     if ("department".equalsIgnoreCase(type)) {
-                        return "((workspaceId == '' || workspaceId == 'default-workspace' || workspaceId == 'all') && departmentId == '" + id + "')";
+                        return "(workspaceId == 'GLOBAL' && departmentId == '" + id + "')";
                     } else if ("workspace".equalsIgnoreCase(type)) {
                         return "workspaceId == '" + id + "'";
                     }
@@ -409,9 +408,12 @@ public class RAGService {
                     log.error("Failed to parse x-rag-scope: {}", ragScope, e);
                 }
             }
+            if ("GLOBAL".equals(resolvedWorkspaceId)) {
+                return "workspaceId == 'GLOBAL' && departmentId == 'GLOBAL'";
+            }
             // Default Admin scope: all documents in the current workspace or the workspace's department
-            if (workspaceDeptId != null && !workspaceDeptId.isEmpty()) {
-                return "(workspaceId == '" + resolvedWorkspaceId + "' || ((workspaceId == '' || workspaceId == 'default-workspace' || workspaceId == 'all') && departmentId == '" + workspaceDeptId + "'))";
+            if (!"GLOBAL".equals(workspaceDeptId)) {
+                return "(workspaceId == '" + resolvedWorkspaceId + "' || (workspaceId == 'GLOBAL' && departmentId == '" + workspaceDeptId + "'))";
             }
             return "workspaceId == '" + resolvedWorkspaceId + "'";
         }
@@ -427,27 +429,17 @@ public class RAGService {
 
         if (isGuest) {
             // Guest can only access PUBLIC documents in current workspace or its department
-            if (workspaceDeptId != null && !workspaceDeptId.isEmpty()) {
-                return "((workspaceId == '" + resolvedWorkspaceId + "' || ((workspaceId == '' || workspaceId == 'default-workspace' || workspaceId == 'all') && departmentId == '" + workspaceDeptId + "')) && (classification == 'PUBLIC' || securityClassification == 'PUBLIC'))";
+            if ("GLOBAL".equals(resolvedWorkspaceId)) {
+                return "workspaceId == 'GLOBAL' && departmentId == 'GLOBAL' && (classification == 'PUBLIC' || securityClassification == 'PUBLIC')";
+            }
+            if (!"GLOBAL".equals(workspaceDeptId)) {
+                return "((workspaceId == '" + resolvedWorkspaceId + "' || (workspaceId == 'GLOBAL' && departmentId == '" + workspaceDeptId + "')) && (classification == 'PUBLIC' || securityClassification == 'PUBLIC'))";
             }
             return "workspaceId == '" + resolvedWorkspaceId + "' && (classification == 'PUBLIC' || securityClassification == 'PUBLIC')";
         }
 
         // 5. Normal Employee / Manager / HEAD
         // Build filter: current workspace OR department-specific docs OR company-wide docs
-
-        // Resolve user role within the workspace's department
-        String userRoleInDept = null;
-        if (workspaceDeptId != null && !workspaceDeptId.isEmpty() && context.getUserDepartments() != null) {
-            for (RAGQueryPayload.DepartmentRole deptRole : context.getUserDepartments()) {
-                if (deptRole.getDepartmentId() != null && deptRole.getDepartmentId().equals(workspaceDeptId)) {
-                    userRoleInDept = deptRole.getRole();
-                    break;
-                }
-            }
-        }
-
-        boolean isLeader = "HEAD".equalsIgnoreCase(userRoleInDept) || "MANAGER".equalsIgnoreCase(userRoleInDept);
 
         // Collect all department IDs where the user has any role (for multi-dept access)
         List<String> userDeptIds = new ArrayList<>();
@@ -465,34 +457,30 @@ public class RAGService {
 
         List<String> orClauses = new ArrayList<>();
 
-        // Clause 1: Current workspace documents (scoped to this workspace)
-        orClauses.add("workspaceId == '" + resolvedWorkspaceId + "'");
+        if ("GLOBAL".equals(resolvedWorkspaceId)) {
+            // Global workspace query: Only retrieve company-wide GLOBAL documents
+            orClauses.add("(workspaceId == 'GLOBAL' && departmentId == 'GLOBAL')");
+        } else {
+            // Clause 1: Current workspace documents with no department restriction
+            orClauses.add("(workspaceId == '" + resolvedWorkspaceId + "' && departmentId == 'GLOBAL')");
+            // Clause 2: Current workspace documents with the workspace department restriction
+            if (!"GLOBAL".equals(workspaceDeptId) && userDeptIds.contains(workspaceDeptId)) {
+                boolean isHeadInThisDept = userHeadDeptIds.contains(workspaceDeptId);
+                String deptClause = "(workspaceId == '" + resolvedWorkspaceId + "' && departmentId == '" + workspaceDeptId + "'";
+                if (!isHeadInThisDept) {
+                    deptClause += " && allowedRoles != 'HEAD'";
+                }
+                deptClause += ")";
+                orClauses.add(deptClause);
 
-        // Clause 2: Company-wide / global workspace documents (visible to all employees)
-        orClauses.add("(workspaceId == 'default-workspace' && (allowedRoles == 'ALL' || allowedRoles == ''))");
-        orClauses.add("(workspaceId == 'workspace-default' && (allowedRoles == 'ALL' || allowedRoles == ''))");
-
-        // Clause 3: Department-scoped documents from the workspace's department
-        if (workspaceDeptId != null && !workspaceDeptId.isEmpty()) {
-            String deptClause = "(departmentId == '" + workspaceDeptId + "'";
-            if (!isLeader) {
-                // MEMBER: exclude HEAD-only documents
-                deptClause += " && allowedRoles != 'HEAD'";
+                // Also include department shared docs (workspaceId = GLOBAL, departmentId = workspaceDeptId)
+                String sharedClause = "(workspaceId == 'GLOBAL' && departmentId == '" + workspaceDeptId + "'";
+                if (!isHeadInThisDept) {
+                    sharedClause += " && allowedRoles != 'HEAD'";
+                }
+                sharedClause += ")";
+                orClauses.add(sharedClause);
             }
-            deptClause += ")";
-            orClauses.add(deptClause);
-        }
-
-        // Clause 4: Cross-department access — other departments the user belongs to (HEAD or MEMBER)
-        for (String deptId : userDeptIds) {
-            if (deptId.equals(workspaceDeptId)) continue; // already handled above
-            boolean isHeadInThisDept = userHeadDeptIds.contains(deptId);
-            String crossDeptClause = "(departmentId == '" + deptId + "'";
-            if (!isHeadInThisDept) {
-                crossDeptClause += " && allowedRoles != 'HEAD'";
-            }
-            crossDeptClause += ")";
-            orClauses.add(crossDeptClause);
         }
 
         return "(" + String.join(" || ", orClauses) + ")";
@@ -509,13 +497,11 @@ public class RAGService {
 
     private boolean isPageAccessible(WikiPage page, RAGQueryPayload.UserPermissionContext context, String userId) {
         // 1. Check workspace access
-        String resolvedWorkspaceId = context.getWorkspaceId();
-        if (resolvedWorkspaceId == null || resolvedWorkspaceId.trim().isEmpty() || "all".equalsIgnoreCase(resolvedWorkspaceId.trim())) {
-            resolvedWorkspaceId = "default-workspace";
-        }
+        String resolvedWorkspaceId = ScopeNormalizer.normalizeWorkspace(context.getWorkspaceId());
+        String pageWsId = ScopeNormalizer.normalizeWorkspace(page.getWorkspaceId());
         
-        // If page is not in the same workspace (and workspace is not 'all')
-        if (page.getWorkspaceId() != null && !page.getWorkspaceId().equals(resolvedWorkspaceId) && !"all".equals(page.getWorkspaceId())) {
+        // If page is not in the same workspace (and workspace is not GLOBAL)
+        if (!"GLOBAL".equals(pageWsId) && !pageWsId.equals(resolvedWorkspaceId)) {
             return false;
         }
         
@@ -549,18 +535,11 @@ public class RAGService {
             return "PUBLIC".equalsIgnoreCase(page.getSecurityClassification());
         }
         
-        // 4. Normal security classification check
+        // 4. PUBLIC pages are visible to all internal users
         if ("PUBLIC".equalsIgnoreCase(page.getSecurityClassification())) {
             return true;
         }
-        
-        // Bypass department checks for workspace-specific pages when allowedRoles != HEAD
-        if (page.getWorkspaceId() != null && !page.getWorkspaceId().isEmpty()
-                && !"all".equals(page.getWorkspaceId()) && !"default-workspace".equals(page.getWorkspaceId())
-                && !"HEAD".equalsIgnoreCase(page.getAllowedRoles())) {
-            return true;
-        }
-        
+
         // Parse user departments
         List<String> deptIdsWhereHead = new ArrayList<>();
         List<String> deptIdsWhereMember = new ArrayList<>();
@@ -578,22 +557,29 @@ public class RAGService {
                 }
             }
         }
-        
-        if (page.getDepartmentId() == null || page.getDepartmentId().trim().isEmpty()) {
-            // INTERNAL company-wide pages are accessible by all internal users
-            if ("INTERNAL".equalsIgnoreCase(page.getSecurityClassification())) {
+
+        // 5. Department-scoped pages: user must belong to that department
+        String pageDeptId = ScopeNormalizer.normalizeDepartment(page.getDepartmentId());
+        if (!"GLOBAL".equals(pageDeptId)) {
+            if (deptIdsWhereHead.contains(pageDeptId)) {
                 return true;
             }
-        } else {
-            String deptId = page.getDepartmentId();
-            if (deptIdsWhereHead.contains(deptId)) {
+            if (deptIdsWhereMember.contains(pageDeptId) && !"HEAD".equalsIgnoreCase(page.getAllowedRoles())) {
                 return true;
             }
-            if (deptIdsWhereMember.contains(deptId) && !"HEAD".equalsIgnoreCase(page.getAllowedRoles())) {
-                return true;
-            }
+            return false;
         }
-        
+
+        // 6. No department restriction — workspace-only or INTERNAL company-wide
+        if ("INTERNAL".equalsIgnoreCase(page.getSecurityClassification())) {
+            return true;
+        }
+
+        // Workspace-specific pages without department: accessible to workspace members
+        if (!"GLOBAL".equals(pageWsId)) {
+            return true;
+        }
+
         return false;
     }
 
@@ -611,86 +597,101 @@ public class RAGService {
             }
         }
         
+        // Collect seed pages from baseDocs
+        List<WikiPage> seedPages = new ArrayList<>();
         for (org.springframework.ai.document.Document doc : baseDocs) {
             String pageIdStr = getString(doc.getMetadata(), "wikiPageId", "");
             if (pageIdStr.isEmpty()) continue;
-            
             try {
                 Long pageId = Long.parseLong(pageIdStr);
-                
-                // Fetch the page to know its slug
-                Optional<WikiPage> currentPageOpt = wikiPageRepository.findById(pageId);
-                if (currentPageOpt.isPresent()) {
-                    WikiPage currentPage = currentPageOpt.get();
-                    if (!isPageAccessible(currentPage, permissions, userId)) continue;
-                    
-                    String currentSlug = currentPage.getSlug();
-                    existingSlugs.add(currentSlug);
-                    
-                    // Outgoing links
-                    List<WikiLink> outgoingLinks = wikiLinkRepository.findByFromPageId(pageId);
-                    for (WikiLink link : outgoingLinks) {
-                        String toSlug = link.getToSlug();
-                        if (existingSlugs.contains(toSlug)) continue;
-                        
-                        Optional<WikiPage> linkedPageOpt = wikiPageRepository.fetchBySlugAndWorkspaceId(toSlug, currentPage.getWorkspaceId());
-                        if (linkedPageOpt.isPresent()) {
-                            WikiPage linkedPage = linkedPageOpt.get();
-                            if (isPageAccessible(linkedPage, permissions, userId)) {
-                                String summaryText = (linkedPage.getSummary() != null && !linkedPage.getSummary().isBlank()) 
-                                        ? linkedPage.getSummary() 
-                                        : (linkedPage.getContent() != null ? linkedPage.getContent() : "");
-                                
-                                org.springframework.ai.document.Document expandedDoc = new org.springframework.ai.document.Document(
-                                    summaryText,
-                                    Map.of(
-                                        "wikiPageId", linkedPage.getId().toString(),
-                                        "slug", linkedPage.getSlug(),
-                                        "fileName", linkedPage.getTitle(),
-                                        "type", "wiki-graph-extension"
-                                    )
-                                );
-                                expandedDocs.add(expandedDoc);
-                                existingSlugs.add(toSlug);
-                            }
-                        }
+                wikiPageRepository.findById(pageId).ifPresent(page -> {
+                    if (isPageAccessible(page, permissions, userId)) {
+                        existingSlugs.add(page.getSlug());
+                        seedPages.add(page);
                     }
-                    
-                    // Incoming links
-                    List<WikiLink> incomingLinks = wikiLinkRepository.findByToSlug(currentSlug);
-                    for (WikiLink link : incomingLinks) {
-                        Long fromPageId = link.getFromPageId();
-                        Optional<WikiPage> linkedPageOpt = wikiPageRepository.findById(fromPageId);
-                        if (linkedPageOpt.isPresent()) {
-                            WikiPage linkedPage = linkedPageOpt.get();
-                            String fromSlug = linkedPage.getSlug();
-                            if (existingSlugs.contains(fromSlug)) continue;
-                            
-                            if (isPageAccessible(linkedPage, permissions, userId)) {
-                                String summaryText = (linkedPage.getSummary() != null && !linkedPage.getSummary().isBlank()) 
-                                        ? linkedPage.getSummary() 
-                                        : (linkedPage.getContent() != null ? linkedPage.getContent() : "");
-                                
-                                org.springframework.ai.document.Document expandedDoc = new org.springframework.ai.document.Document(
-                                    summaryText,
-                                    Map.of(
-                                        "wikiPageId", linkedPage.getId().toString(),
-                                        "slug", linkedPage.getSlug(),
-                                        "fileName", linkedPage.getTitle(),
-                                        "type", "wiki-graph-extension"
-                                    )
-                                );
-                                expandedDocs.add(expandedDoc);
-                                existingSlugs.add(fromSlug);
-                            }
-                        }
-                    }
-                }
-            } catch (Exception e) {
-                log.error("Error expanding wiki graph context for document: {}", doc.getId(), e);
+                });
+            } catch (Exception ignored) {}
+        }
+
+        // Collect candidates from outgoing + incoming links of seed pages
+        Map<String, WikiPage> candidatePages = new HashMap<>();
+        Map<String, Double> candidateScores = new HashMap<>();
+
+        for (WikiPage seedPage : seedPages) {
+            // Outgoing links
+            List<WikiLink> outgoing = wikiLinkRepository.findByFromPageId(seedPage.getId());
+            for (WikiLink link : outgoing) {
+                if (existingSlugs.contains(link.getToSlug())) continue;
+                if (candidatePages.containsKey(link.getToSlug())) continue;
+                wikiPageRepository.fetchBySlugAndWorkspaceId(link.getToSlug(), seedPage.getWorkspaceId())
+                        .filter(p -> isPageAccessible(p, permissions, userId))
+                        .ifPresent(p -> candidatePages.put(p.getSlug(), p));
+            }
+
+            // Incoming links
+            List<WikiLink> incoming = wikiLinkRepository.findByToSlug(seedPage.getSlug());
+            for (WikiLink link : incoming) {
+                wikiPageRepository.findById(link.getFromPageId())
+                        .filter(p -> !existingSlugs.contains(p.getSlug()) && !candidatePages.containsKey(p.getSlug()))
+                        .filter(p -> isPageAccessible(p, permissions, userId))
+                        .ifPresent(p -> candidatePages.put(p.getSlug(), p));
             }
         }
-        
+
+        // Score candidates with 4-signal model
+        for (Map.Entry<String, WikiPage> entry : candidatePages.entrySet()) {
+            WikiPage candidate = entry.getValue();
+            double bestScore = 0.0;
+
+            for (WikiPage seed : seedPages) {
+                double score = 0.0;
+
+                // Signal 1: Direct link (×3.0)
+                score += 3.0;
+
+                // Signal 2: Source overlap (×4.0) — same sourceDocumentId
+                if (seed.getSourceDocumentId() != null && candidate.getSourceDocumentId() != null
+                        && seed.getSourceDocumentId().equals(candidate.getSourceDocumentId())) {
+                    score += 4.0;
+                }
+
+                // Signal 3: Type affinity (×1.0)
+                if (seed.getPageType() != null && seed.getPageType().equalsIgnoreCase(candidate.getPageType())) {
+                    score += 1.0;
+                }
+
+                bestScore = Math.max(bestScore, score);
+            }
+
+            candidateScores.put(entry.getKey(), bestScore);
+        }
+
+        // Sort by score, take top 5
+        List<String> topCandidates = candidateScores.entrySet().stream()
+                .sorted(Map.Entry.<String, Double>comparingByValue().reversed())
+                .limit(5)
+                .map(Map.Entry::getKey)
+                .toList();
+
+        for (String slug : topCandidates) {
+            WikiPage page = candidatePages.get(slug);
+            String summaryText = (page.getSummary() != null && !page.getSummary().isBlank())
+                    ? page.getSummary()
+                    : (page.getContent() != null ? page.getContent() : "");
+
+            Map<String, Object> meta = new HashMap<>();
+            meta.put("wikiPageId", page.getId().toString());
+            meta.put("slug", page.getSlug());
+            meta.put("fileName", page.getTitle());
+            meta.put("type", "wiki-graph-extension");
+            meta.put("relevanceScore", String.valueOf(candidateScores.get(slug)));
+
+            expandedDocs.add(new org.springframework.ai.document.Document(summaryText, meta));
+            existingSlugs.add(slug);
+        }
+
+        log.info("[RAGService] Graph expansion: {} seed pages → {} candidates → {} selected (top 5 by relevance)",
+                seedPages.size(), candidatePages.size(), topCandidates.size());
         return expandedDocs;
     }
 
@@ -700,7 +701,17 @@ public class RAGService {
             String userId,
             int maxResults,
             double minScore) {
-        
+        return executeHybridSearchAndExpansion(query, permissions, userId, maxResults, minScore, null);
+    }
+
+    public List<org.springframework.ai.document.Document> executeHybridSearchAndExpansion(
+            String query,
+            RAGQueryPayload.UserPermissionContext permissions,
+            String userId,
+            int maxResults,
+            double minScore,
+            String pageType) {
+
         // 1. Vector Search
         SearchRequest.Builder searchRequestBuiler = SearchRequest.builder()
                 .query(query)
@@ -709,6 +720,12 @@ public class RAGService {
 
         boolean[] partialResults = new boolean[]{false};
         String filterExpr = buildFilterExpression(permissions, userId, partialResults);
+        if (pageType != null && !pageType.trim().isEmpty()) {
+            String ptFilter = "pageType == '" + pageType.trim() + "'";
+            filterExpr = (filterExpr != null && !filterExpr.trim().isEmpty())
+                    ? "(" + filterExpr + ") && " + ptFilter
+                    : ptFilter;
+        }
         if (filterExpr != null && !filterExpr.trim().isEmpty()) {
             searchRequestBuiler.filterExpression(filterExpr);
         }
@@ -776,6 +793,12 @@ public class RAGService {
             keywordPages = wikiPageRepository.searchAccessiblePagesByKeyword(
                 resolvedWorkspaceId, workspaceDeptId, isAdmin, deptIdsWhereHead, deptIdsWhereMember, query
             );
+            if (pageType != null && !pageType.trim().isEmpty()) {
+                final String pt = pageType.trim();
+                keywordPages = keywordPages.stream()
+                        .filter(p -> pt.equalsIgnoreCase(p.getPageType()))
+                        .collect(Collectors.toList());
+            }
         } catch (Exception e) {
             log.error("Keyword search failed", e);
         }
@@ -808,8 +831,8 @@ public class RAGService {
                 // Map WikiPage to Document
                 Map<String, Object> meta = new HashMap<>();
                 meta.put("wikiPageId", page.getId().toString());
-                meta.put("workspaceId", page.getWorkspaceId() != null ? page.getWorkspaceId() : "");
-                meta.put("departmentId", page.getDepartmentId() != null ? page.getDepartmentId() : "");
+                meta.put("workspaceId", ScopeNormalizer.normalizeWorkspace(page.getWorkspaceId()));
+                meta.put("departmentId", ScopeNormalizer.normalizeDepartment(page.getDepartmentId()));
                 meta.put("allowedRoles", page.getAllowedRoles() != null ? page.getAllowedRoles() : "ALL");
                 meta.put("classification", page.getSecurityClassification() != null ? page.getSecurityClassification() : "INTERNAL");
                 meta.put("securityClassification", page.getSecurityClassification() != null ? page.getSecurityClassification() : "INTERNAL");

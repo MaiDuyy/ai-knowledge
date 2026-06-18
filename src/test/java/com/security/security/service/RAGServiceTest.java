@@ -121,7 +121,7 @@ class RAGServiceTest {
 
         boolean[] partialResults = new boolean[]{false};
         String filter = invokeBuildFilter(context, "user-123", partialResults);
-        assertThat(filter).isEqualTo("((workspaceId == '' || workspaceId == 'default-workspace' || workspaceId == 'all') && departmentId == 'dept-target-123')");
+        assertThat(filter).isEqualTo("(workspaceId == 'GLOBAL' && departmentId == 'dept-target-123')");
         assertThat(partialResults[0]).isFalse();
     }
 
@@ -230,6 +230,7 @@ class RAGServiceTest {
         // Mock Database Search
         when(wikiPageRepository.searchAccessiblePagesByKeyword(
                 Mockito.eq("workspace-abc"),
+                Mockito.any(),
                 Mockito.eq(true),
                 Mockito.anyList(),
                 Mockito.anyList(),
@@ -304,7 +305,7 @@ class RAGServiceTest {
         // Mock outgoing link base-slug -> target-slug
         com.security.security.entity.WikiLink link = new com.security.security.entity.WikiLink(10L, 1L, "target-slug");
         when(wikiLinkRepository.findByFromPageId(1L)).thenReturn(Arrays.asList(link));
-        when(wikiPageRepository.findBySlugAndWorkspaceId("target-slug", "workspace-abc"))
+        when(wikiPageRepository.fetchBySlugAndWorkspaceId("target-slug", "workspace-abc"))
                 .thenReturn(java.util.Optional.of(targetPage));
 
         // Act

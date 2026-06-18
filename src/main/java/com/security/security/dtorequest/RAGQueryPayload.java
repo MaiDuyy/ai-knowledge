@@ -49,5 +49,6 @@ public class RAGQueryPayload {
         private Integer maxResults;
         private Double minScore;
         private List<String> collections;
+        private String pageType;
     }
 }

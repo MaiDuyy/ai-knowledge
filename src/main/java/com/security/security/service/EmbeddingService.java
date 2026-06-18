@@ -221,8 +221,8 @@ public class EmbeddingService {
                 meta.put("securityClassification", document.getSecurityClassification());
             }
             meta.put("uploadedBy", document.getUserId());
-            meta.put("workspaceId", document.getWorkspaceId() != null ? document.getWorkspaceId() : "");
-            meta.put("departmentId", document.getDepartmentId() != null ? document.getDepartmentId() : "");
+            meta.put("workspaceId", ScopeNormalizer.normalizeWorkspace(document.getWorkspaceId()));
+            meta.put("departmentId", ScopeNormalizer.normalizeDepartment(document.getDepartmentId()));
             meta.put("allowedRoles", document.getAllowedRoles() != null ? document.getAllowedRoles() : "ALL");
             if (folderPath != null && !folderPath.isBlank()) {
                 meta.put("folderPath", folderPath.strip());
@@ -231,7 +231,7 @@ public class EmbeddingService {
             vBatch.add(new org.springframework.ai.document.Document(chunkText, meta));
             eBatch.add(Embedding.builder()
                     .documentId(document.getId())
-                    .workspaceId(document.getWorkspaceId())
+                    .workspaceId(ScopeNormalizer.normalizeWorkspace(document.getWorkspaceId()))
                     .chunkIndex(i)
                     .chunkText(chunkText)
                     .chunkTitle(cr.title())

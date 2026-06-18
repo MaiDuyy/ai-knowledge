@@ -61,9 +61,34 @@ public class MrpPipelineService {
                 },
                 "required": ["subject", "claim", "sourceContext"]
               }
+            },
+            "contradictions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "subject": { "type": "string" },
+                  "claim_a": { "type": "string" },
+                  "claim_b": { "type": "string" },
+                  "resolution": { "type": "string" }
+                },
+                "required": ["subject", "claim_a", "claim_b"]
+              }
+            },
+            "recommendations": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "title": { "type": "string" },
+                  "description": { "type": "string" },
+                  "priority": { "type": "string" }
+                },
+                "required": ["title", "description", "priority"]
+              }
             }
           },
-          "required": ["entities", "concepts", "claims"]
+          "required": ["entities", "concepts", "claims", "contradictions", "recommendations"]
         }
         """;
 
@@ -80,6 +105,14 @@ public class MrpPipelineService {
               "pageType": { "type": "string" },
               "reason": { "type": "string" },
               "keyClaims": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "crossReferences": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "reviewItems": {
                 "type": "array",
                 "items": { "type": "string" }
               }
@@ -128,10 +161,11 @@ public class MrpPipelineService {
      * Automatically triggers the advanced MRP compilation pipeline and auto-approves generated drafts.
      */
     @Transactional
-        public int compileToWiki(String markdownContent, Long sourceDocumentId, String workspaceId, String userId) {
+    public int compileToWiki(String markdownContent, Long sourceDocumentId, String workspaceId, String userId) {
         log.info("[MRP Pipeline] Backward-compatible compileToWiki called for document ID: {}", sourceDocumentId);
+        String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
         // We first initiate the compile pipeline with autoApprove=true (executes Map, Reduce, Plan, Refine & Auto-Approve drafts)
-        SourceCompilationPlan plan = initiateCompile(sourceDocumentId, workspaceId, userId, true);
+        SourceCompilationPlan plan = initiateCompile(sourceDocumentId, normalizedWorkspaceId, userId, true);
         try {
             List<Map<String, Object>> planItems = parsePlanItems(plan.getPlanJson());
             return planItems.size();
@@ -153,13 +187,18 @@ public class MrpPipelineService {
                 .orElseThrow(() -> new IllegalArgumentException("Document not found with ID: " + documentId));
 
         // Kế thừa workspaceId trực tiếp từ tài liệu gốc (Document) để bảo mật và đồng bộ dữ liệu theo đúng flow
-        String finalWorkspaceId = (doc.getWorkspaceId() != null && !doc.getWorkspaceId().trim().isEmpty())
-                ? doc.getWorkspaceId()
-                : (doc.getDepartmentId() != null && !doc.getDepartmentId().isBlank()
-                    ? null
-                    : (workspaceId != null ? workspaceId : "default-workspace"));
+        String finalWorkspaceId = ScopeNormalizer.normalizeWorkspace(doc.getWorkspaceId());
+        String docDeptId = ScopeNormalizer.normalizeDepartment(doc.getDepartmentId());
+        if ("GLOBAL".equals(finalWorkspaceId)) {
+            if (!"GLOBAL".equals(docDeptId)) {
+                // Department-scoped document, finalWorkspaceId is already GLOBAL
+            } else {
+                finalWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
+            }
+        }
+        final String targetWorkspaceId = finalWorkspaceId;
 
-        log.info("[MRP Pipeline] Workspace được xác định cho tiến trình: {}", finalWorkspaceId);
+        log.info("[MRP Pipeline] Workspace được xác định cho tiến trình: {}", targetWorkspaceId);
 
         // Create or update SourceCompilationPlan record
         SourceCompilationPlan plan = sourceCompilationPlanRepository.findBySourceDocumentId(documentId)
@@ -168,7 +207,7 @@ public class MrpPipelineService {
                         .build());
 
         // Copy security attributes from Document
-        plan.setDepartmentId(doc.getDepartmentId());
+        plan.setDepartmentId(docDeptId);
         plan.setAllowedRoles(doc.getAllowedRoles() != null ? doc.getAllowedRoles() : "ALL");
         plan.setSecurityClassification(doc.getSecurityClassification() != null ? doc.getSecurityClassification() : "INTERNAL");
 
@@ -177,7 +216,7 @@ public class MrpPipelineService {
         plan = sourceCompilationPlanRepository.save(plan);
 
         // Publish event that status is PROCESSING
-        natsEventPublisher.publishCompilationPlanUpdated(plan.getId(), plan.getSourceDocumentId(), finalWorkspaceId, plan.getStatus(), userId);
+        natsEventPublisher.publishCompilationPlanUpdated(plan.getId(), plan.getSourceDocumentId(), targetWorkspaceId, plan.getStatus(), userId);
 
         final Long planId = plan.getId();
         final String docContent = doc.getMarkdownContent();
@@ -189,14 +228,14 @@ public class MrpPipelineService {
                     @Override
                     public void afterCommit() {
                         CompletableFuture.runAsync(() -> {
-                            runCompilationProcess(planId, documentId, docContent, finalWorkspaceId, userId, autoApprove);
+                            runCompilationProcess(planId, documentId, docContent, targetWorkspaceId, userId, autoApprove);
                         }, mrpVirtualThreadExecutor);
                     }
                 }
             );
         } else {
             CompletableFuture.runAsync(() -> {
-                runCompilationProcess(planId, documentId, docContent, finalWorkspaceId, userId, autoApprove);
+                runCompilationProcess(planId, documentId, docContent, targetWorkspaceId, userId, autoApprove);
             }, mrpVirtualThreadExecutor);
         }
 
@@ -232,8 +271,15 @@ public class MrpPipelineService {
                     Optional<SourceChunkExtract> existing = sourceChunkExtractRepository
                             .findBySourceDocumentIdAndChunkIndex(documentId, index);
                     
-                    if (existing.isPresent() && "DONE".equals(existing.get().getStatus())) {
-                        log.info("[MRP Pipeline] [Map Phase] Chunk Index {} đã được trích xuất trước đó, bỏ qua.", index);
+                    String chunkHash = computeSHA256(chunkText);
+                    if (existing.isPresent() && "DONE".equals(existing.get().getStatus())
+                            && chunkHash.equals(existing.get().getContentHash())) {
+                        log.info("[MRP Pipeline] [Map Phase] Chunk {} unchanged (hash match), skipping.", index);
+                        return existing.get();
+                    }
+                    if (existing.isPresent() && "DONE".equals(existing.get().getStatus())
+                            && existing.get().getContentHash() == null) {
+                        log.info("[MRP Pipeline] [Map Phase] Chunk {} DONE but no hash (legacy), skipping.", index);
                         return existing.get();
                     }
 
@@ -262,18 +308,20 @@ public class MrpPipelineService {
                         String mapSystemPrompt = """
                             You are an expert enterprise knowledge extraction agent.
                             Your job is to read the provided text chunk and extract key structured details.
-                            
+
                             CRITICAL GROUNDEDNESS DIRECTIVES:
                             - You must ONLY extract entities, concepts, and claims that are explicitly mentioned in the provided text chunk.
                             - Do NOT use any external background knowledge, prior assumptions, or web search facts to write descriptions or definitions.
                             - The description/definition of each entity or concept MUST be constructed solely from the facts provided in the text. If the text does not describe the entity, use a minimal description derived strictly from the text context, or leave it brief.
                             - Every claim's 'claim' and 'sourceContext' fields MUST correspond to the exact facts and sentences in the text chunk. Do NOT extrapolate or assume anything.
-                            
+
                             You must extract:
                             1. Entities: Organizations, products, technologies, tools, platforms, or people. Give each a clear description.
                             2. Concepts: Core paradigms, frameworks, architectural designs, procedures, rules, policies. Define each precisely.
                             3. Claims: Facts, guidelines, configurations, assertions, metrics, or requirements. Detail each claim and link it to the subject.
-                            
+                            4. Contradictions: Cases where the text contains conflicting claims about the same subject. Note both sides and any resolution if the text provides one. If none found, return empty array.
+                            5. Recommendations: Actionable suggestions, improvement proposals, or best practices found in text. Classify priority as HIGH, MEDIUM, or LOW. If none found, return empty array.
+
                             You must return ONLY a valid JSON object. Do NOT wrap the response in markdown blocks (such as ```json). Do NOT add any conversational text before or after the JSON.
                             {
                               "entities": [
@@ -284,6 +332,12 @@ public class MrpPipelineService {
                               ],
                               "claims": [
                                 {"subject": "Entity/Concept name", "claim": "Fact, metric, assertion, or config", "sourceContext": "Exact text sentence or clear context"}
+                              ],
+                              "contradictions": [
+                                {"subject": "Topic", "claim_a": "First conflicting claim", "claim_b": "Second conflicting claim", "resolution": "Resolution if any"}
+                              ],
+                              "recommendations": [
+                                {"title": "Action title", "description": "What should be done", "priority": "HIGH/MEDIUM/LOW"}
                               ]
                             }
                             """;
@@ -303,6 +357,7 @@ public class MrpPipelineService {
 
                         extract.setExtractJson(cleanedJson);
                         extract.setStatus("DONE");
+                        extract.setContentHash(chunkHash);
                         extract.setErrorMessage(null);
                         log.info("[MRP Pipeline] [Map Phase] Trích xuất thành công chunk {}.", index);
                     } catch (Exception e) {
@@ -328,6 +383,8 @@ public class MrpPipelineService {
             List<Map<String, Object>> allEntities = new ArrayList<>();
             List<Map<String, Object>> allConcepts = new ArrayList<>();
             List<Map<String, Object>> allClaims = new ArrayList<>();
+            List<Map<String, Object>> allContradictions = new ArrayList<>();
+            List<Map<String, Object>> allRecommendations = new ArrayList<>();
 
             for (SourceChunkExtract chunk : doneChunks) {
                 try {
@@ -340,6 +397,12 @@ public class MrpPipelineService {
                     }
                     if (data.containsKey("claims")) {
                         allClaims.addAll((List<Map<String, Object>>) data.get("claims"));
+                    }
+                    if (data.containsKey("contradictions")) {
+                        allContradictions.addAll((List<Map<String, Object>>) data.get("contradictions"));
+                    }
+                    if (data.containsKey("recommendations")) {
+                        allRecommendations.addAll((List<Map<String, Object>>) data.get("recommendations"));
                     }
                 } catch (Exception e) {
                     log.warn("[MRP Pipeline] Không thể parse JSON chunk {}: {}", chunk.getChunkIndex(), e.getMessage());
@@ -466,24 +529,39 @@ public class MrpPipelineService {
             try {
                 String rawItemsJson = objectMapper.writeValueAsString(planningItems);
                 
+                String contradictionsJson = "";
+                String recommendationsJson = "";
+                try {
+                    if (!allContradictions.isEmpty()) {
+                        contradictionsJson = objectMapper.writeValueAsString(allContradictions);
+                    }
+                    if (!allRecommendations.isEmpty()) {
+                        recommendationsJson = objectMapper.writeValueAsString(allRecommendations);
+                    }
+                } catch (Exception e) {
+                    log.warn("[MRP Pipeline] Error serializing contradictions/recommendations: {}", e.getMessage());
+                }
+
                 String planSystemPrompt = """
                     You are a Senior Technical Knowledge Architect.
                     You are given a rough list of topics (entities/concepts) and their associated claims/facts.
                     Your job is to structure this into a professional, cohesive Wiki compilation plan.
-                    
+
                     You must classify each page into one of the following exact types:
                     - "entity": Specific names of organizations, technologies, tools, platforms, systems, devices, products, or individuals.
                     - "concept": Abstract paradigms, theoretical models, frameworks, architectural designs, algorithms, rules, policies, or procedures.
                     - "topic": Broad subjects, themes, categories, or high-level tag-like grouping pages that aggregate other elements.
                     - "source": Reference documents, articles, books, news, reports, files, or original records from which facts are derived.
-                    
+
                     You must:
                     1. Consolidate topics that are highly related to avoid a cluttered Wiki.
                     2. Verify names and write precise slugs.
                     3. Ensure that keyClaims are prioritized and concise.
                     4. Crucial: Do NOT modify or remove the "[Source Context: ...]" suffix of any claim, as these contain the original reference sentences.
                     5. Crucial: Do NOT introduce, expand, or add any new entities, concepts, facts, or details that are not explicitly present in the input list. You must only organize and structure what is provided.
-                    
+                    6. For each plan item, suggest "crossReferences" — an array of slugs of OTHER plan items that are closely related and should be [[wikilinked]] together.
+                    7. If contradictions were found during extraction, include them in "reviewItems" for the relevant plan item so human reviewers can resolve them.
+
                     You MUST return a valid JSON array of Plan Items matching this schema exactly.
                     [
                       {
@@ -493,13 +571,28 @@ public class MrpPipelineService {
                         "wikiPageId": 123 (if UPDATE, otherwise null),
                         "pageType": "entity" or "concept" or "topic" or "source",
                         "reason": "Why this page needs creation or update",
-                        "keyClaims": ["Detailed claim 1 [Source Context: ...]", "Detailed claim 2 [Source Context: ...]"]
+                        "keyClaims": ["Detailed claim 1 [Source Context: ...]", "Detailed claim 2 [Source Context: ...]"],
+                        "crossReferences": ["related-slug-1", "related-slug-2"],
+                        "reviewItems": ["Contradiction: ..."]
                       }
                     ]
                     """;
 
+                String reduceInput = rawItemsJson;
+                if (!contradictionsJson.isEmpty() || !recommendationsJson.isEmpty()) {
+                    StringBuilder sb = new StringBuilder(rawItemsJson);
+                    sb.append("\n\n--- ADDITIONAL CONTEXT ---\n");
+                    if (!contradictionsJson.isEmpty()) {
+                        sb.append("Contradictions found during extraction:\n").append(contradictionsJson).append("\n");
+                    }
+                    if (!recommendationsJson.isEmpty()) {
+                        sb.append("Recommendations found during extraction:\n").append(recommendationsJson).append("\n");
+                    }
+                    reduceInput = sb.toString();
+                }
+
                 log.info("[MRP Pipeline] [Reduce Phase] Đang gọi LLM tối ưu hóa Kế hoạch Biên soạn...");
-                String planResponse = callChatWithRetry(provider, planSystemPrompt, rawItemsJson, REDUCE_PHASE_SCHEMA, "mrp-plan-" + documentId);
+                String planResponse = callChatWithRetry(provider, planSystemPrompt, reduceInput, REDUCE_PHASE_SCHEMA, "mrp-plan-" + documentId);
                 log.info("[MRP Pipeline] [Reduce Phase] Raw LLM response: \n{}", planResponse);
 
                 planJson = cleanJsonResponse(planResponse, false);
@@ -566,11 +659,16 @@ public class MrpPipelineService {
             String fullText = doc != null ? doc.getMarkdownContent() : "";
 
             // Lấy workspaceId trực tiếp từ document gốc để đảm bảo tính đồng bộ tuyệt đối trong toàn bộ flow
-            String finalWorkspaceId = (doc != null && doc.getWorkspaceId() != null && !doc.getWorkspaceId().trim().isEmpty())
-                    ? doc.getWorkspaceId()
-                    : (doc != null && doc.getDepartmentId() != null && !doc.getDepartmentId().isBlank()
-                        ? null
-                        : (workspaceId != null ? workspaceId : "default-workspace"));
+            String finalWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
+            if (doc != null) {
+                String docWs = ScopeNormalizer.normalizeWorkspace(doc.getWorkspaceId());
+                String docDept = ScopeNormalizer.normalizeDepartment(doc.getDepartmentId());
+                if (!"GLOBAL".equals(docWs)) {
+                    finalWorkspaceId = docWs;
+                } else if (!"GLOBAL".equals(docDept)) {
+                    finalWorkspaceId = "GLOBAL";
+                }
+            }
 
             log.info("[MRP Pipeline] [Refine Phase] Workspace được xác định để tạo Draft: {}", finalWorkspaceId);
             
@@ -838,6 +936,20 @@ public class MrpPipelineService {
         } catch (Exception e) {
             log.error("[MRP Pipeline] Absolute fallback failed for: {}", planJson);
             return new ArrayList<>();
+        }
+    }
+
+    private static String computeSHA256(String text) {
+        try {
+            java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder();
+            for (byte b : hash) {
+                hex.append(String.format("%02x", b));
+            }
+            return hex.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new RuntimeException("SHA-256 not available", e);
         }
     }
 

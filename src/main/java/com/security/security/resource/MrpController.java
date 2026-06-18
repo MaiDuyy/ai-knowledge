@@ -9,6 +9,8 @@ import com.security.security.repository.SourceCompilationPlanRepository;
 import com.security.security.repository.DocumentRepository;
 import com.security.security.service.MrpPipelineService;
 import com.security.security.service.WikiDraftService;
+import com.security.security.service.WikiGraphService;
+import com.security.security.service.WikiHealthService;
 import com.security.security.client.WorkspaceServiceClient;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -22,6 +24,7 @@ import org.springframework.security.access.AccessDeniedException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.security.security.dto.UserPermissionContext;
 import com.security.security.service.PermissionUtils;
+import com.security.security.service.ScopeNormalizer;
 
 import java.util.List;
 import java.util.Map;
@@ -34,6 +37,8 @@ public class MrpController {
 
     private final MrpPipelineService mrpPipelineService;
     private final WikiDraftService wikiDraftService;
+    private final WikiGraphService wikiGraphService;
+    private final WikiHealthService wikiHealthService;
     private final WikiPageRepository wikiPageRepository;
     private final WikiPageDraftRepository wikiPageDraftRepository;
     private final SourceCompilationPlanRepository sourceCompilationPlanRepository;
@@ -46,13 +51,14 @@ public class MrpController {
      * Helper method to validate user membership in workspace
      */
     private void validateWorkspaceAccess(String userId, String workspaceId) {
-        if (workspaceId == null || workspaceId.trim().isEmpty() || "default-workspace".equals(workspaceId) || "all".equals(workspaceId)) {
+        String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
+        if ("GLOBAL".equals(normalizedWorkspaceId) || "all".equals(normalizedWorkspaceId)) {
             return; // Allow public, default, or all-workspaces
         }
-        var workspace = workspaceServiceClient.getWorkspace(workspaceId, userId);
+        var workspace = workspaceServiceClient.getWorkspace(normalizedWorkspaceId, userId);
         if (workspace.isEmpty()) {
-            log.warn("[Security] Access denied or workspace not found: User {} in Workspace {}", userId, workspaceId);
-            throw new AccessDeniedException("You do not have access to Workspace: " + workspaceId);
+            log.warn("[Security] Access denied or workspace not found: User {} in Workspace {}", userId, normalizedWorkspaceId);
+            throw new AccessDeniedException("You do not have access to Workspace: " + normalizedWorkspaceId);
         }
     }
 
@@ -61,27 +67,22 @@ public class MrpController {
 
         if ("PUBLIC".equalsIgnoreCase(page.getSecurityClassification())) return;
 
-        String pageDeptId = page.getDepartmentId();
-        String pageWsId = page.getWorkspaceId();
+        String pageDeptId = ScopeNormalizer.normalizeDepartment(page.getDepartmentId());
+        String pageWsId = ScopeNormalizer.normalizeWorkspace(page.getWorkspaceId());
         String allowed = page.getAllowedRoles();
 
-        boolean isGlobalScope = (pageDeptId == null || pageDeptId.isBlank())
-            && (pageWsId == null || pageWsId.isBlank()
-                || "default-workspace".equalsIgnoreCase(pageWsId)
-                || "workspace-default".equalsIgnoreCase(pageWsId)
-                || "all".equalsIgnoreCase(pageWsId));
+        boolean isGlobalScope = "GLOBAL".equals(pageDeptId) && "GLOBAL".equals(pageWsId);
 
         // Rule 1: Global scope → all users
         if (isGlobalScope) return;
 
         // INTERNAL company-wide pages without department restriction
-        if ((pageDeptId == null || pageDeptId.isBlank())
-                && "INTERNAL".equalsIgnoreCase(page.getSecurityClassification())) {
+        if ("GLOBAL".equals(pageDeptId) && "INTERNAL".equalsIgnoreCase(page.getSecurityClassification())) {
             return;
         }
 
         // Rules 2+3+4: Department-scoped → must be a member of that department
-        if (pageDeptId != null && !pageDeptId.isBlank()) {
+        if (!"GLOBAL".equals(pageDeptId)) {
             boolean isHead = perm.getDeptIdsWhereHead().contains(pageDeptId);
             boolean isMember = perm.getDeptIdsWhereMember().contains(pageDeptId);
 
@@ -112,15 +113,16 @@ public class MrpController {
             @RequestHeader(value = "x-user-roles", required = false) String userRoles,
             @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
 
+        String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
         log.info("[MrpController] Compiling document ID: {}, workspace: {}, autoApprove: {}, user: {}",
-                documentId, workspaceId, autoApprove, userId);
+                documentId, normalizedWorkspaceId, autoApprove, userId);
 
         UserPermissionContext perm = PermissionUtils.parse(userRoles, userDepartmentsHeader, objectMapper);
         if (!perm.isAdmin()) {
-            validateWorkspaceAccess(userId, workspaceId);
+            validateWorkspaceAccess(userId, normalizedWorkspaceId);
         }
         
-        SourceCompilationPlan plan = mrpPipelineService.initiateCompile(documentId, workspaceId, userId, autoApprove);
+        SourceCompilationPlan plan = mrpPipelineService.initiateCompile(documentId, normalizedWorkspaceId, userId, autoApprove);
         populateDocumentName(plan);
         return ResponseEntity.accepted().body(plan);
     }
@@ -138,11 +140,12 @@ public class MrpController {
             @RequestHeader(value = "x-user-roles", required = false) String userRoles,
             @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
 
+        String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
         log.info("[MrpController] Approving plan ID: {}, runAutoApproveDrafts: {}, user: {}", planId, runAutoApproveDrafts, userId);
 
         UserPermissionContext perm = PermissionUtils.parse(userRoles, userDepartmentsHeader, objectMapper);
         if (!perm.isAdmin()) {
-            validateWorkspaceAccess(userId, workspaceId);
+            validateWorkspaceAccess(userId, normalizedWorkspaceId);
         }
 
         SourceCompilationPlan plan = sourceCompilationPlanRepository.findById(planId)
@@ -159,7 +162,7 @@ public class MrpController {
             throw new AccessDeniedException("You do not have permission to approve this compilation plan.");
         }
 
-        mrpPipelineService.executeCompilationPlan(planId, workspaceId, userId, runAutoApproveDrafts);
+        mrpPipelineService.executeCompilationPlan(planId, normalizedWorkspaceId, userId, runAutoApproveDrafts);
 
         return ResponseEntity.ok(Map.of("message", "Compilation plan approved and executed. Drafts are generated."));
     }
@@ -178,11 +181,12 @@ public class MrpController {
             @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
             @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
             @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
+        String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
         log.info("[MrpController] Fetching pending drafts. page: {}, size: {}, user: {}", page, size, userId);
         
         UserPermissionContext perm = PermissionUtils.parse(userRolesHeader, userDepartmentsHeader, objectMapper);
         if (!perm.isAdmin()) {
-            validateWorkspaceAccess(userId, workspaceId);
+            validateWorkspaceAccess(userId, normalizedWorkspaceId);
         }
 
         // Admins and SuperAdmins can view all pending drafts across all workspaces
@@ -199,12 +203,12 @@ public class MrpController {
         if (page != null && size != null) {
             Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt"));
             Page<WikiPageDraft> pagedDrafts = wikiPageDraftRepository.findAccessibleDraftsByStatus(
-                workspaceId, "PENDING", perm.isAdmin(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember(), pageable);
+                normalizedWorkspaceId, "PENDING", perm.isAdmin(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember(), pageable);
             return ResponseEntity.ok(pagedDrafts);
         }
         
         List<WikiPageDraft> drafts = wikiPageDraftRepository.findAccessibleDraftsByStatus(
-            workspaceId, "PENDING", perm.isAdmin(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
+            normalizedWorkspaceId, "PENDING", perm.isAdmin(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
         return ResponseEntity.ok(drafts);
     }
 
@@ -218,15 +222,16 @@ public class MrpController {
             @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
             @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
             @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
-        log.info("[MrpController] Fetching drafts for workspace ID: {} by user: {}", workspaceId, userId);
+        String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
+        log.info("[MrpController] Fetching drafts for workspace ID: {} by user: {}", normalizedWorkspaceId, userId);
         
         UserPermissionContext perm = PermissionUtils.parse(userRolesHeader, userDepartmentsHeader, objectMapper);
         if (!perm.isAdmin()) {
-            validateWorkspaceAccess(userId, workspaceId);
+            validateWorkspaceAccess(userId, normalizedWorkspaceId);
         }
         
         List<WikiPageDraft> drafts = wikiPageDraftRepository.findAccessibleDrafts(
-            workspaceId, perm.isAdmin(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
+            normalizedWorkspaceId, perm.isAdmin(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
         return ResponseEntity.ok(drafts);
     }
 
@@ -360,12 +365,43 @@ public class MrpController {
         }
 
         UserPermissionContext perm = PermissionUtils.parse(userRolesHeader, userDepartmentsHeader, objectMapper);
+        String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
         if (!perm.isAdmin()) {
-            validateWorkspaceAccess(userId, workspaceId);
+            validateWorkspaceAccess(userId, normalizedWorkspaceId);
         }
 
-        String linkedContent = wikiDraftService.autoLinkDraftContent(content, workspaceId, perm);
+        String linkedContent = wikiDraftService.autoLinkDraftContent(content, normalizedWorkspaceId, perm);
         return ResponseEntity.ok(Map.of("linkedContent", linkedContent));
+    }
+
+    // ==================== WIKI ADMIN ENDPOINTS ====================
+
+    @PostMapping("/wiki/reindex")
+    public ResponseEntity<?> reindexWikiPages(
+            @RequestParam(defaultValue = "default-workspace") String workspaceId,
+            @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
+            @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
+        var perm = PermissionUtils.parse(userRolesHeader, userDepartmentsHeader, objectMapper);
+        if (!perm.isAdmin()) {
+            return ResponseEntity.status(403).body(Map.of("error", "Admin access required for wiki reindex"));
+        }
+        String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
+        log.info("[MrpController] Triggering bulk wiki reindex for workspace: {}", normalizedWorkspaceId);
+        Map<String, Object> result = wikiDraftService.reindexAllPages(normalizedWorkspaceId);
+        return ResponseEntity.ok(result);
+    }
+
+    @GetMapping("/wiki/health")
+    public ResponseEntity<?> getWikiHealth(
+            @RequestParam(defaultValue = "default-workspace") String workspaceId,
+            @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
+            @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
+        var perm = PermissionUtils.parse(userRolesHeader, userDepartmentsHeader, objectMapper);
+        if (!perm.isAdmin()) {
+            return ResponseEntity.status(403).body(Map.of("error", "Admin access required for wiki health"));
+        }
+        String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
+        return ResponseEntity.ok(wikiHealthService.getHealth(normalizedWorkspaceId));
     }
 
     // ==================== WIKI VIEW ENDPOINTS ====================
@@ -382,33 +418,35 @@ public class MrpController {
             @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
             @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
             @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
-        log.info("[MrpController] Fetching wiki pages for workspace: {}, page: {}, size: {}, user: {}", workspaceId, page, size, userId);
+        String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
+        log.info("[MrpController] Fetching wiki pages for workspace: {}, page: {}, size: {}, user: {}", normalizedWorkspaceId, page, size, userId);
         
         UserPermissionContext perm = PermissionUtils.parse(userRolesHeader, userDepartmentsHeader, objectMapper);
         if (!perm.isAdmin()) {
-            validateWorkspaceAccess(userId, workspaceId);
+            validateWorkspaceAccess(userId, normalizedWorkspaceId);
         }
         
         String workspaceDeptId = null;
-        if (workspaceId != null && !"default-workspace".equals(workspaceId) && !"all".equals(workspaceId)) {
+        if (!"GLOBAL".equals(normalizedWorkspaceId) && !"all".equals(normalizedWorkspaceId)) {
             try {
-                Map<String, Object> workspaceInfo = workspaceServiceClient.getWorkspace(workspaceId, userId);
+                Map<String, Object> workspaceInfo = workspaceServiceClient.getWorkspace(normalizedWorkspaceId, userId);
                 if (workspaceInfo != null && workspaceInfo.containsKey("departmentId")) {
                     workspaceDeptId = (String) workspaceInfo.get("departmentId");
                 }
             } catch (Exception e) {
-                log.warn("[MrpController] Could not resolve department for workspace: {}", workspaceId, e);
+                log.warn("[MrpController] Could not resolve department for workspace: {}", normalizedWorkspaceId, e);
             }
         }
+        String normalizedDeptId = ScopeNormalizer.normalizeDepartment(workspaceDeptId);
         
         if (page != null && size != null) {
             Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "updatedAt"));
             Page<WikiPage> pagedWiki = wikiPageRepository.findAccessiblePages(
-                workspaceId, workspaceDeptId, perm.isAdmin(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember(), pageable);
+                normalizedWorkspaceId, normalizedDeptId, perm.isAdmin(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember(), pageable);
             return ResponseEntity.ok(pagedWiki);
         }
         List<WikiPage> pages = wikiPageRepository.findAccessiblePages(
-            workspaceId, workspaceDeptId, perm.isAdmin(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
+            normalizedWorkspaceId, normalizedDeptId, perm.isAdmin(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
         return ResponseEntity.ok(pages);
     }
 
@@ -422,27 +460,29 @@ public class MrpController {
             @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
             @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
             @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
-        log.info("[MrpController] Fetching lightweight wiki metadata with parsed links for workspace: {} by user: {}", workspaceId, userId);
+        String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
+        log.info("[MrpController] Fetching lightweight wiki metadata with parsed links for workspace: {} by user: {}", normalizedWorkspaceId, userId);
         
         UserPermissionContext perm = PermissionUtils.parse(userRolesHeader, userDepartmentsHeader, objectMapper);
         if (!perm.isAdmin()) {
-            validateWorkspaceAccess(userId, workspaceId);
+            validateWorkspaceAccess(userId, normalizedWorkspaceId);
         }
         
         String workspaceDeptId = null;
-        if (workspaceId != null && !"default-workspace".equals(workspaceId) && !"all".equals(workspaceId)) {
+        if (!"GLOBAL".equals(normalizedWorkspaceId) && !"all".equals(normalizedWorkspaceId)) {
             try {
-                Map<String, Object> workspaceInfo = workspaceServiceClient.getWorkspace(workspaceId, userId);
+                Map<String, Object> workspaceInfo = workspaceServiceClient.getWorkspace(normalizedWorkspaceId, userId);
                 if (workspaceInfo != null && workspaceInfo.containsKey("departmentId")) {
                     workspaceDeptId = (String) workspaceInfo.get("departmentId");
                 }
             } catch (Exception e) {
-                log.warn("[MrpController] Could not resolve department for workspace: {}", workspaceId, e);
+                log.warn("[MrpController] Could not resolve department for workspace: {}", normalizedWorkspaceId, e);
             }
         }
+        String normalizedDeptId = ScopeNormalizer.normalizeDepartment(workspaceDeptId);
 
         List<WikiPageRepository.WikiPageMetadata> pages = wikiPageRepository.findAccessibleMetadata(
-            workspaceId, workspaceDeptId, perm.isAdmin(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
+            normalizedWorkspaceId, normalizedDeptId, perm.isAdmin(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
             
         List<com.security.security.dto.WikiPageMetadataDto> dtos = pages.stream().map(page -> {
             List<String> dbLinks = wikiLinkRepository.findByFromPageId(page.getId()).stream()
@@ -478,28 +518,30 @@ public class MrpController {
             @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
             @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
             @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
-        log.info("[MrpController] Fetching wiki link graph for workspace: {} by user: {}", workspaceId, userId);
+        String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
+        log.info("[MrpController] Fetching wiki link graph for workspace: {} by user: {}", normalizedWorkspaceId, userId);
         
         UserPermissionContext perm = PermissionUtils.parse(userRolesHeader, userDepartmentsHeader, objectMapper);
         if (!perm.isAdmin()) {
-            validateWorkspaceAccess(userId, workspaceId);
+            validateWorkspaceAccess(userId, normalizedWorkspaceId);
         }
         
         String workspaceDeptId = null;
-        if (workspaceId != null && !"default-workspace".equals(workspaceId) && !"all".equals(workspaceId)) {
+        if (!"GLOBAL".equals(normalizedWorkspaceId) && !"all".equals(normalizedWorkspaceId)) {
             try {
-                Map<String, Object> workspaceInfo = workspaceServiceClient.getWorkspace(workspaceId, userId);
+                Map<String, Object> workspaceInfo = workspaceServiceClient.getWorkspace(normalizedWorkspaceId, userId);
                 if (workspaceInfo != null && workspaceInfo.containsKey("departmentId")) {
                     workspaceDeptId = (String) workspaceInfo.get("departmentId");
                 }
             } catch (Exception e) {
-                log.warn("[MrpController] Could not resolve department for workspace: {}", workspaceId, e);
+                log.warn("[MrpController] Could not resolve department for workspace: {}", normalizedWorkspaceId, e);
             }
         }
+        String normalizedDeptId = ScopeNormalizer.normalizeDepartment(workspaceDeptId);
 
         // 1. Fetch accessible pages (lightweight metadata)
         List<WikiPageRepository.WikiPageMetadata> pages = wikiPageRepository.findAccessibleMetadata(
-            workspaceId, workspaceDeptId, perm.isAdmin(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
+            normalizedWorkspaceId, normalizedDeptId, perm.isAdmin(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
             
         // 2. Map pages to Node DTOs and build a set of accessible slugs
         java.util.Set<String> accessibleSlugs = new java.util.HashSet<>();
@@ -543,6 +585,12 @@ public class MrpController {
             .build());
     }
 
+    @GetMapping("/wiki/graph/communities")
+    public ResponseEntity<com.security.security.dto.WikiGraphCommunityDto> getGraphCommunities(
+            @RequestParam(defaultValue = "default-workspace") String workspaceId) {
+        return ResponseEntity.ok(wikiGraphService.detectCommunities(ScopeNormalizer.normalizeWorkspace(workspaceId)));
+    }
+
     /**
      * Lấy chi tiết một trang Wiki theo slug.
      * GET /api/mrp/wiki/slug/{slug}?workspaceId=...
@@ -554,11 +602,12 @@ public class MrpController {
             @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
             @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
             @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
-        log.info("[MrpController] Fetching wiki page slug: {} for workspace: {} by user: {}", slug, workspaceId, userId);
+        String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
+        log.info("[MrpController] Fetching wiki page slug: {} for workspace: {} by user: {}", slug, normalizedWorkspaceId, userId);
         
         UserPermissionContext perm = PermissionUtils.parse(userRolesHeader, userDepartmentsHeader, objectMapper);
         if (!perm.isAdmin()) {
-            validateWorkspaceAccess(userId, workspaceId);
+            validateWorkspaceAccess(userId, normalizedWorkspaceId);
         }
         
         String cleanSlug = slug;
@@ -567,18 +616,19 @@ public class MrpController {
         }
         
         String workspaceDeptId = null;
-        if (workspaceId != null && !"default-workspace".equals(workspaceId) && !"all".equals(workspaceId)) {
+        if (!"GLOBAL".equals(normalizedWorkspaceId) && !"all".equals(normalizedWorkspaceId)) {
             try {
-                Map<String, Object> workspaceInfo = workspaceServiceClient.getWorkspace(workspaceId, userId);
+                Map<String, Object> workspaceInfo = workspaceServiceClient.getWorkspace(normalizedWorkspaceId, userId);
                 if (workspaceInfo != null && workspaceInfo.containsKey("departmentId")) {
                     workspaceDeptId = (String) workspaceInfo.get("departmentId");
                 }
             } catch (Exception e) {
-                log.warn("[MrpController] Could not resolve department for workspace: {}", workspaceId, e);
+                log.warn("[MrpController] Could not resolve department for workspace: {}", normalizedWorkspaceId, e);
             }
         }
+        String normalizedDeptId = ScopeNormalizer.normalizeDepartment(workspaceDeptId);
 
-        WikiPage page = wikiPageRepository.fetchBySlugAndWorkspaceId(cleanSlug, workspaceId, workspaceDeptId)
+        WikiPage page = wikiPageRepository.fetchBySlugAndWorkspaceId(cleanSlug, normalizedWorkspaceId, normalizedDeptId)
                 .orElseThrow(() -> new IllegalArgumentException("Wiki page not found with slug: " + slug));
                 
         checkPageAccess(page, perm);
@@ -623,14 +673,12 @@ public class MrpController {
             @RequestParam(required = false) Integer size,
             @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
             @RequestHeader(value = "x-user-roles", required = false) String userRoles) {
-        log.info("[MrpController] Fetching source compilation plans for workspace: {}. page: {}, size: {}, roles: {}", workspaceId, page, size, userRoles);
+        String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
+        log.info("[MrpController] Fetching source compilation plans for workspace: {}. page: {}, size: {}, roles: {}", normalizedWorkspaceId, page, size, userRoles);
         
         boolean isAdmin = userRoles != null && (userRoles.contains("SUPER_ADMIN") || userRoles.contains("ADMIN"));
         
-        if ("all".equals(workspaceId)) {
-            if (!isAdmin) {
-                throw new AccessDeniedException("Only system administrators can access compilation plans across all workspaces.");
-            }
+        if ("GLOBAL".equals(normalizedWorkspaceId) && isAdmin) {
             if (page != null && size != null) {
                 Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt"));
                 Page<SourceCompilationPlan> pagedPlans = sourceCompilationPlanRepository.findAll(pageable);
@@ -642,15 +690,15 @@ public class MrpController {
             return ResponseEntity.ok(plans);
         }
 
-        validateWorkspaceAccess(userId, workspaceId);
+        validateWorkspaceAccess(userId, normalizedWorkspaceId);
 
         if (page != null && size != null) {
             Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt"));
-            Page<SourceCompilationPlan> pagedPlans = sourceCompilationPlanRepository.findByWorkspaceId(workspaceId, pageable);
+            Page<SourceCompilationPlan> pagedPlans = sourceCompilationPlanRepository.findByWorkspaceId(normalizedWorkspaceId, pageable);
             pagedPlans.forEach(this::populateDocumentName);
             return ResponseEntity.ok(pagedPlans);
         }
-        List<SourceCompilationPlan> plans = sourceCompilationPlanRepository.findByWorkspaceId(workspaceId);
+        List<SourceCompilationPlan> plans = sourceCompilationPlanRepository.findByWorkspaceId(normalizedWorkspaceId);
         plans.forEach(this::populateDocumentName);
         return ResponseEntity.ok(plans);
     }
