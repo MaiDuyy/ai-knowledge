@@ -26,6 +26,9 @@ public class WikiPageMetadataDto {
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
     private List<String> links;
+    private String departmentId;
+    private String allowedRoles;
+    private String securityClassification;
 
     private static final Pattern WIKILINK_PATTERN = Pattern.compile("\\[\\[([^\\]|]+)(?:\\|[^\\]]+)?\\]\\]");
 

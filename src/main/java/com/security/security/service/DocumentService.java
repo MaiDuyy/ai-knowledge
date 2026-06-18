@@ -41,7 +41,9 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.Collections;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.security.security.client.WorkspaceServiceClient;
+import com.security.security.dto.UserPermissionContext;
 import org.springframework.security.access.AccessDeniedException;
 
 
@@ -57,6 +59,7 @@ public class DocumentService {
     private final MrpPipelineService mrpPipelineService;
     private final NatsEventPublisher natsEventPublisher;
     private final WorkspaceServiceClient workspaceServiceClient;
+    private final ObjectMapper objectMapper;
     private final ImageProcessingService imageProcessingService;
     private final SourceImageRepository sourceImageRepository;
     private final SourceCompilationPlanRepository sourceCompilationPlanRepository;
@@ -82,61 +85,7 @@ public class DocumentService {
         return false;
     }
 
-    private static class ParsedUserPermissions {
-        boolean isAdmin = false;
-        List<String> deptIdsWhereHead = new ArrayList<>();
-        List<String> deptIdsWhereMember = new ArrayList<>();
-    }
-
-    private ParsedUserPermissions parseUserPermissions(String userRole, String userDepartments) {
-        ParsedUserPermissions permissions = new ParsedUserPermissions();
-        
-        // 1. Check admin status from userRole
-        if (userRole != null) {
-            String upper = userRole.toUpperCase();
-            if (upper.contains("SUPER_ADMIN") || upper.contains("ADMIN") || upper.contains("ORG_ADMIN")) {
-                permissions.isAdmin = true;
-            }
-        }
-        
-        // Double-check from SecurityContextHolder
-        var auth = org.springframework.security.core.context.SecurityContextHolder.getContext().getAuthentication();
-        if (auth != null) {
-            boolean hasAdminAuthority = auth.getAuthorities().stream()
-                    .map(org.springframework.security.core.GrantedAuthority::getAuthority)
-                    .anyMatch(a -> a.equals("ROLE_ADMIN") || a.equals("ROLE_SUPER_ADMIN") || a.equals("ROLE_ORG_ADMIN") || a.contains("ADMIN"));
-            if (hasAdminAuthority) {
-                permissions.isAdmin = true;
-            }
-        }
-        
-        // 2. Parse departments and roles
-        if (userDepartments != null && !userDepartments.trim().isEmpty()) {
-            try {
-                // Parse [{"departmentId": "...", "role": "..."}]
-                com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-                List<Map<String, String>> depts = mapper.readValue(
-                    userDepartments, 
-                    new com.fasterxml.jackson.core.type.TypeReference<List<Map<String, String>>>() {}
-                );
-                for (Map<String, String> dept : depts) {
-                    String deptId = dept.get("departmentId");
-                    String role = dept.get("role");
-                    if (deptId != null && !deptId.trim().isEmpty()) {
-                        if ("HEAD".equalsIgnoreCase(role) || "MANAGER".equalsIgnoreCase(role)) {
-                            permissions.deptIdsWhereHead.add(deptId);
-                        } else {
-                            permissions.deptIdsWhereMember.add(deptId);
-                        }
-                    }
-                }
-            } catch (Exception e) {
-                log.error("Failed to parse x-user-departments header in DocumentService: {}", e.getMessage());
-            }
-        }
-        
-        return permissions;
-    }
+    // Permission parsing delegated to PermissionUtils.parse()
 
     private void validateWorkspaceAccess(String workspaceId, String userId) {
         if (isSystemOrAdmin(userId)) {
@@ -258,9 +207,9 @@ public class DocumentService {
         }
 
         // 3. Permission checks
-        ParsedUserPermissions perms = parseUserPermissions(userRole, userDepartments);
-        boolean hasLeaderPrivilege = perms.isAdmin;
-        if (!hasLeaderPrivilege && targetDeptId != null && perms.deptIdsWhereHead.contains(targetDeptId)) {
+        UserPermissionContext perms = PermissionUtils.parse(userRole, userDepartments, objectMapper);
+        boolean hasLeaderPrivilege = perms.isAdmin();
+        if (!hasLeaderPrivilege && targetDeptId != null && perms.getDeptIdsWhereHead().contains(targetDeptId)) {
             hasLeaderPrivilege = true;
         }
 
@@ -411,8 +360,8 @@ public class DocumentService {
      * Falls back to company-wide listing if workspaceId is null/blank (backward compat).
      */
     private List<Document> filterDocumentsByRole(List<Document> docs, String userId, String requestedWorkspaceId, String userRole, String userDepartments) {
-        ParsedUserPermissions perms = parseUserPermissions(userRole, userDepartments);
-        if (perms.isAdmin) {
+        UserPermissionContext perms = PermissionUtils.parse(userRole, userDepartments, objectMapper);
+        if (perms.isAdmin()) {
             return docs;
         }
 
@@ -452,8 +401,8 @@ public class DocumentService {
 
             // Rules 2+3+4: Department-scoped → must be a member of that department
             if (docDeptId != null && !docDeptId.isBlank()) {
-                boolean isHead = perms.deptIdsWhereHead.contains(docDeptId);
-                boolean isMember = perms.deptIdsWhereMember.contains(docDeptId);
+                boolean isHead = perms.getDeptIdsWhereHead().contains(docDeptId);
+                boolean isMember = perms.getDeptIdsWhereMember().contains(docDeptId);
 
                 if (!isHead && !isMember) continue;
 
@@ -557,8 +506,8 @@ public class DocumentService {
 
     public Document getDocument(Long documentId, String userId, String userRole, String userDepartments) {
         Document doc = getDocument(documentId, userId);
-        ParsedUserPermissions perms = parseUserPermissions(userRole, userDepartments);
-        if (perms.isAdmin) return doc;
+        UserPermissionContext perms = PermissionUtils.parse(userRole, userDepartments, objectMapper);
+        if (perms.isAdmin()) return doc;
 
         String docDeptId = doc.getDepartmentId();
         String docWsId = doc.getWorkspaceId();
@@ -572,8 +521,8 @@ public class DocumentService {
         if (isGlobalScope) return doc;
 
         if (docDeptId != null && !docDeptId.isBlank()) {
-            boolean isHead = perms.deptIdsWhereHead.contains(docDeptId);
-            boolean isMember = perms.deptIdsWhereMember.contains(docDeptId);
+            boolean isHead = perms.getDeptIdsWhereHead().contains(docDeptId);
+            boolean isMember = perms.getDeptIdsWhereMember().contains(docDeptId);
 
             if (!isHead && !isMember) {
                 throw new AccessDeniedException("Bạn không thuộc phòng ban được phép truy cập tài liệu này.");
@@ -986,8 +935,8 @@ public class DocumentService {
                 .orElseThrow(() -> new ApiException("Document not found"));
 
         // 1. Check leader/admin privilege first
-        ParsedUserPermissions perms = parseUserPermissions(userRole, userDepartments);
-        boolean hasLeaderPrivilege = perms.isAdmin;
+        UserPermissionContext perms = PermissionUtils.parse(userRole, userDepartments, objectMapper);
+        boolean hasLeaderPrivilege = perms.isAdmin();
         String docDeptId = document.getDepartmentId();
         if ((docDeptId == null || docDeptId.trim().isEmpty()) && document.getWorkspaceId() != null) {
             Map<String, Object> ws = workspaceServiceClient.getWorkspace(document.getWorkspaceId(), userId);
@@ -995,7 +944,7 @@ public class DocumentService {
                 docDeptId = (String) ws.get("departmentId");
             }
         }
-        if (!hasLeaderPrivilege && docDeptId != null && perms.deptIdsWhereHead.contains(docDeptId)) {
+        if (!hasLeaderPrivilege && docDeptId != null && perms.getDeptIdsWhereHead().contains(docDeptId)) {
             hasLeaderPrivilege = true;
         }
 

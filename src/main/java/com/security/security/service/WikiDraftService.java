@@ -1,5 +1,6 @@
 package com.security.security.service;
 
+import com.security.security.dto.UserPermissionContext;
 import com.security.security.entity.WikiPage;
 import com.security.security.entity.WikiPageDraft;
 import com.security.security.event.NatsEventPublisher;
@@ -183,7 +184,7 @@ public class WikiDraftService {
         });
 
         // Refresh knowledge graph wiki links
-        refreshLinks(targetPage.getId(), targetPage.getSlug(), targetPage.getContent());
+        refreshLinks(targetPage.getId(), targetPage.getSlug(), targetPage.getContent(), targetPage.getWorkspaceId());
 
         // Update draft status
         draft.setStatus("APPROVED");
@@ -193,16 +194,15 @@ public class WikiDraftService {
         return saved;
     }
 
-    private void refreshLinks(Long fromPageId, String fromSlug, String contentMd) {
+    private void refreshLinks(Long fromPageId, String fromSlug, String contentMd, String workspaceId) {
         try {
             wikiLinkRepository.deleteByFromPageId(fromPageId);
             List<String> targets = com.security.security.dto.WikiPageMetadataDto.extractLinks(contentMd);
             if (targets == null || targets.isEmpty()) {
                 return;
             }
-            
-            // Fetch all existing pages to match titles and slugs dynamically
-            List<WikiPage> allPages = wikiPageRepository.findAll();
+
+            List<WikiPage> allPages = wikiPageRepository.findByWorkspaceId(workspaceId);
             
             java.util.Set<String> uniqueSlugs = new java.util.HashSet<>();
             for (String target : targets) {
@@ -312,8 +312,9 @@ public class WikiDraftService {
     /**
      * Auto link draft content by inserting double bracket links around keywords matching existing slugs
      */
-    public String autoLinkDraftContent(String content, String workspaceId) {
-        List<WikiPage> pages = wikiPageRepository.findByWorkspaceId(workspaceId);
+    public String autoLinkDraftContent(String content, String workspaceId, UserPermissionContext perm) {
+        List<WikiPage> pages = wikiPageRepository.findAccessiblePages(
+                workspaceId, null, perm.isAdmin(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
         if (pages.isEmpty()) {
             return content;
         }

@@ -95,6 +95,9 @@ public interface WikiPageRepository extends JpaRepository<WikiPage, Long> {
         Integer getVersion();
         java.time.LocalDateTime getCreatedAt();
         java.time.LocalDateTime getUpdatedAt();
+        String getDepartmentId();
+        String getAllowedRoles();
+        String getSecurityClassification();
     }
 
     @Query("SELECT w FROM WikiPage w WHERE ((w.workspaceId = :workspaceId OR (:workspaceId IN ('default-workspace', 'workspace-default') AND (w.workspaceId = '' OR w.workspaceId IS NULL OR w.workspaceId = 'default-workspace' OR w.workspaceId = 'workspace-default') AND (w.departmentId IS NULL OR w.departmentId = '')))"
