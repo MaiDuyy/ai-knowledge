@@ -16,6 +16,8 @@ import java.util.Optional;
 public interface WikiPageRepository extends JpaRepository<WikiPage, Long> {
     List<WikiPage> findBySourceDocumentId(Long sourceDocumentId);
 
+    List<WikiPage> findBySummaryContaining(String summaryPattern);
+
     @org.springframework.data.jpa.repository.Modifying
     @org.springframework.transaction.annotation.Transactional
     void deleteBySourceDocumentId(Long sourceDocumentId);
@@ -81,7 +83,8 @@ public interface WikiPageRepository extends JpaRepository<WikiPage, Long> {
          + "))) AND ("
          + ":isAdmin = true OR "
          + "w.securityClassification = com.security.security.entity.enumeration.SecurityClassification.PUBLIC OR "
-         + "(w.departmentId IS NULL OR w.departmentId = '' OR w.departmentId = 'ALL' OR w.departmentId = 'GLOBAL') OR "
+         + "((w.departmentId IS NULL OR w.departmentId = '' OR w.departmentId = 'ALL' OR w.departmentId = 'GLOBAL') "
+         + "  AND (w.allowedRoles IS NULL OR w.allowedRoles = '' OR w.allowedRoles != 'HEAD' OR :hasHeadRole = true)) OR "
          + "(w.departmentId IN :deptIdsWhereHead) OR "
          + "(w.departmentId IN :deptIdsWhereMember AND (w.allowedRoles IS NULL OR w.allowedRoles = '' OR w.allowedRoles != 'HEAD'))"
          + ")")
@@ -89,6 +92,7 @@ public interface WikiPageRepository extends JpaRepository<WikiPage, Long> {
         @Param("workspaceId") String workspaceId,
         @Param("workspaceDeptId") String workspaceDeptId,
         @Param("isAdmin") boolean isAdmin,
+        @Param("hasHeadRole") boolean hasHeadRole,
         @Param("deptIdsWhereHead") List<String> deptIdsWhereHead,
         @Param("deptIdsWhereMember") List<String> deptIdsWhereMember
     );
@@ -104,7 +108,8 @@ public interface WikiPageRepository extends JpaRepository<WikiPage, Long> {
          + "))) AND ("
          + ":isAdmin = true OR "
          + "w.securityClassification = com.security.security.entity.enumeration.SecurityClassification.PUBLIC OR "
-         + "(w.departmentId IS NULL OR w.departmentId = '' OR w.departmentId = 'ALL' OR w.departmentId = 'GLOBAL') OR "
+         + "((w.departmentId IS NULL OR w.departmentId = '' OR w.departmentId = 'ALL' OR w.departmentId = 'GLOBAL') "
+         + "  AND (w.allowedRoles IS NULL OR w.allowedRoles = '' OR w.allowedRoles != 'HEAD' OR :hasHeadRole = true)) OR "
          + "(w.departmentId IN :deptIdsWhereHead) OR "
          + "(w.departmentId IN :deptIdsWhereMember AND (w.allowedRoles IS NULL OR w.allowedRoles = '' OR w.allowedRoles != 'HEAD'))"
          + ")")
@@ -112,6 +117,7 @@ public interface WikiPageRepository extends JpaRepository<WikiPage, Long> {
         @Param("workspaceId") String workspaceId,
         @Param("workspaceDeptId") String workspaceDeptId,
         @Param("isAdmin") boolean isAdmin,
+        @Param("hasHeadRole") boolean hasHeadRole,
         @Param("deptIdsWhereHead") List<String> deptIdsWhereHead,
         @Param("deptIdsWhereMember") List<String> deptIdsWhereMember,
         Pageable pageable
@@ -144,7 +150,8 @@ public interface WikiPageRepository extends JpaRepository<WikiPage, Long> {
          + "))) AND ("
          + ":isAdmin = true OR "
          + "w.securityClassification = com.security.security.entity.enumeration.SecurityClassification.PUBLIC OR "
-         + "(w.departmentId IS NULL OR w.departmentId = '' OR w.departmentId = 'ALL' OR w.departmentId = 'GLOBAL') OR "
+         + "((w.departmentId IS NULL OR w.departmentId = '' OR w.departmentId = 'ALL' OR w.departmentId = 'GLOBAL') "
+         + "  AND (w.allowedRoles IS NULL OR w.allowedRoles = '' OR w.allowedRoles != 'HEAD' OR :hasHeadRole = true)) OR "
          + "(w.departmentId IN :deptIdsWhereHead) OR "
          + "(w.departmentId IN :deptIdsWhereMember AND (w.allowedRoles IS NULL OR w.allowedRoles = '' OR w.allowedRoles != 'HEAD'))"
          + ")")
@@ -152,6 +159,7 @@ public interface WikiPageRepository extends JpaRepository<WikiPage, Long> {
         @Param("workspaceId") String workspaceId,
         @Param("workspaceDeptId") String workspaceDeptId,
         @Param("isAdmin") boolean isAdmin,
+        @Param("hasHeadRole") boolean hasHeadRole,
         @Param("deptIdsWhereHead") List<String> deptIdsWhereHead,
         @Param("deptIdsWhereMember") List<String> deptIdsWhereMember
     );
@@ -159,12 +167,14 @@ public interface WikiPageRepository extends JpaRepository<WikiPage, Long> {
     @Query("SELECT w FROM WikiPage w WHERE ("
          + ":isAdmin = true OR "
          + "w.securityClassification = com.security.security.entity.enumeration.SecurityClassification.PUBLIC OR "
-         + "(w.departmentId IS NULL OR w.departmentId = '' OR w.departmentId = 'ALL' OR w.departmentId = 'GLOBAL') OR "
+         + "((w.departmentId IS NULL OR w.departmentId = '' OR w.departmentId = 'ALL' OR w.departmentId = 'GLOBAL') "
+         + "  AND (w.allowedRoles IS NULL OR w.allowedRoles = '' OR w.allowedRoles != 'HEAD' OR :hasHeadRole = true)) OR "
          + "(w.departmentId IN :deptIdsWhereHead) OR "
          + "(w.departmentId IN :deptIdsWhereMember AND (w.allowedRoles IS NULL OR w.allowedRoles = '' OR w.allowedRoles != 'HEAD'))"
          + ")")
     List<WikiPageMetadata> findAllAccessibleMetadata(
         @Param("isAdmin") boolean isAdmin,
+        @Param("hasHeadRole") boolean hasHeadRole,
         @Param("deptIdsWhereHead") List<String> deptIdsWhereHead,
         @Param("deptIdsWhereMember") List<String> deptIdsWhereMember
     );
@@ -182,7 +192,8 @@ public interface WikiPageRepository extends JpaRepository<WikiPage, Long> {
          + "))) AND ("
          + ":isAdmin = true OR "
          + "w.securityClassification = com.security.security.entity.enumeration.SecurityClassification.PUBLIC OR "
-         + "(w.departmentId IS NULL OR w.departmentId = '' OR w.departmentId = 'ALL' OR w.departmentId = 'GLOBAL') OR "
+         + "((w.departmentId IS NULL OR w.departmentId = '' OR w.departmentId = 'ALL' OR w.departmentId = 'GLOBAL') "
+         + "  AND (w.allowedRoles IS NULL OR w.allowedRoles = '' OR w.allowedRoles != 'HEAD' OR :hasHeadRole = true)) OR "
          + "(w.departmentId IN :deptIdsWhereHead) OR "
          + "(w.departmentId IN :deptIdsWhereMember AND (w.allowedRoles IS NULL OR w.allowedRoles = '' OR w.allowedRoles != 'HEAD'))"
          + ") AND (LOWER(w.title) LIKE LOWER(CONCAT('%', :query, '%')) OR LOWER(w.content) LIKE LOWER(CONCAT('%', :query, '%')))")
@@ -190,6 +201,7 @@ public interface WikiPageRepository extends JpaRepository<WikiPage, Long> {
         @Param("workspaceId") String workspaceId,
         @Param("workspaceDeptId") String workspaceDeptId,
         @Param("isAdmin") boolean isAdmin,
+        @Param("hasHeadRole") boolean hasHeadRole,
         @Param("deptIdsWhereHead") List<String> deptIdsWhereHead,
         @Param("deptIdsWhereMember") List<String> deptIdsWhereMember,
         @Param("query") String query

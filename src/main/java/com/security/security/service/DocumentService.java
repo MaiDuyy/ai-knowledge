@@ -358,82 +358,26 @@ public class DocumentService {
      * Get documents scoped by workspaceId.
      * Falls back to company-wide listing if workspaceId is null/blank (backward compat).
      */
-    private List<Document> filterDocumentsByRole(List<Document> docs, String userId, String requestedWorkspaceId, String userRole, String userDepartments) {
-        UserPermissionContext perms = PermissionUtils.parse(userRole, userDepartments, objectMapper);
-        if (perms.isAdmin()) {
-            return docs;
-        }
-
-        String normRequestedWorkspaceId = ScopeNormalizer.normalizeWorkspace(requestedWorkspaceId);
-
-        List<Document> filtered = new java.util.ArrayList<>();
-        for (Document doc : docs) {
-            String docDeptId = ScopeNormalizer.normalizeDepartment(doc.getDepartmentId());
-            String docWsId = ScopeNormalizer.normalizeWorkspace(doc.getWorkspaceId());
-            String allowed = doc.getAllowedRoles();
-
-            boolean isGlobalScope = ("ALL".equals(docDeptId) || "GLOBAL".equals(docDeptId)) && ("ALL".equals(docWsId) || "GLOBAL".equals(docWsId));
-
-            // Rule 1: Global scope (no dept, default/empty workspace) → visible to all users
-            if (isGlobalScope) {
-                filtered.add(doc);
-                continue;
-            }
-
-            // Workspace-specific validation for global queries
-            if ("ALL".equals(normRequestedWorkspaceId) || "GLOBAL".equals(normRequestedWorkspaceId)) {
-                if (!"ALL".equals(docWsId) && !"GLOBAL".equals(docWsId)) {
-                    try {
-                        var ws = workspaceServiceClient.getWorkspace(docWsId, userId);
-                        if (ws.isEmpty()) {
-                            continue; // No access to this workspace, exclude
-                        }
-                    } catch (Exception e) {
-                        log.warn("Failed to check workspace access for workspaceId={} and userId={}: {}", docWsId, userId, e.getMessage());
-                        continue; // Exclude on error to be safe
-                    }
-                }
-            }
-
-            // Rules 2+3+4: Department-scoped → must be a member of that department
-            if (!"ALL".equals(docDeptId) && !"GLOBAL".equals(docDeptId)) {
-                boolean isHead = perms.getDeptIdsWhereHead().contains(docDeptId);
-                boolean isMember = perms.getDeptIdsWhereMember().contains(docDeptId);
-
-                if (!isHead && !isMember) continue;
-
-                if (allowed == null || allowed.isBlank() || "ALL".equalsIgnoreCase(allowed)) {
-                    filtered.add(doc);
-                } else if ("HEAD".equalsIgnoreCase(allowed) && isHead) {
-                    filtered.add(doc);
-                } else if ("MEMBER".equalsIgnoreCase(allowed) && (isMember || isHead)) {
-                    filtered.add(doc);
-                }
-                continue;
-            }
-
-            // Workspace-specific but no department → workspace access already validated (or checked above)
-            filtered.add(doc);
-        }
-        return filtered;
-    }
-
     /**
      * Get documents scoped by workspaceId.
      * Falls back to company-wide listing if workspaceId is null/blank (backward compat).
      */
     public List<Document> getDocuments(String userId, String workspaceId, String userRole, String userDepartments) {
+        UserPermissionContext perms = PermissionUtils.parse(userRole, userDepartments, objectMapper);
         if ("all".equalsIgnoreCase(workspaceId)) {
-            UserPermissionContext perms = PermissionUtils.parse(userRole, userDepartments, objectMapper);
-            List<Document> docs = documentRepository.findAllByOrderByCreatedAtDesc();
             if (perms.isAdmin()) {
-                return docs;
+                return documentRepository.findAllByOrderByCreatedAtDesc();
             }
-            return filterDocumentsByRole(docs, userId, "all", userRole, userDepartments);
+            return documentRepository.findAccessibleAllOrderByCreatedAtDesc(
+                perms.isAdmin(),
+                perms.hasHeadRole(),
+                perms.getDeptIdsWhereHead(),
+                perms.getDeptIdsWhereMember()
+            );
         }
         String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
         validateWorkspaceAccess(normalizedWorkspaceId, userId);
-        List<Document> docs;
+
         if (!"ALL".equals(normalizedWorkspaceId) && !"GLOBAL".equals(normalizedWorkspaceId)) {
             String departmentId = null;
             try {
@@ -446,34 +390,51 @@ public class DocumentService {
             }
             String normalizedDeptId = ScopeNormalizer.normalizeDepartment(departmentId);
             if (!"ALL".equals(normalizedDeptId) && !"GLOBAL".equals(normalizedDeptId)) {
-                docs = documentRepository.findByWorkspaceIdOrDepartmentIdAndWorkspaceIdEmpty(normalizedWorkspaceId, normalizedDeptId);
+                return documentRepository.findAccessibleByWorkspaceIdOrDepartmentIdAndWorkspaceIdEmpty(
+                    normalizedWorkspaceId,
+                    normalizedDeptId,
+                    perms.isAdmin(),
+                    perms.hasHeadRole(),
+                    perms.getDeptIdsWhereHead(),
+                    perms.getDeptIdsWhereMember()
+                );
             } else {
-                docs = documentRepository.findByWorkspaceIdOrderByCreatedAtDesc(normalizedWorkspaceId);
+                return documentRepository.findAccessibleByWorkspaceIdOrderByCreatedAtDesc(
+                    normalizedWorkspaceId,
+                    perms.isAdmin(),
+                    perms.hasHeadRole(),
+                    perms.getDeptIdsWhereHead(),
+                    perms.getDeptIdsWhereMember()
+                );
             }
         } else {
-            docs = new java.util.ArrayList<>();
-            docs.addAll(documentRepository.findByWorkspaceIdOrderByCreatedAtDesc("ALL"));
-            docs.addAll(documentRepository.findByWorkspaceIdOrderByCreatedAtDesc("GLOBAL"));
+            return documentRepository.findAccessibleByWorkspaceIdOrderByCreatedAtDesc(
+                "ALL",
+                perms.isAdmin(),
+                perms.hasHeadRole(),
+                perms.getDeptIdsWhereHead(),
+                perms.getDeptIdsWhereMember()
+            );
         }
-        return filterDocumentsByRole(docs, userId, normalizedWorkspaceId, userRole, userDepartments);
     }
 
     public Page<Document> getDocuments(String userId, String workspaceId, Pageable pageable, String userRole, String userDepartments) {
+        UserPermissionContext perms = PermissionUtils.parse(userRole, userDepartments, objectMapper);
         if ("all".equalsIgnoreCase(workspaceId)) {
-            UserPermissionContext perms = PermissionUtils.parse(userRole, userDepartments, objectMapper);
             if (perms.isAdmin()) {
                 return documentRepository.findAllByOrderByCreatedAtDesc(pageable);
             }
-            List<Document> allDocs = documentRepository.findAllByOrderByCreatedAtDesc();
-            List<Document> filteredList = filterDocumentsByRole(allDocs, userId, "all", userRole, userDepartments);
-            int start = (int) pageable.getOffset();
-            int end = Math.min((start + pageable.getPageSize()), filteredList.size());
-            List<Document> sub = (start <= filteredList.size()) ? filteredList.subList(start, end) : Collections.emptyList();
-            return new org.springframework.data.domain.PageImpl<>(sub, pageable, filteredList.size());
+            return documentRepository.findAccessibleAllOrderByCreatedAtDesc(
+                perms.isAdmin(),
+                perms.hasHeadRole(),
+                perms.getDeptIdsWhereHead(),
+                perms.getDeptIdsWhereMember(),
+                pageable
+            );
         }
         String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
         validateWorkspaceAccess(normalizedWorkspaceId, userId);
-        Page<Document> page;
+
         if (!"ALL".equals(normalizedWorkspaceId) && !"GLOBAL".equals(normalizedWorkspaceId)) {
             String departmentId = null;
             try {
@@ -486,18 +447,35 @@ public class DocumentService {
             }
             String normalizedDeptId = ScopeNormalizer.normalizeDepartment(departmentId);
             if (!"ALL".equals(normalizedDeptId) && !"GLOBAL".equals(normalizedDeptId)) {
-                page = documentRepository.findByWorkspaceIdOrDepartmentIdAndWorkspaceIdEmpty(normalizedWorkspaceId, normalizedDeptId, pageable);
+                return documentRepository.findAccessibleByWorkspaceIdOrDepartmentIdAndWorkspaceIdEmpty(
+                    normalizedWorkspaceId,
+                    normalizedDeptId,
+                    perms.isAdmin(),
+                    perms.hasHeadRole(),
+                    perms.getDeptIdsWhereHead(),
+                    perms.getDeptIdsWhereMember(),
+                    pageable
+                );
             } else {
-                page = documentRepository.findByWorkspaceIdOrderByCreatedAtDesc(normalizedWorkspaceId, pageable);
+                return documentRepository.findAccessibleByWorkspaceIdOrderByCreatedAtDesc(
+                    normalizedWorkspaceId,
+                    perms.isAdmin(),
+                    perms.hasHeadRole(),
+                    perms.getDeptIdsWhereHead(),
+                    perms.getDeptIdsWhereMember(),
+                    pageable
+                );
             }
         } else {
-            page = documentRepository.findByWorkspaceIdOrderByCreatedAtDesc("ALL", pageable);
-            if (page.isEmpty() || page.getTotalElements() == 0) {
-                page = documentRepository.findByWorkspaceIdOrderByCreatedAtDesc("GLOBAL", pageable);
-            }
+            return documentRepository.findAccessibleByWorkspaceIdOrderByCreatedAtDesc(
+                "ALL",
+                perms.isAdmin(),
+                perms.hasHeadRole(),
+                perms.getDeptIdsWhereHead(),
+                perms.getDeptIdsWhereMember(),
+                pageable
+            );
         }
-        List<Document> filteredList = filterDocumentsByRole(page.getContent(), userId, normalizedWorkspaceId, userRole, userDepartments);
-        return new org.springframework.data.domain.PageImpl<>(filteredList, pageable, page.getTotalElements());
     }
 
     public List<Document> getUserDocuments(String userId) {
@@ -534,9 +512,15 @@ public class DocumentService {
         String docWsId = ScopeNormalizer.normalizeWorkspace(doc.getWorkspaceId());
         String allowed = doc.getAllowedRoles();
 
-        boolean isGlobalScope = ("ALL".equals(docDeptId) || "GLOBAL".equals(docDeptId)) && ("ALL".equals(docWsId) || "GLOBAL".equals(docWsId));
+        boolean isGlobalScope = ("ALL".equals(docDeptId) || "GLOBAL".equals(docDeptId) || docDeptId == null || docDeptId.isBlank()) 
+            && ("ALL".equals(docWsId) || "GLOBAL".equals(docWsId) || docWsId == null || docWsId.isBlank());
 
-        if (isGlobalScope) return doc;
+        if (isGlobalScope) {
+            if ("HEAD".equalsIgnoreCase(allowed) && !perms.hasHeadRole()) {
+                throw new AccessDeniedException("Chỉ Trưởng phòng hoặc Quản trị viên mới được phép truy cập tài liệu này.");
+            }
+            return doc;
+        }
 
         if (docDeptId != null && !docDeptId.isBlank()) {
             boolean isHead = perms.getDeptIdsWhereHead().contains(docDeptId);
@@ -616,6 +600,10 @@ public class DocumentService {
 
         // 4. Delete related WikiPages and their associated drafts & links
         List<WikiPage> wikiPages = wikiPageRepository.findBySourceDocumentId(documentId);
+        if (wikiPages.isEmpty()) {
+            String targetSummary = "Compiled from document ID: " + documentId;
+            wikiPages = wikiPageRepository.findBySummaryContaining(targetSummary);
+        }
         for (WikiPage page : wikiPages) {
             try {
                 wikiPageDraftRepository.deleteByWikiPageId(page.getId());
@@ -627,9 +615,11 @@ public class DocumentService {
             } catch (Exception e) {
                 log.warn("Could not delete wiki links from page {}: {}", page.getId(), e.getMessage());
             }
-        }
-        if (!wikiPages.isEmpty()) {
-            wikiPageRepository.deleteBySourceDocumentId(documentId);
+            try {
+                wikiPageRepository.delete(page);
+            } catch (Exception e) {
+                log.warn("Could not delete wiki page {}: {}", page.getId(), e.getMessage());
+            }
         }
 
         // 5. Delete other logical associations
@@ -1028,6 +1018,63 @@ public class DocumentService {
         }
 
         Document saved = documentRepository.save(document);
+
+        // 1. Cascade changes to compiled WikiPages and their associated drafts
+        List<WikiPage> pages = wikiPageRepository.findBySourceDocumentId(saved.getId());
+        if (pages.isEmpty()) {
+            String targetSummary = "Compiled from document ID: " + saved.getId();
+            pages = wikiPageRepository.findBySummaryContaining(targetSummary);
+            for (WikiPage page : pages) {
+                page.setSourceDocumentId(saved.getId());
+            }
+        }
+        for (WikiPage page : pages) {
+            page.setAllowedRoles(saved.getAllowedRoles());
+            page.setDepartmentId(saved.getDepartmentId());
+            page.setSecurityClassification(saved.getSecurityClassification());
+            page.setWorkspaceId(saved.getWorkspaceId());
+            wikiPageRepository.save(page);
+
+            // Cascade changes to WikiPage embeddings in the VectorStore
+            try {
+                embeddingService.updateWikiPageEmbeddingsMetadata(
+                        page.getId(),
+                        page.getWorkspaceId(),
+                        page.getDepartmentId(),
+                        page.getAllowedRoles(),
+                        page.getSecurityClassification() != null ? page.getSecurityClassification().name() : null
+                );
+            } catch (Exception e) {
+                log.error("[DocumentService] Failed to cascade metadata updates to wiki page {} embeddings: {}", page.getId(), e.getMessage());
+            }
+
+            // Cascade to associated drafts
+            List<com.security.security.entity.WikiPageDraft> drafts = wikiPageDraftRepository.findByWikiPageId(page.getId());
+            for (com.security.security.entity.WikiPageDraft draft : drafts) {
+                draft.setAllowedRoles(saved.getAllowedRoles());
+                draft.setDepartmentId(saved.getDepartmentId());
+                draft.setSecurityClassification(saved.getSecurityClassification());
+                draft.setWorkspaceId(saved.getWorkspaceId());
+                if (draft.getSourceDocumentId() == null) {
+                    draft.setSourceDocumentId(saved.getId());
+                }
+                wikiPageDraftRepository.save(draft);
+            }
+        }
+
+        // 2. Cascade changes to embeddings and pgvector store metadata
+        try {
+            embeddingService.updateEmbeddingsMetadata(
+                    saved.getId(),
+                    saved.getWorkspaceId(),
+                    saved.getDepartmentId(),
+                    saved.getAllowedRoles(),
+                    saved.getSecurityClassification() != null ? saved.getSecurityClassification().name() : null
+            );
+        } catch (Exception e) {
+            log.error("[DocumentService] Failed to cascade metadata updates to document embeddings: {}", e.getMessage());
+        }
+
         // Publish event to NATS for real-time frontend update
         natsEventPublisher.publishDocumentStatus(saved.getId(), saved.getUserId(), saved.getWorkspaceId(), saved.getStatus().name());
         return saved;

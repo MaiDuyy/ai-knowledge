@@ -29,14 +29,15 @@ public interface WikiPageDraftRepository extends JpaRepository<WikiPageDraft, Lo
          + " OR (wd.workspaceId = 'all' AND :workspaceId != 'default-workspace')) AND ("
          + ":isAdmin = true OR "
          + "wd.securityClassification = com.security.security.entity.enumeration.SecurityClassification.PUBLIC OR "
-         + "((wd.workspaceId = :workspaceId OR (:workspaceId IN ('default-workspace', 'workspace-default') AND (wd.workspaceId = '' OR wd.workspaceId IS NULL OR wd.workspaceId = 'default-workspace' OR wd.workspaceId = 'workspace-default'))) AND wd.allowedRoles != 'HEAD') OR "
-         + "(wd.securityClassification = com.security.security.entity.enumeration.SecurityClassification.INTERNAL AND (wd.departmentId IS NULL OR wd.departmentId = '')) OR "
+         + "((wd.departmentId IS NULL OR wd.departmentId = '' OR wd.departmentId = 'ALL' OR wd.departmentId = 'GLOBAL') "
+         + "  AND (wd.allowedRoles IS NULL OR wd.allowedRoles = '' OR wd.allowedRoles != 'HEAD' OR :hasHeadRole = true)) OR "
          + "(wd.departmentId IN :deptIdsWhereHead) OR "
          + "(wd.departmentId IN :deptIdsWhereMember AND wd.allowedRoles != 'HEAD')"
          + ")")
     List<WikiPageDraft> findAccessibleDrafts(
         @Param("workspaceId") String workspaceId,
         @Param("isAdmin") boolean isAdmin,
+        @Param("hasHeadRole") boolean hasHeadRole,
         @Param("deptIdsWhereHead") List<String> deptIdsWhereHead,
         @Param("deptIdsWhereMember") List<String> deptIdsWhereMember
     );
@@ -45,8 +46,8 @@ public interface WikiPageDraftRepository extends JpaRepository<WikiPageDraft, Lo
          + " OR (wd.workspaceId = 'all' AND :workspaceId != 'default-workspace')) AND wd.status = :status AND ("
          + ":isAdmin = true OR "
          + "wd.securityClassification = com.security.security.entity.enumeration.SecurityClassification.PUBLIC OR "
-         + "((wd.workspaceId = :workspaceId OR (:workspaceId IN ('default-workspace', 'workspace-default') AND (wd.workspaceId = '' OR wd.workspaceId IS NULL OR wd.workspaceId = 'default-workspace' OR wd.workspaceId = 'workspace-default'))) AND wd.allowedRoles != 'HEAD') OR "
-         + "(wd.securityClassification = com.security.security.entity.enumeration.SecurityClassification.INTERNAL AND (wd.departmentId IS NULL OR wd.departmentId = '')) OR "
+         + "((wd.departmentId IS NULL OR wd.departmentId = '' OR wd.departmentId = 'ALL' OR wd.departmentId = 'GLOBAL') "
+         + "  AND (wd.allowedRoles IS NULL OR wd.allowedRoles = '' OR wd.allowedRoles != 'HEAD' OR :hasHeadRole = true)) OR "
          + "(wd.departmentId IN :deptIdsWhereHead) OR "
          + "(wd.departmentId IN :deptIdsWhereMember AND wd.allowedRoles != 'HEAD')"
          + ")")
@@ -54,6 +55,7 @@ public interface WikiPageDraftRepository extends JpaRepository<WikiPageDraft, Lo
         @Param("workspaceId") String workspaceId,
         @Param("status") WikiPageDraftStatus status,
         @Param("isAdmin") boolean isAdmin,
+        @Param("hasHeadRole") boolean hasHeadRole,
         @Param("deptIdsWhereHead") List<String> deptIdsWhereHead,
         @Param("deptIdsWhereMember") List<String> deptIdsWhereMember
     );
@@ -62,8 +64,8 @@ public interface WikiPageDraftRepository extends JpaRepository<WikiPageDraft, Lo
          + " OR (wd.workspaceId = 'all' AND :workspaceId != 'default-workspace')) AND wd.status = :status AND ("
          + ":isAdmin = true OR "
          + "wd.securityClassification = com.security.security.entity.enumeration.SecurityClassification.PUBLIC OR "
-         + "((wd.workspaceId = :workspaceId OR (:workspaceId IN ('default-workspace', 'workspace-default') AND (wd.workspaceId = '' OR wd.workspaceId IS NULL OR wd.workspaceId = 'default-workspace' OR wd.workspaceId = 'workspace-default'))) AND wd.allowedRoles != 'HEAD') OR "
-         + "(wd.securityClassification = com.security.security.entity.enumeration.SecurityClassification.INTERNAL AND (wd.departmentId IS NULL OR wd.departmentId = '')) OR "
+         + "((wd.departmentId IS NULL OR wd.departmentId = '' OR wd.departmentId = 'ALL' OR wd.departmentId = 'GLOBAL') "
+         + "  AND (wd.allowedRoles IS NULL OR wd.allowedRoles = '' OR wd.allowedRoles != 'HEAD' OR :hasHeadRole = true)) OR "
          + "(wd.departmentId IN :deptIdsWhereHead) OR "
          + "(wd.departmentId IN :deptIdsWhereMember AND wd.allowedRoles != 'HEAD')"
          + ")")
@@ -71,6 +73,7 @@ public interface WikiPageDraftRepository extends JpaRepository<WikiPageDraft, Lo
         @Param("workspaceId") String workspaceId,
         @Param("status") WikiPageDraftStatus status,
         @Param("isAdmin") boolean isAdmin,
+        @Param("hasHeadRole") boolean hasHeadRole,
         @Param("deptIdsWhereHead") List<String> deptIdsWhereHead,
         @Param("deptIdsWhereMember") List<String> deptIdsWhereMember,
         Pageable pageable

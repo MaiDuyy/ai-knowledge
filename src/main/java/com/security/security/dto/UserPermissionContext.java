@@ -15,4 +15,9 @@ public class UserPermissionContext {
     public boolean hasWorkspaceRole(String role) {
         return workspaceRoles.stream().anyMatch(r -> r.equalsIgnoreCase(role));
     }
+
+    public boolean hasHeadRole() {
+        return deptIdsWhereHead != null && !deptIdsWhereHead.isEmpty() &&
+               !(deptIdsWhereHead.size() == 1 && "DUMMY_DEPT_ID".equals(deptIdsWhereHead.get(0)));
+    }
 }

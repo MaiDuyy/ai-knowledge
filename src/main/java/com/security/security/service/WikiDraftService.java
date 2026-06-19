@@ -113,6 +113,9 @@ public class WikiDraftService {
             targetPage.setDepartmentId(targetDeptId);
             targetPage.setAllowedRoles(draft.getAllowedRoles() != null ? draft.getAllowedRoles() : "ALL");
             targetPage.setSecurityClassification(draft.getSecurityClassification() != null ? draft.getSecurityClassification() : SecurityClassification.INTERNAL);
+            if (draft.getSourceDocumentId() != null) {
+                targetPage.setSourceDocumentId(draft.getSourceDocumentId());
+            }
             
             // JPA handles @Version increments automatically
             targetPage = wikiPageRepository.save(targetPage);
@@ -142,6 +145,9 @@ public class WikiDraftService {
                 targetPage.setDepartmentId(targetDeptId);
                 targetPage.setAllowedRoles(draft.getAllowedRoles() != null ? draft.getAllowedRoles() : "ALL");
                 targetPage.setSecurityClassification(draft.getSecurityClassification() != null ? draft.getSecurityClassification() : SecurityClassification.INTERNAL);
+                if (draft.getSourceDocumentId() != null) {
+                    targetPage.setSourceDocumentId(draft.getSourceDocumentId());
+                }
                 targetPage = wikiPageRepository.save(targetPage);
             } else {
                 log.info("[WikiDraftService] Creating new WikiPage '{}' from draft", draft.getTitle());
@@ -156,6 +162,7 @@ public class WikiDraftService {
                         .securityClassification(draft.getSecurityClassification() != null ? draft.getSecurityClassification() : SecurityClassification.INTERNAL)
                         .pageType(draft.getPageType())
                         .summary(draft.getSummary())
+                        .sourceDocumentId(draft.getSourceDocumentId())
                         .build();
 
                 targetPage = wikiPageRepository.save(targetPage);
@@ -430,7 +437,7 @@ public class WikiDraftService {
     public String autoLinkDraftContent(String content, String workspaceId, UserPermissionContext perm) {
         String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
         List<WikiPage> pages = wikiPageRepository.findAccessiblePages(
-                normalizedWorkspaceId, null, perm.isAdmin(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
+                normalizedWorkspaceId, null, perm.isAdmin(), perm.hasHeadRole(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
         if (pages.isEmpty()) {
             return content;
         }

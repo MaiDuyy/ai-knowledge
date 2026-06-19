@@ -29,6 +29,9 @@ public class WikiPageDraft {
     @Column(name = "wiki_page_id")
     private Long wikiPageId; // Nullable (for new page creations)
 
+    @Column(name = "source_document_id")
+    private Long sourceDocumentId;
+
     @Column(nullable = false, length = 255)
     private String slug;
 

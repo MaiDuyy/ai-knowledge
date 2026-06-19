@@ -213,7 +213,7 @@ class MrpControllerTest {
         Mockito.when(page2.getPageType()).thenReturn(com.security.security.entity.enumeration.WikiPageType.ENTITY);
 
         Mockito.when(wikiPageRepository.findAccessibleMetadata(
-                Mockito.eq(workspaceId), Mockito.any(), Mockito.eq(false), Mockito.anyList(), Mockito.anyList()))
+                Mockito.eq(workspaceId), Mockito.any(), Mockito.eq(false), Mockito.anyBoolean(), Mockito.anyList(), Mockito.anyList()))
                 .thenReturn(java.util.List.of(page1, page2));
 
         // Mock links: link from 1 to 2 (valid), link from 1 to 3 (invalid/not accessible)

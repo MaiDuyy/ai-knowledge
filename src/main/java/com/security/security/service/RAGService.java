@@ -553,6 +553,7 @@ public class RAGService {
                 if (deptId != null && !deptId.trim().isEmpty()) {
                     if ("HEAD".equalsIgnoreCase(role) || "MANAGER".equalsIgnoreCase(role)) {
                         deptIdsWhereHead.add(deptId);
+                        deptIdsWhereMember.add(deptId);
                     } else {
                         deptIdsWhereMember.add(deptId);
                     }
@@ -754,12 +755,15 @@ public class RAGService {
                     if (deptId != null && !deptId.trim().isEmpty()) {
                         if ("HEAD".equalsIgnoreCase(role) || "MANAGER".equalsIgnoreCase(role)) {
                             deptIdsWhereHead.add(deptId);
+                            deptIdsWhereMember.add(deptId);
                         } else {
                             deptIdsWhereMember.add(deptId);
                         }
                     }
                 }
             }
+            boolean hasHeadRole = !deptIdsWhereHead.isEmpty();
+
             if (deptIdsWhereHead.isEmpty()) deptIdsWhereHead.add("DUMMY_DEPT_ID");
             if (deptIdsWhereMember.isEmpty()) deptIdsWhereMember.add("DUMMY_DEPT_ID");
 
@@ -796,7 +800,7 @@ public class RAGService {
             }
 
             keywordPages = wikiPageRepository.searchAccessiblePagesByKeyword(
-                resolvedWorkspaceId, workspaceDeptId, isAdmin, deptIdsWhereHead, deptIdsWhereMember, query
+                resolvedWorkspaceId, workspaceDeptId, isAdmin, hasHeadRole, deptIdsWhereHead, deptIdsWhereMember, query
             );
             if (pageType != null && !pageType.trim().isEmpty()) {
                 final String pt = pageType.trim();

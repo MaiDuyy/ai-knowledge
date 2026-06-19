@@ -54,6 +54,7 @@ public final class PermissionUtils {
                     if (deptId != null && !deptId.trim().isEmpty()) {
                         if ("HEAD".equalsIgnoreCase(role) || "MANAGER".equalsIgnoreCase(role)) {
                             ctx.getDeptIdsWhereHead().add(deptId);
+                            ctx.getDeptIdsWhereMember().add(deptId);
                         } else {
                             ctx.getDeptIdsWhereMember().add(deptId);
                         }

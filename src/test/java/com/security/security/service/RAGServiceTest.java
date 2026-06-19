@@ -122,7 +122,7 @@ class RAGServiceTest {
 
         boolean[] partialResults = new boolean[]{false};
         String filter = invokeBuildFilter(context, "user-123", partialResults);
-        assertThat(filter).isEqualTo("(workspaceId == 'GLOBAL' && departmentId == 'dept-target-123')");
+        assertThat(filter).isEqualTo("((workspaceId == 'ALL' || workspaceId == 'GLOBAL') && departmentId == 'dept-target-123')");
         assertThat(partialResults[0]).isFalse();
     }
 
@@ -233,6 +233,7 @@ class RAGServiceTest {
                 Mockito.eq("workspace-abc"),
                 Mockito.any(),
                 Mockito.eq(true),
+                Mockito.anyBoolean(),
                 Mockito.anyList(),
                 Mockito.anyList(),
                 Mockito.eq(query)

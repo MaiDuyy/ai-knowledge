@@ -5,6 +5,8 @@ import com.security.security.entity.Embedding;
 import com.security.security.repository.EmbeddingRepository;
 import com.security.security.service.tika.SemanticMarkdownChunker;
 import com.security.security.client.WorkspaceServiceClient;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import javax.sql.DataSource;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.document.Document;
@@ -12,6 +14,7 @@ import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
@@ -31,6 +34,8 @@ public class EmbeddingService {
     private final EmbeddingRepository embeddingRepository;
     private final SemanticMarkdownChunker semanticMarkdownChunker;
     private final WorkspaceServiceClient workspaceServiceClient;
+    private final DataSource dataSource;
+    private final ObjectMapper objectMapper;
 
     /**
      * Store document chunks in VectorStore
@@ -264,5 +269,102 @@ public class EmbeddingService {
         }
         // Approximate: 1 token ≈ 4 characters
         return Math.max(1, text.length() / 4);
+    }
+
+    /**
+     * Update existing embedding metadata in PostgreSQL vector store and PostgreSQL databases.
+     */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void updateEmbeddingsMetadata(Long documentId, String workspaceId, String departmentId, String allowedRoles, String securityClassification) {
+        log.info("[EmbeddingService] Updating metadata for document {} embeddings: workspaceId={}, departmentId={}, allowedRoles={}, securityClassification={}",
+                documentId, workspaceId, departmentId, allowedRoles, securityClassification);
+
+        // 1. Update workspaceId in the JPA embeddings database table
+        String normalizedWorkspace = ScopeNormalizer.normalizeWorkspace(workspaceId);
+        embeddingRepository.updateWorkspaceId(documentId, normalizedWorkspace);
+
+        // 2. Update metadata inside PostgreSQL pgvector vector_store JSONB
+        if (isPostgreSQL() && vectorStoreTableExists()) {
+            Map<String, String> updates = new HashMap<>();
+            updates.put("workspaceId", normalizedWorkspace);
+            updates.put("departmentId", ScopeNormalizer.normalizeDepartment(departmentId));
+            updates.put("allowedRoles", allowedRoles != null ? allowedRoles : "ALL");
+            if (securityClassification != null) {
+                updates.put("classification", securityClassification);
+                updates.put("securityClassification", securityClassification);
+            }
+
+            try {
+                String jsonStr = objectMapper.writeValueAsString(updates);
+                int updatedRows = embeddingRepository.updateVectorMetadata(String.valueOf(documentId), jsonStr);
+                log.info("[EmbeddingService] Updated {} rows in VectorStore for document {}", updatedRows, documentId);
+            } catch (Exception e) {
+                log.error("[EmbeddingService] Failed to update VectorStore metadata for document {}: {}", documentId, e.getMessage());
+            }
+        } else {
+            log.info("[EmbeddingService] Skipping pgvector update because database is not PostgreSQL or vector_store table does not exist");
+        }
+    }
+
+    /**
+     * Update existing wiki page embedding metadata in PostgreSQL vector store.
+     */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void updateWikiPageEmbeddingsMetadata(Long wikiPageId, String workspaceId, String departmentId, String allowedRoles, String securityClassification) {
+        log.info("[EmbeddingService] Updating metadata for wiki page {} embeddings: workspaceId={}, departmentId={}, allowedRoles={}, securityClassification={}",
+                wikiPageId, workspaceId, departmentId, allowedRoles, securityClassification);
+
+        if (isPostgreSQL() && vectorStoreTableExists()) {
+            Map<String, String> updates = new HashMap<>();
+            updates.put("workspaceId", ScopeNormalizer.normalizeWorkspace(workspaceId));
+            updates.put("departmentId", ScopeNormalizer.normalizeDepartment(departmentId));
+            updates.put("allowedRoles", allowedRoles != null ? allowedRoles : "ALL");
+            if (securityClassification != null) {
+                updates.put("classification", securityClassification);
+                updates.put("securityClassification", securityClassification);
+            }
+
+            try {
+                String jsonStr = objectMapper.writeValueAsString(updates);
+                int updatedRows = embeddingRepository.updateWikiVectorMetadata(String.valueOf(wikiPageId), jsonStr);
+                log.info("[EmbeddingService] Updated {} rows in VectorStore for wiki page {}", updatedRows, wikiPageId);
+            } catch (Exception e) {
+                log.error("[EmbeddingService] Failed to update VectorStore metadata for wiki page {}: {}", wikiPageId, e.getMessage());
+            }
+        } else {
+            log.info("[EmbeddingService] Skipping pgvector update for wiki page because database is not PostgreSQL or vector_store table does not exist");
+        }
+    }
+
+    private boolean isPostgreSQL() {
+        try (java.sql.Connection conn = dataSource.getConnection()) {
+            String dbProduct = conn.getMetaData().getDatabaseProductName();
+            return dbProduct != null && dbProduct.toLowerCase().contains("postgres");
+        } catch (Exception e) {
+            log.warn("[EmbeddingService] Failed to check database product name: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    private boolean vectorStoreTableExists() {
+        try (java.sql.Connection conn = dataSource.getConnection()) {
+            String schema = "ai_knowledge";
+            try (java.sql.ResultSet rs = conn.getMetaData().getTables(null, schema, "vector_store", null)) {
+                if (rs.next()) {
+                    return true;
+                }
+            }
+            try (java.sql.ResultSet rs = conn.getMetaData().getTables(null, schema.toLowerCase(), "vector_store", null)) {
+                if (rs.next()) {
+                    return true;
+                }
+            }
+            try (java.sql.ResultSet rs = conn.getMetaData().getTables(null, null, "vector_store", null)) {
+                return rs.next();
+            }
+        } catch (Exception e) {
+            log.warn("[EmbeddingService] Failed to check if vector_store table exists: {}", e.getMessage());
+            return false;
+        }
     }
 }

@@ -857,6 +857,7 @@ public class MrpPipelineService {
                 // Create a WikiPageDraft in PENDING state
                 WikiPageDraft draft = WikiPageDraft.builder()
                         .wikiPageId(wikiPageId)
+                        .sourceDocumentId(plan.getSourceDocumentId())
                         .slug(slug)
                         .title(title)
                         .pageType(WikiPageType.fromValue(normalizedPageType))

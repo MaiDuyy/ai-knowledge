@@ -3,6 +3,7 @@ package com.security.security.service;
 import com.security.security.client.WorkspaceServiceClient;
 import com.security.security.entity.Document;
 import com.security.security.entity.enumeration.DocStatus;
+import com.security.security.entity.enumeration.SecurityClassification;
 import com.security.security.repository.*;
 import com.security.security.service.docling.DoclingClient;
 import com.security.security.service.tika.DocumentProfiler;
@@ -117,5 +118,84 @@ class DocumentServicePurgeTest {
         org.junit.jupiter.api.Assertions.assertEquals(1, found.size());
         org.junit.jupiter.api.Assertions.assertEquals("abc123hash", found.get(0).getFileHash());
     }
+
+    @Test
+    @DisplayName("Should cascade metadata updates from Document to WikiPages, WikiPageDrafts, and Embeddings")
+    void updateDocumentMetadata_cascadesToWikiAndEmbeddings() {
+        // Arrange
+        Long docId = 123L;
+        String userId = "system-user";
+        Document existingDoc = Document.builder()
+                .id(docId)
+                .userId(userId)
+                .workspaceId("ws-old")
+                .departmentId("dept-old")
+                .allowedRoles("ALL")
+                .securityClassification(SecurityClassification.INTERNAL)
+                .status(com.security.security.entity.enumeration.DocStatus.COMPLETED)
+                .build();
+
+        when(documentRepository.findById(docId)).thenReturn(Optional.of(existingDoc));
+        when(documentRepository.save(any(Document.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        com.security.security.entity.WikiPage wikiPage = com.security.security.entity.WikiPage.builder()
+                .id(456L)
+                .sourceDocumentId(docId)
+                .workspaceId("ws-old")
+                .departmentId("dept-old")
+                .allowedRoles("ALL")
+                .securityClassification(SecurityClassification.INTERNAL)
+                .build();
+
+        com.security.security.entity.WikiPageDraft wikiPageDraft = com.security.security.entity.WikiPageDraft.builder()
+                .id(789L)
+                .wikiPageId(456L)
+                .workspaceId("ws-old")
+                .departmentId("dept-old")
+                .allowedRoles("ALL")
+                .securityClassification(SecurityClassification.INTERNAL)
+                .build();
+
+        when(wikiPageRepository.findBySourceDocumentId(docId)).thenReturn(java.util.List.of(wikiPage));
+        when(wikiPageDraftRepository.findByWikiPageId(456L)).thenReturn(java.util.List.of(wikiPageDraft));
+
+        // Act
+        documentService.updateDocumentMetadata(
+                docId,
+                "CONFIDENTIAL", // securityClassification
+                "dept-new",      // departmentId
+                "HEAD",          // allowedRoles
+                null,            // tags
+                null,            // folderPath
+                "ws-new",        // workspaceId
+                userId           // userId
+        );
+
+        // Assert
+        // Verify document saved with correct values
+        org.junit.jupiter.api.Assertions.assertEquals(SecurityClassification.CONFIDENTIAL, existingDoc.getSecurityClassification());
+        org.junit.jupiter.api.Assertions.assertEquals("dept-new", existingDoc.getDepartmentId());
+        org.junit.jupiter.api.Assertions.assertEquals("HEAD", existingDoc.getAllowedRoles());
+        org.junit.jupiter.api.Assertions.assertEquals("ws-new", existingDoc.getWorkspaceId());
+
+        // Verify WikiPage fields updated and saved
+        org.junit.jupiter.api.Assertions.assertEquals(SecurityClassification.CONFIDENTIAL, wikiPage.getSecurityClassification());
+        org.junit.jupiter.api.Assertions.assertEquals("dept-new", wikiPage.getDepartmentId());
+        org.junit.jupiter.api.Assertions.assertEquals("HEAD", wikiPage.getAllowedRoles());
+        org.junit.jupiter.api.Assertions.assertEquals("ws-new", wikiPage.getWorkspaceId());
+        verify(wikiPageRepository).save(wikiPage);
+
+        // Verify WikiPageDraft fields updated and saved
+        org.junit.jupiter.api.Assertions.assertEquals(SecurityClassification.CONFIDENTIAL, wikiPageDraft.getSecurityClassification());
+        org.junit.jupiter.api.Assertions.assertEquals("dept-new", wikiPageDraft.getDepartmentId());
+        org.junit.jupiter.api.Assertions.assertEquals("HEAD", wikiPageDraft.getAllowedRoles());
+        org.junit.jupiter.api.Assertions.assertEquals("ws-new", wikiPageDraft.getWorkspaceId());
+        verify(wikiPageDraftRepository).save(wikiPageDraft);
+
+        // Verify EmbeddingService cascade called with correct values
+        verify(embeddingService).updateEmbeddingsMetadata(docId, "ws-new", "dept-new", "HEAD", "CONFIDENTIAL");
+        verify(embeddingService).updateWikiPageEmbeddingsMetadata(456L, "ws-new", "dept-new", "HEAD", "CONFIDENTIAL");
+    }
 }
+
 

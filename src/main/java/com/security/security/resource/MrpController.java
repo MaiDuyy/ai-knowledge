@@ -205,12 +205,12 @@ public class MrpController {
         if (page != null && size != null) {
             Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt"));
             Page<WikiPageDraft> pagedDrafts = wikiPageDraftRepository.findAccessibleDraftsByStatus(
-                normalizedWorkspaceId, WikiPageDraftStatus.PENDING, perm.isAdmin(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember(), pageable);
+                normalizedWorkspaceId, WikiPageDraftStatus.PENDING, perm.isAdmin(), perm.hasHeadRole(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember(), pageable);
             return ResponseEntity.ok(pagedDrafts);
         }
         
         List<WikiPageDraft> drafts = wikiPageDraftRepository.findAccessibleDraftsByStatus(
-            normalizedWorkspaceId, WikiPageDraftStatus.PENDING, perm.isAdmin(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
+            normalizedWorkspaceId, WikiPageDraftStatus.PENDING, perm.isAdmin(), perm.hasHeadRole(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
         return ResponseEntity.ok(drafts);
     }
 
@@ -233,7 +233,7 @@ public class MrpController {
         }
         
         List<WikiPageDraft> drafts = wikiPageDraftRepository.findAccessibleDrafts(
-            normalizedWorkspaceId, perm.isAdmin(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
+            normalizedWorkspaceId, perm.isAdmin(), perm.hasHeadRole(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
         return ResponseEntity.ok(drafts);
     }
 
@@ -446,11 +446,11 @@ public class MrpController {
         if (page != null && size != null) {
             Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "updatedAt"));
             Page<WikiPage> pagedWiki = wikiPageRepository.findAccessiblePages(
-                normalizedWorkspaceId, normalizedDeptId, perm.isAdmin(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember(), pageable);
+                normalizedWorkspaceId, normalizedDeptId, perm.isAdmin(), perm.hasHeadRole(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember(), pageable);
             return ResponseEntity.ok(pagedWiki);
         }
         List<WikiPage> pages = wikiPageRepository.findAccessiblePages(
-            normalizedWorkspaceId, normalizedDeptId, perm.isAdmin(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
+            normalizedWorkspaceId, normalizedDeptId, perm.isAdmin(), perm.hasHeadRole(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
         return ResponseEntity.ok(pages);
     }
 
@@ -488,7 +488,7 @@ public class MrpController {
         String normalizedDeptId = ScopeNormalizer.normalizeDepartment(workspaceDeptId);
 
         List<WikiPageRepository.WikiPageMetadata> pages = wikiPageRepository.findAccessibleMetadata(
-            normalizedWorkspaceId, normalizedDeptId, perm.isAdmin(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
+            normalizedWorkspaceId, normalizedDeptId, perm.isAdmin(), perm.hasHeadRole(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
             
         List<com.security.security.dto.WikiPageMetadataDto> dtos = pages.stream().map(page -> {
             List<String> dbLinks = wikiLinkRepository.findByFromPageId(page.getId()).stream()
@@ -547,7 +547,7 @@ public class MrpController {
 
         // 1. Fetch accessible pages (lightweight metadata)
         List<WikiPageRepository.WikiPageMetadata> pages = wikiPageRepository.findAccessibleMetadata(
-            normalizedWorkspaceId, normalizedDeptId, perm.isAdmin(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
+            normalizedWorkspaceId, normalizedDeptId, perm.isAdmin(), perm.hasHeadRole(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
             
         // 2. Map pages to Node DTOs and build a set of accessible slugs
         java.util.Set<String> accessibleSlugs = new java.util.HashSet<>();
@@ -765,7 +765,7 @@ public class MrpController {
         
         UserPermissionContext perm = PermissionUtils.parse(userRolesHeader, userDepartmentsHeader, objectMapper);
         List<WikiPageRepository.WikiPageMetadata> pages = wikiPageRepository.findAllAccessibleMetadata(
-                true, perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
+                true, perm.hasHeadRole(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
         
         List<com.security.security.dto.WikiPageMetadataDto> dtos = pages.stream().map(page -> {
             List<String> dbLinks = wikiLinkRepository.findByFromPageId(page.getId()).stream()
@@ -806,7 +806,7 @@ public class MrpController {
         
         // Fetch all pages (metadata) system-wide
         List<WikiPageRepository.WikiPageMetadata> pages = wikiPageRepository.findAllAccessibleMetadata(
-                true, perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
+                true, perm.hasHeadRole(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
                 
         // Map pages to Node DTOs and build a set of accessible slugs
         java.util.Set<String> accessibleSlugs = new java.util.HashSet<>();
