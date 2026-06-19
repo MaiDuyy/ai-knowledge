@@ -194,9 +194,9 @@ public class MrpPipelineService {
         // Kế thừa workspaceId trực tiếp từ tài liệu gốc (Document) để bảo mật và đồng bộ dữ liệu theo đúng flow
         String finalWorkspaceId = ScopeNormalizer.normalizeWorkspace(doc.getWorkspaceId());
         String docDeptId = ScopeNormalizer.normalizeDepartment(doc.getDepartmentId());
-        if ("GLOBAL".equals(finalWorkspaceId)) {
-            if (!"GLOBAL".equals(docDeptId)) {
-                // Department-scoped document, finalWorkspaceId is already GLOBAL
+        if ("ALL".equals(finalWorkspaceId)) {
+            if (!"ALL".equals(docDeptId)) {
+                // Department-scoped document, finalWorkspaceId is already ALL
             } else {
                 finalWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
             }
@@ -668,10 +668,10 @@ public class MrpPipelineService {
             if (doc != null) {
                 String docWs = ScopeNormalizer.normalizeWorkspace(doc.getWorkspaceId());
                 String docDept = ScopeNormalizer.normalizeDepartment(doc.getDepartmentId());
-                if (!"GLOBAL".equals(docWs)) {
+                if (!"ALL".equals(docWs)) {
                     finalWorkspaceId = docWs;
-                } else if (!"GLOBAL".equals(docDept)) {
-                    finalWorkspaceId = "GLOBAL";
+                } else if (!"ALL".equals(docDept)) {
+                    finalWorkspaceId = "ALL";
                 }
             }
 

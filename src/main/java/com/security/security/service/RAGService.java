@@ -360,8 +360,8 @@ public class RAGService {
 
         // 2. Fetch workspace departmentId using WorkspaceServiceClient
         boolean isServiceFailure = false;
-        String workspaceDeptId = "GLOBAL";
-        if (!"GLOBAL".equals(resolvedWorkspaceId)) {
+        String workspaceDeptId = "ALL";
+        if (!"ALL".equals(resolvedWorkspaceId) && !"GLOBAL".equals(resolvedWorkspaceId)) {
             try {
                 Map<String, Object> workspaceInfo = workspaceServiceClient.getWorkspace(resolvedWorkspaceId, userId);
                 if (workspaceInfo == null || workspaceInfo.isEmpty()) {
@@ -402,7 +402,7 @@ public class RAGService {
                     String type = node.path("type").asText("");
                     String id = node.path("id").asText("");
                     if ("department".equalsIgnoreCase(type)) {
-                        return "(workspaceId == 'GLOBAL' && departmentId == '" + id + "')";
+                        return "((workspaceId == 'ALL' || workspaceId == 'GLOBAL') && departmentId == '" + id + "')";
                     } else if ("workspace".equalsIgnoreCase(type)) {
                         return "workspaceId == '" + id + "'";
                     }
@@ -410,12 +410,12 @@ public class RAGService {
                     log.error("Failed to parse x-rag-scope: {}", ragScope, e);
                 }
             }
-            if ("GLOBAL".equals(resolvedWorkspaceId)) {
-                return "workspaceId == 'GLOBAL' && departmentId == 'GLOBAL'";
+            if ("ALL".equals(resolvedWorkspaceId) || "GLOBAL".equals(resolvedWorkspaceId)) {
+                return "(workspaceId == 'ALL' || workspaceId == 'GLOBAL') && (departmentId == 'ALL' || departmentId == 'GLOBAL')";
             }
             // Default Admin scope: all documents in the current workspace or the workspace's department
-            if (!"GLOBAL".equals(workspaceDeptId)) {
-                return "(workspaceId == '" + resolvedWorkspaceId + "' || (workspaceId == 'GLOBAL' && departmentId == '" + workspaceDeptId + "'))";
+            if (!"ALL".equals(workspaceDeptId) && !"GLOBAL".equals(workspaceDeptId)) {
+                return "(workspaceId == '" + resolvedWorkspaceId + "' || ((workspaceId == 'ALL' || workspaceId == 'GLOBAL') && departmentId == '" + workspaceDeptId + "'))";
             }
             return "workspaceId == '" + resolvedWorkspaceId + "'";
         }
@@ -431,11 +431,11 @@ public class RAGService {
 
         if (isGuest) {
             // Guest can only access PUBLIC documents in current workspace or its department
-            if ("GLOBAL".equals(resolvedWorkspaceId)) {
-                return "workspaceId == 'GLOBAL' && departmentId == 'GLOBAL' && (classification == 'PUBLIC' || securityClassification == 'PUBLIC')";
+            if ("ALL".equals(resolvedWorkspaceId) || "GLOBAL".equals(resolvedWorkspaceId)) {
+                return "(workspaceId == 'ALL' || workspaceId == 'GLOBAL') && (departmentId == 'ALL' || departmentId == 'GLOBAL') && (classification == 'PUBLIC' || securityClassification == 'PUBLIC')";
             }
-            if (!"GLOBAL".equals(workspaceDeptId)) {
-                return "((workspaceId == '" + resolvedWorkspaceId + "' || (workspaceId == 'GLOBAL' && departmentId == '" + workspaceDeptId + "')) && (classification == 'PUBLIC' || securityClassification == 'PUBLIC'))";
+            if (!"ALL".equals(workspaceDeptId) && !"GLOBAL".equals(workspaceDeptId)) {
+                return "((workspaceId == '" + resolvedWorkspaceId + "' || ((workspaceId == 'ALL' || workspaceId == 'GLOBAL') && departmentId == '" + workspaceDeptId + "')) && (classification == 'PUBLIC' || securityClassification == 'PUBLIC'))";
             }
             return "workspaceId == '" + resolvedWorkspaceId + "' && (classification == 'PUBLIC' || securityClassification == 'PUBLIC')";
         }
@@ -459,14 +459,14 @@ public class RAGService {
 
         List<String> orClauses = new ArrayList<>();
 
-        if ("GLOBAL".equals(resolvedWorkspaceId)) {
-            // Global workspace query: Only retrieve company-wide GLOBAL documents
-            orClauses.add("(workspaceId == 'GLOBAL' && departmentId == 'GLOBAL')");
+        if ("ALL".equals(resolvedWorkspaceId) || "GLOBAL".equals(resolvedWorkspaceId)) {
+            // Global workspace query: Only retrieve company-wide documents
+            orClauses.add("((workspaceId == 'ALL' || workspaceId == 'GLOBAL') && (departmentId == 'ALL' || departmentId == 'GLOBAL'))");
         } else {
             // Clause 1: Current workspace documents with no department restriction
-            orClauses.add("(workspaceId == '" + resolvedWorkspaceId + "' && departmentId == 'GLOBAL')");
+            orClauses.add("(workspaceId == '" + resolvedWorkspaceId + "' && (departmentId == 'ALL' || departmentId == 'GLOBAL'))");
             // Clause 2: Current workspace documents with the workspace department restriction
-            if (!"GLOBAL".equals(workspaceDeptId) && userDeptIds.contains(workspaceDeptId)) {
+            if (!"ALL".equals(workspaceDeptId) && !"GLOBAL".equals(workspaceDeptId) && userDeptIds.contains(workspaceDeptId)) {
                 boolean isHeadInThisDept = userHeadDeptIds.contains(workspaceDeptId);
                 String deptClause = "(workspaceId == '" + resolvedWorkspaceId + "' && departmentId == '" + workspaceDeptId + "'";
                 if (!isHeadInThisDept) {
@@ -475,8 +475,8 @@ public class RAGService {
                 deptClause += ")";
                 orClauses.add(deptClause);
 
-                // Also include department shared docs (workspaceId = GLOBAL, departmentId = workspaceDeptId)
-                String sharedClause = "(workspaceId == 'GLOBAL' && departmentId == '" + workspaceDeptId + "'";
+                // Also include department shared docs (workspaceId = ALL/GLOBAL, departmentId = workspaceDeptId)
+                String sharedClause = "((workspaceId == 'ALL' || workspaceId == 'GLOBAL') && departmentId == '" + workspaceDeptId + "'";
                 if (!isHeadInThisDept) {
                     sharedClause += " && allowedRoles != 'HEAD'";
                 }
@@ -502,8 +502,8 @@ public class RAGService {
         String resolvedWorkspaceId = ScopeNormalizer.normalizeWorkspace(context.getWorkspaceId());
         String pageWsId = ScopeNormalizer.normalizeWorkspace(page.getWorkspaceId());
         
-        // If page is not in the same workspace (and workspace is not GLOBAL)
-        if (!"GLOBAL".equals(pageWsId) && !pageWsId.equals(resolvedWorkspaceId)) {
+        // If page is not in the same workspace (and workspace is not ALL/GLOBAL)
+        if (!"ALL".equals(pageWsId) && !"GLOBAL".equals(pageWsId) && !pageWsId.equals(resolvedWorkspaceId)) {
             return false;
         }
         
@@ -562,7 +562,7 @@ public class RAGService {
 
         // 5. Department-scoped pages: user must belong to that department
         String pageDeptId = ScopeNormalizer.normalizeDepartment(page.getDepartmentId());
-        if (!"GLOBAL".equals(pageDeptId)) {
+        if (!"ALL".equals(pageDeptId) && !"GLOBAL".equals(pageDeptId)) {
             if (deptIdsWhereHead.contains(pageDeptId)) {
                 return true;
             }
@@ -578,7 +578,7 @@ public class RAGService {
         }
 
         // Workspace-specific pages without department: accessible to workspace members
-        if (!"GLOBAL".equals(pageWsId)) {
+        if (!"ALL".equals(pageWsId) && !"GLOBAL".equals(pageWsId)) {
             return true;
         }
 
@@ -776,12 +776,15 @@ public class RAGService {
             }
 
             String resolvedWorkspaceId = permissions.getWorkspaceId();
-            if (resolvedWorkspaceId == null || resolvedWorkspaceId.trim().isEmpty() || "all".equalsIgnoreCase(resolvedWorkspaceId.trim())) {
-                resolvedWorkspaceId = "default-workspace";
+            if (resolvedWorkspaceId == null || resolvedWorkspaceId.trim().isEmpty() 
+                    || "all".equalsIgnoreCase(resolvedWorkspaceId.trim())
+                    || "GLOBAL".equalsIgnoreCase(resolvedWorkspaceId.trim())
+                    || "ALL".equalsIgnoreCase(resolvedWorkspaceId.trim())) {
+                resolvedWorkspaceId = "ALL";
             }
 
             String workspaceDeptId = null;
-            if (resolvedWorkspaceId != null && !"default-workspace".equals(resolvedWorkspaceId)) {
+            if (resolvedWorkspaceId != null && !"ALL".equals(resolvedWorkspaceId) && !"default-workspace".equals(resolvedWorkspaceId)) {
                 try {
                     Map<String, Object> workspaceInfo = workspaceServiceClient.getWorkspace(resolvedWorkspaceId, userId);
                     if (workspaceInfo != null && workspaceInfo.containsKey("departmentId")) {

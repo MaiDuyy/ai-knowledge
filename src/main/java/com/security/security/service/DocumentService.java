@@ -95,8 +95,9 @@ public class DocumentService {
         if (workspaceId == null || workspaceId.trim().isEmpty() 
             || "default-workspace".equals(workspaceId) 
             || "workspace-default".equals(workspaceId)
-            || "GLOBAL".equals(workspaceId)) {
-            return; // Allow public, default, or GLOBAL
+            || "GLOBAL".equals(workspaceId)
+            || "ALL".equals(workspaceId)) {
+            return; // Allow public, default, GLOBAL or ALL
         }
         var workspace = workspaceServiceClient.getWorkspace(workspaceId, userId);
         if (workspace.isEmpty()) {
@@ -187,7 +188,7 @@ public class DocumentService {
 
         // 1. Resolve workspaceId
         String resolvedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
-        boolean isDeptLevel = "GLOBAL".equals(resolvedWorkspaceId);
+        boolean isDeptLevel = "ALL".equals(resolvedWorkspaceId) || "GLOBAL".equals(resolvedWorkspaceId);
 
         // 2. Resolve departmentId & validate workspace access
         String targetDeptId = ScopeNormalizer.normalizeDepartment(departmentId);
@@ -198,7 +199,7 @@ public class DocumentService {
                 log.warn("[Security] Access denied or workspace not found: User {} in Workspace {}", userId, resolvedWorkspaceId);
                 throw new AccessDeniedException("You do not have access to Workspace: " + resolvedWorkspaceId);
             }
-            if (targetDeptId == null || "GLOBAL".equals(targetDeptId)) {
+            if (targetDeptId == null || "GLOBAL".equals(targetDeptId) || "ALL".equals(targetDeptId)) {
                 targetDeptId = (String) workspaceMap.get("departmentId");
             }
             targetDeptId = ScopeNormalizer.normalizeDepartment(targetDeptId);
@@ -371,7 +372,7 @@ public class DocumentService {
             String docWsId = ScopeNormalizer.normalizeWorkspace(doc.getWorkspaceId());
             String allowed = doc.getAllowedRoles();
 
-            boolean isGlobalScope = "GLOBAL".equals(docDeptId) && "GLOBAL".equals(docWsId);
+            boolean isGlobalScope = ("ALL".equals(docDeptId) || "GLOBAL".equals(docDeptId)) && ("ALL".equals(docWsId) || "GLOBAL".equals(docWsId));
 
             // Rule 1: Global scope (no dept, default/empty workspace) → visible to all users
             if (isGlobalScope) {
@@ -380,8 +381,8 @@ public class DocumentService {
             }
 
             // Workspace-specific validation for global queries
-            if ("GLOBAL".equals(normRequestedWorkspaceId)) {
-                if (!"GLOBAL".equals(docWsId)) {
+            if ("ALL".equals(normRequestedWorkspaceId) || "GLOBAL".equals(normRequestedWorkspaceId)) {
+                if (!"ALL".equals(docWsId) && !"GLOBAL".equals(docWsId)) {
                     try {
                         var ws = workspaceServiceClient.getWorkspace(docWsId, userId);
                         if (ws.isEmpty()) {
@@ -395,7 +396,7 @@ public class DocumentService {
             }
 
             // Rules 2+3+4: Department-scoped → must be a member of that department
-            if (!"GLOBAL".equals(docDeptId)) {
+            if (!"ALL".equals(docDeptId) && !"GLOBAL".equals(docDeptId)) {
                 boolean isHead = perms.getDeptIdsWhereHead().contains(docDeptId);
                 boolean isMember = perms.getDeptIdsWhereMember().contains(docDeptId);
 
@@ -433,7 +434,7 @@ public class DocumentService {
         String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
         validateWorkspaceAccess(normalizedWorkspaceId, userId);
         List<Document> docs;
-        if (!"GLOBAL".equals(normalizedWorkspaceId)) {
+        if (!"ALL".equals(normalizedWorkspaceId) && !"GLOBAL".equals(normalizedWorkspaceId)) {
             String departmentId = null;
             try {
                 Map<String, Object> ws = workspaceServiceClient.getWorkspace(normalizedWorkspaceId, userId);
@@ -444,13 +445,15 @@ public class DocumentService {
                 log.warn("Failed to get workspace department for workspaceId={}: {}", normalizedWorkspaceId, e.getMessage());
             }
             String normalizedDeptId = ScopeNormalizer.normalizeDepartment(departmentId);
-            if (!"GLOBAL".equals(normalizedDeptId)) {
+            if (!"ALL".equals(normalizedDeptId) && !"GLOBAL".equals(normalizedDeptId)) {
                 docs = documentRepository.findByWorkspaceIdOrDepartmentIdAndWorkspaceIdEmpty(normalizedWorkspaceId, normalizedDeptId);
             } else {
                 docs = documentRepository.findByWorkspaceIdOrderByCreatedAtDesc(normalizedWorkspaceId);
             }
         } else {
-            docs = documentRepository.findByWorkspaceIdOrderByCreatedAtDesc("GLOBAL");
+            docs = new java.util.ArrayList<>();
+            docs.addAll(documentRepository.findByWorkspaceIdOrderByCreatedAtDesc("ALL"));
+            docs.addAll(documentRepository.findByWorkspaceIdOrderByCreatedAtDesc("GLOBAL"));
         }
         return filterDocumentsByRole(docs, userId, normalizedWorkspaceId, userRole, userDepartments);
     }
@@ -471,7 +474,7 @@ public class DocumentService {
         String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
         validateWorkspaceAccess(normalizedWorkspaceId, userId);
         Page<Document> page;
-        if (!"GLOBAL".equals(normalizedWorkspaceId)) {
+        if (!"ALL".equals(normalizedWorkspaceId) && !"GLOBAL".equals(normalizedWorkspaceId)) {
             String departmentId = null;
             try {
                 Map<String, Object> ws = workspaceServiceClient.getWorkspace(normalizedWorkspaceId, userId);
@@ -482,13 +485,16 @@ public class DocumentService {
                 log.warn("Failed to get workspace department for workspaceId={}: {}", normalizedWorkspaceId, e.getMessage());
             }
             String normalizedDeptId = ScopeNormalizer.normalizeDepartment(departmentId);
-            if (!"GLOBAL".equals(normalizedDeptId)) {
+            if (!"ALL".equals(normalizedDeptId) && !"GLOBAL".equals(normalizedDeptId)) {
                 page = documentRepository.findByWorkspaceIdOrDepartmentIdAndWorkspaceIdEmpty(normalizedWorkspaceId, normalizedDeptId, pageable);
             } else {
                 page = documentRepository.findByWorkspaceIdOrderByCreatedAtDesc(normalizedWorkspaceId, pageable);
             }
         } else {
-            page = documentRepository.findByWorkspaceIdOrderByCreatedAtDesc("GLOBAL", pageable);
+            page = documentRepository.findByWorkspaceIdOrderByCreatedAtDesc("ALL", pageable);
+            if (page.isEmpty() || page.getTotalElements() == 0) {
+                page = documentRepository.findByWorkspaceIdOrderByCreatedAtDesc("GLOBAL", pageable);
+            }
         }
         List<Document> filteredList = filterDocumentsByRole(page.getContent(), userId, normalizedWorkspaceId, userRole, userDepartments);
         return new org.springframework.data.domain.PageImpl<>(filteredList, pageable, page.getTotalElements());
@@ -528,7 +534,7 @@ public class DocumentService {
         String docWsId = ScopeNormalizer.normalizeWorkspace(doc.getWorkspaceId());
         String allowed = doc.getAllowedRoles();
 
-        boolean isGlobalScope = "GLOBAL".equals(docDeptId) && "GLOBAL".equals(docWsId);
+        boolean isGlobalScope = ("ALL".equals(docDeptId) || "GLOBAL".equals(docDeptId)) && ("ALL".equals(docWsId) || "GLOBAL".equals(docWsId));
 
         if (isGlobalScope) return doc;
 

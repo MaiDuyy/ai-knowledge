@@ -314,7 +314,8 @@ public class WikiDraftService {
             String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
             List<WikiPage> allPages = new java.util.ArrayList<>();
             allPages.addAll(wikiPageRepository.findByWorkspaceId(normalizedWorkspaceId));
-            if (!"GLOBAL".equals(normalizedWorkspaceId)) {
+            if (!"ALL".equals(normalizedWorkspaceId) && !"GLOBAL".equals(normalizedWorkspaceId)) {
+                allPages.addAll(wikiPageRepository.findByWorkspaceId("ALL"));
                 allPages.addAll(wikiPageRepository.findByWorkspaceId("GLOBAL"));
             }
             

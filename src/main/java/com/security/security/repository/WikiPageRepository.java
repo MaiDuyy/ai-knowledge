@@ -24,12 +24,12 @@ public interface WikiPageRepository extends JpaRepository<WikiPage, Long> {
     Page<WikiPage> findByWorkspaceId(String workspaceId, Pageable pageable);
 
     @Query("SELECT w FROM WikiPage w WHERE w.slug = :slug AND ("
-         + "(:workspaceId = 'GLOBAL' AND (w.workspaceId = 'GLOBAL' OR w.workspaceId = '' OR w.workspaceId IS NULL OR w.workspaceId = 'default-workspace' OR w.workspaceId = 'workspace-default') AND (w.departmentId = 'GLOBAL' OR w.departmentId IS NULL OR w.departmentId = ''))"
-         + "OR (:workspaceId != 'GLOBAL' AND ("
+         + "(:workspaceId = 'ALL' AND (w.workspaceId = 'ALL' OR w.workspaceId = 'GLOBAL' OR w.workspaceId = '' OR w.workspaceId IS NULL OR w.workspaceId = 'default-workspace' OR w.workspaceId = 'workspace-default') AND (w.departmentId = 'ALL' OR w.departmentId = 'GLOBAL' OR w.departmentId IS NULL OR w.departmentId = ''))"
+         + "OR (:workspaceId != 'ALL' AND ("
          + "    w.workspaceId = :workspaceId "
          + "    OR (w.workspaceId = 'all') "
-         + "    OR ((w.workspaceId = 'GLOBAL' OR w.workspaceId = '' OR w.workspaceId IS NULL OR w.workspaceId = 'default-workspace' OR w.workspaceId = 'workspace-default') "
-         + "        AND (w.departmentId = 'GLOBAL' OR w.departmentId IS NULL OR w.departmentId = '' "
+         + "    OR ((w.workspaceId = 'ALL' OR w.workspaceId = 'GLOBAL' OR w.workspaceId = '' OR w.workspaceId IS NULL OR w.workspaceId = 'default-workspace' OR w.workspaceId = 'workspace-default') "
+         + "        AND (w.departmentId = 'ALL' OR w.departmentId = 'GLOBAL' OR w.departmentId IS NULL OR w.departmentId = '' "
          + "             OR (:workspaceDeptId IS NOT NULL AND :workspaceDeptId != '' AND w.departmentId = :workspaceDeptId)))"
          + "))) ORDER BY CASE WHEN w.workspaceId = :workspaceId THEN 0 ELSE 1 END ASC")
     List<WikiPage> findBySlugAndWorkspaceIdInternal(
@@ -65,23 +65,23 @@ public interface WikiPageRepository extends JpaRepository<WikiPage, Long> {
 
     default Optional<WikiPage> findBySlugGlobal(String slug, String preferredWorkspaceId) {
         String target = (preferredWorkspaceId != null && !preferredWorkspaceId.isBlank() 
-                         && !"GLOBAL".equalsIgnoreCase(preferredWorkspaceId)) ? preferredWorkspaceId : "";
+                         && !"ALL".equalsIgnoreCase(preferredWorkspaceId) && !"GLOBAL".equalsIgnoreCase(preferredWorkspaceId)) ? preferredWorkspaceId : "";
         List<WikiPage> results = findBySlugGlobalInternal(slug, target, org.springframework.data.domain.PageRequest.of(0, 1));
         return results.isEmpty() ? Optional.empty() : Optional.of(results.get(0));
     }
 
     @Query("SELECT w FROM WikiPage w WHERE ("
-         + "(:workspaceId = 'GLOBAL' AND (w.workspaceId = 'GLOBAL' OR w.workspaceId = '' OR w.workspaceId IS NULL OR w.workspaceId = 'default-workspace' OR w.workspaceId = 'workspace-default') AND (w.departmentId = 'GLOBAL' OR w.departmentId IS NULL OR w.departmentId = ''))"
-         + "OR (:workspaceId != 'GLOBAL' AND ("
+         + "(:workspaceId = 'ALL' AND (w.workspaceId = 'ALL' OR w.workspaceId = 'GLOBAL' OR w.workspaceId = '' OR w.workspaceId IS NULL OR w.workspaceId = 'default-workspace' OR w.workspaceId = 'workspace-default') AND (w.departmentId = 'ALL' OR w.departmentId = 'GLOBAL' OR w.departmentId IS NULL OR w.departmentId = ''))"
+         + "OR (:workspaceId != 'ALL' AND ("
          + "    w.workspaceId = :workspaceId "
          + "    OR (w.workspaceId = 'all') "
-         + "    OR ((w.workspaceId = 'GLOBAL' OR w.workspaceId = '' OR w.workspaceId IS NULL OR w.workspaceId = 'default-workspace' OR w.workspaceId = 'workspace-default') "
-         + "        AND (w.departmentId = 'GLOBAL' OR w.departmentId IS NULL OR w.departmentId = '' "
+         + "    OR ((w.workspaceId = 'ALL' OR w.workspaceId = 'GLOBAL' OR w.workspaceId = '' OR w.workspaceId IS NULL OR w.workspaceId = 'default-workspace' OR w.workspaceId = 'workspace-default') "
+         + "        AND (w.departmentId = 'ALL' OR w.departmentId = 'GLOBAL' OR w.departmentId IS NULL OR w.departmentId = '' "
          + "             OR (:workspaceDeptId IS NOT NULL AND :workspaceDeptId != '' AND w.departmentId = :workspaceDeptId)))"
          + "))) AND ("
          + ":isAdmin = true OR "
          + "w.securityClassification = com.security.security.entity.enumeration.SecurityClassification.PUBLIC OR "
-         + "(w.departmentId IS NULL OR w.departmentId = '' OR w.departmentId = 'GLOBAL') OR "
+         + "(w.departmentId IS NULL OR w.departmentId = '' OR w.departmentId = 'ALL' OR w.departmentId = 'GLOBAL') OR "
          + "(w.departmentId IN :deptIdsWhereHead) OR "
          + "(w.departmentId IN :deptIdsWhereMember AND (w.allowedRoles IS NULL OR w.allowedRoles = '' OR w.allowedRoles != 'HEAD'))"
          + ")")
@@ -94,16 +94,17 @@ public interface WikiPageRepository extends JpaRepository<WikiPage, Long> {
     );
 
     @Query("SELECT w FROM WikiPage w WHERE ("
-         + "(:workspaceId = 'GLOBAL' AND (w.workspaceId = 'GLOBAL' OR w.workspaceId = '' OR w.workspaceId IS NULL OR w.workspaceId = 'default-workspace' OR w.workspaceId = 'workspace-default') AND (w.departmentId = 'GLOBAL' OR w.departmentId IS NULL OR w.departmentId = ''))"
-         + "OR (:workspaceId != 'GLOBAL' AND ("
+         + "(:workspaceId = 'ALL' AND (w.workspaceId = 'ALL' OR w.workspaceId = 'GLOBAL' OR w.workspaceId = '' OR w.workspaceId IS NULL OR w.workspaceId = 'default-workspace' OR w.workspaceId = 'workspace-default') AND (w.departmentId = 'ALL' OR w.departmentId = 'GLOBAL' OR w.departmentId IS NULL OR w.departmentId = ''))"
+         + "OR (:workspaceId != 'ALL' AND ("
          + "    w.workspaceId = :workspaceId "
          + "    OR (w.workspaceId = 'all') "
-         + "    OR ((w.workspaceId = 'GLOBAL' OR w.workspaceId = '' OR w.workspaceId IS NULL OR w.workspaceId = 'default-workspace' OR w.workspaceId = 'workspace-default') "
-         + "        AND :workspaceDeptId IS NOT NULL AND :workspaceDeptId != '' AND w.departmentId = :workspaceDeptId AND w.departmentId != 'GLOBAL')"
+         + "    OR ((w.workspaceId = 'ALL' OR w.workspaceId = 'GLOBAL' OR w.workspaceId = '' OR w.workspaceId IS NULL OR w.workspaceId = 'default-workspace' OR w.workspaceId = 'workspace-default') "
+         + "        AND (w.departmentId = 'ALL' OR w.departmentId = 'GLOBAL' OR w.departmentId IS NULL OR w.departmentId = '' "
+         + "             OR (:workspaceDeptId IS NOT NULL AND :workspaceDeptId != '' AND w.departmentId = :workspaceDeptId)))"
          + "))) AND ("
          + ":isAdmin = true OR "
          + "w.securityClassification = com.security.security.entity.enumeration.SecurityClassification.PUBLIC OR "
-         + "(w.departmentId IS NULL OR w.departmentId = '' OR w.departmentId = 'GLOBAL') OR "
+         + "(w.departmentId IS NULL OR w.departmentId = '' OR w.departmentId = 'ALL' OR w.departmentId = 'GLOBAL') OR "
          + "(w.departmentId IN :deptIdsWhereHead) OR "
          + "(w.departmentId IN :deptIdsWhereMember AND (w.allowedRoles IS NULL OR w.allowedRoles = '' OR w.allowedRoles != 'HEAD'))"
          + ")")
@@ -133,17 +134,17 @@ public interface WikiPageRepository extends JpaRepository<WikiPage, Long> {
     }
 
     @Query("SELECT w FROM WikiPage w WHERE ("
-         + "(:workspaceId = 'GLOBAL' AND (w.workspaceId = 'GLOBAL' OR w.workspaceId = '' OR w.workspaceId IS NULL OR w.workspaceId = 'default-workspace' OR w.workspaceId = 'workspace-default') AND (w.departmentId = 'GLOBAL' OR w.departmentId IS NULL OR w.departmentId = ''))"
-         + "OR (:workspaceId != 'GLOBAL' AND ("
+         + "(:workspaceId = 'ALL' AND (w.workspaceId = 'ALL' OR w.workspaceId = 'GLOBAL' OR w.workspaceId = '' OR w.workspaceId IS NULL OR w.workspaceId = 'default-workspace' OR w.workspaceId = 'workspace-default') AND (w.departmentId = 'ALL' OR w.departmentId = 'GLOBAL' OR w.departmentId IS NULL OR w.departmentId = ''))"
+         + "OR (:workspaceId != 'ALL' AND ("
          + "    w.workspaceId = :workspaceId "
          + "    OR (w.workspaceId = 'all') "
-         + "    OR ((w.workspaceId = 'GLOBAL' OR w.workspaceId = '' OR w.workspaceId IS NULL OR w.workspaceId = 'default-workspace' OR w.workspaceId = 'workspace-default') "
-         + "        AND (w.departmentId = 'GLOBAL' OR w.departmentId IS NULL OR w.departmentId = '' "
+         + "    OR ((w.workspaceId = 'ALL' OR w.workspaceId = 'GLOBAL' OR w.workspaceId = '' OR w.workspaceId IS NULL OR w.workspaceId = 'default-workspace' OR w.workspaceId = 'workspace-default') "
+         + "        AND (w.departmentId = 'ALL' OR w.departmentId = 'GLOBAL' OR w.departmentId IS NULL OR w.departmentId = '' "
          + "             OR (:workspaceDeptId IS NOT NULL AND :workspaceDeptId != '' AND w.departmentId = :workspaceDeptId)))"
          + "))) AND ("
          + ":isAdmin = true OR "
          + "w.securityClassification = com.security.security.entity.enumeration.SecurityClassification.PUBLIC OR "
-         + "(w.departmentId IS NULL OR w.departmentId = '' OR w.departmentId = 'GLOBAL') OR "
+         + "(w.departmentId IS NULL OR w.departmentId = '' OR w.departmentId = 'ALL' OR w.departmentId = 'GLOBAL') OR "
          + "(w.departmentId IN :deptIdsWhereHead) OR "
          + "(w.departmentId IN :deptIdsWhereMember AND (w.allowedRoles IS NULL OR w.allowedRoles = '' OR w.allowedRoles != 'HEAD'))"
          + ")")
@@ -158,7 +159,7 @@ public interface WikiPageRepository extends JpaRepository<WikiPage, Long> {
     @Query("SELECT w FROM WikiPage w WHERE ("
          + ":isAdmin = true OR "
          + "w.securityClassification = com.security.security.entity.enumeration.SecurityClassification.PUBLIC OR "
-         + "(w.departmentId IS NULL OR w.departmentId = '' OR w.departmentId = 'GLOBAL') OR "
+         + "(w.departmentId IS NULL OR w.departmentId = '' OR w.departmentId = 'ALL' OR w.departmentId = 'GLOBAL') OR "
          + "(w.departmentId IN :deptIdsWhereHead) OR "
          + "(w.departmentId IN :deptIdsWhereMember AND (w.allowedRoles IS NULL OR w.allowedRoles = '' OR w.allowedRoles != 'HEAD'))"
          + ")")
@@ -171,17 +172,17 @@ public interface WikiPageRepository extends JpaRepository<WikiPage, Long> {
     List<WikiPageMetadata> findProjectedByWorkspaceId(String workspaceId);
 
     @Query("SELECT w FROM WikiPage w WHERE ("
-         + "(:workspaceId = 'GLOBAL' AND (w.workspaceId = 'GLOBAL' OR w.workspaceId = '' OR w.workspaceId IS NULL OR w.workspaceId = 'default-workspace' OR w.workspaceId = 'workspace-default') AND (w.departmentId = 'GLOBAL' OR w.departmentId IS NULL OR w.departmentId = ''))"
-         + "OR (:workspaceId != 'GLOBAL' AND ("
+         + "(:workspaceId = 'ALL' AND (w.workspaceId = 'ALL' OR w.workspaceId = 'GLOBAL' OR w.workspaceId = '' OR w.workspaceId IS NULL OR w.workspaceId = 'default-workspace' OR w.workspaceId = 'workspace-default') AND (w.departmentId = 'ALL' OR w.departmentId = 'GLOBAL' OR w.departmentId IS NULL OR w.departmentId = ''))"
+         + "OR (:workspaceId != 'ALL' AND ("
          + "    w.workspaceId = :workspaceId "
          + "    OR (w.workspaceId = 'all') "
-         + "    OR ((w.workspaceId = 'GLOBAL' OR w.workspaceId = '' OR w.workspaceId IS NULL OR w.workspaceId = 'default-workspace' OR w.workspaceId = 'workspace-default') "
-         + "        AND (w.departmentId = 'GLOBAL' OR w.departmentId IS NULL OR w.departmentId = '' "
+         + "    OR ((w.workspaceId = 'ALL' OR w.workspaceId = 'GLOBAL' OR w.workspaceId = '' OR w.workspaceId IS NULL OR w.workspaceId = 'default-workspace' OR w.workspaceId = 'workspace-default') "
+         + "        AND (w.departmentId = 'ALL' OR w.departmentId = 'GLOBAL' OR w.departmentId IS NULL OR w.departmentId = '' "
          + "             OR (:workspaceDeptId IS NOT NULL AND :workspaceDeptId != '' AND w.departmentId = :workspaceDeptId)))"
          + "))) AND ("
          + ":isAdmin = true OR "
          + "w.securityClassification = com.security.security.entity.enumeration.SecurityClassification.PUBLIC OR "
-         + "(w.departmentId IS NULL OR w.departmentId = '' OR w.departmentId = 'GLOBAL') OR "
+         + "(w.departmentId IS NULL OR w.departmentId = '' OR w.departmentId = 'ALL' OR w.departmentId = 'GLOBAL') OR "
          + "(w.departmentId IN :deptIdsWhereHead) OR "
          + "(w.departmentId IN :deptIdsWhereMember AND (w.allowedRoles IS NULL OR w.allowedRoles = '' OR w.allowedRoles != 'HEAD'))"
          + ") AND (LOWER(w.title) LIKE LOWER(CONCAT('%', :query, '%')) OR LOWER(w.content) LIKE LOWER(CONCAT('%', :query, '%')))")

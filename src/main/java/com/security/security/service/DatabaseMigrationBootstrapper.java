@@ -20,53 +20,53 @@ public class DatabaseMigrationBootstrapper implements CommandLineRunner {
         log.info("[DatabaseMigrationBootstrapper] Starting legacy permission scope sentinel value migration...");
         try {
             int docsWs = jdbcTemplate.update(
-                "UPDATE documents SET workspace_id = 'GLOBAL' " +
+                "UPDATE documents SET workspace_id = 'ALL' " +
                 "WHERE workspace_id IS NULL OR TRIM(workspace_id) = '' " +
-                "OR LOWER(TRIM(workspace_id)) IN ('default-workspace', 'workspace-default', 'all')"
+                "OR LOWER(TRIM(workspace_id)) IN ('default-workspace', 'workspace-default', 'all', 'global')"
             );
-            log.info("Migrated {} documents workspace_id to 'GLOBAL'", docsWs);
+            log.info("Migrated {} documents workspace_id to 'ALL'", docsWs);
 
             int docsDept = jdbcTemplate.update(
-                "UPDATE documents SET department_id = 'GLOBAL' " +
+                "UPDATE documents SET department_id = 'ALL' " +
                 "WHERE department_id IS NULL OR TRIM(department_id) = '' " +
-                "OR LOWER(TRIM(department_id)) IN ('all', 'default')"
+                "OR LOWER(TRIM(department_id)) IN ('all', 'default', 'global')"
             );
-            log.info("Migrated {} documents department_id to 'GLOBAL'", docsDept);
+            log.info("Migrated {} documents department_id to 'ALL'", docsDept);
 
             int wikiWs = jdbcTemplate.update(
-                "UPDATE wiki_pages SET workspace_id = 'GLOBAL' " +
+                "UPDATE wiki_pages SET workspace_id = 'ALL' " +
                 "WHERE workspace_id IS NULL OR TRIM(workspace_id) = '' " +
-                "OR LOWER(TRIM(workspace_id)) IN ('default-workspace', 'workspace-default', 'all')"
+                "OR LOWER(TRIM(workspace_id)) IN ('default-workspace', 'workspace-default', 'all', 'global')"
             );
-            log.info("Migrated {} wiki_pages workspace_id to 'GLOBAL'", wikiWs);
+            log.info("Migrated {} wiki_pages workspace_id to 'ALL'", wikiWs);
 
             int wikiDept = jdbcTemplate.update(
-                "UPDATE wiki_pages SET department_id = 'GLOBAL' " +
+                "UPDATE wiki_pages SET department_id = 'ALL' " +
                 "WHERE department_id IS NULL OR TRIM(department_id) = '' " +
-                "OR LOWER(TRIM(department_id)) IN ('all', 'default')"
+                "OR LOWER(TRIM(department_id)) IN ('all', 'default', 'global')"
             );
-            log.info("Migrated {} wiki_pages department_id to 'GLOBAL'", wikiDept);
+            log.info("Migrated {} wiki_pages department_id to 'ALL'", wikiDept);
 
             int draftWs = jdbcTemplate.update(
-                "UPDATE wiki_page_drafts SET workspace_id = 'GLOBAL' " +
+                "UPDATE wiki_page_drafts SET workspace_id = 'ALL' " +
                 "WHERE workspace_id IS NULL OR TRIM(workspace_id) = '' " +
-                "OR LOWER(TRIM(workspace_id)) IN ('default-workspace', 'workspace-default', 'all')"
+                "OR LOWER(TRIM(workspace_id)) IN ('default-workspace', 'workspace-default', 'all', 'global')"
             );
-            log.info("Migrated {} wiki_page_drafts workspace_id to 'GLOBAL'", draftWs);
+            log.info("Migrated {} wiki_page_drafts workspace_id to 'ALL'", draftWs);
 
             int draftDept = jdbcTemplate.update(
-                "UPDATE wiki_page_drafts SET department_id = 'GLOBAL' " +
+                "UPDATE wiki_page_drafts SET department_id = 'ALL' " +
                 "WHERE department_id IS NULL OR TRIM(department_id) = '' " +
-                "OR LOWER(TRIM(department_id)) IN ('all', 'default')"
+                "OR LOWER(TRIM(department_id)) IN ('all', 'default', 'global')"
             );
-            log.info("Migrated {} wiki_page_drafts department_id to 'GLOBAL'", draftDept);
+            log.info("Migrated {} wiki_page_drafts department_id to 'ALL'", draftDept);
 
             int embedWs = jdbcTemplate.update(
-                "UPDATE embeddings SET workspace_id = 'GLOBAL' " +
+                "UPDATE embeddings SET workspace_id = 'ALL' " +
                 "WHERE workspace_id IS NULL OR TRIM(workspace_id) = '' " +
-                "OR LOWER(TRIM(workspace_id)) IN ('default-workspace', 'workspace-default', 'all')"
+                "OR LOWER(TRIM(workspace_id)) IN ('default-workspace', 'workspace-default', 'all', 'global')"
             );
-            log.info("Migrated {} embeddings workspace_id to 'GLOBAL'", embedWs);
+            log.info("Migrated {} embeddings workspace_id to 'ALL'", embedWs);
 
             log.info("[DatabaseMigrationBootstrapper] Legacy permission scope migration completed successfully.");
         } catch (Exception e) {

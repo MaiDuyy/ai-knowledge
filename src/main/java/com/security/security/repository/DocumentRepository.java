@@ -36,33 +36,33 @@ public interface DocumentRepository extends JpaRepository<Document, Long> {
 
     // Workspace-scoped queries (Department → Workspace → Document flow)
     @Query("SELECT d FROM Document d WHERE " +
-           "(?1 = 'GLOBAL' AND (d.workspaceId = 'GLOBAL' OR d.workspaceId IS NULL OR d.workspaceId = '' OR d.workspaceId = 'default-workspace' OR d.workspaceId = 'workspace-default') AND (d.departmentId = 'GLOBAL' OR d.departmentId IS NULL OR d.departmentId = '')) " +
-           "OR (?1 != 'GLOBAL' AND d.workspaceId = ?1) ORDER BY d.createdAt DESC")
+           "((?1 = 'ALL' OR ?1 = 'GLOBAL') AND (d.workspaceId = 'ALL' OR d.workspaceId = 'GLOBAL' OR d.workspaceId IS NULL OR d.workspaceId = '' OR d.workspaceId = 'default-workspace' OR d.workspaceId = 'workspace-default') AND (d.departmentId = 'ALL' OR d.departmentId = 'GLOBAL' OR d.departmentId IS NULL OR d.departmentId = '')) " +
+           "OR ((?1 != 'ALL' AND ?1 != 'GLOBAL') AND d.workspaceId = ?1) ORDER BY d.createdAt DESC")
     List<Document> findByWorkspaceIdOrderByCreatedAtDesc(String workspaceId);
 
     @Query("SELECT d FROM Document d WHERE " +
-           "(?1 = 'GLOBAL' AND (d.workspaceId = 'GLOBAL' OR d.workspaceId IS NULL OR d.workspaceId = '' OR d.workspaceId = 'default-workspace' OR d.workspaceId = 'workspace-default') AND (d.departmentId = 'GLOBAL' OR d.departmentId IS NULL OR d.departmentId = '')) " +
-           "OR (?1 != 'GLOBAL' AND d.workspaceId = ?1) ORDER BY d.createdAt DESC")
+           "((?1 = 'ALL' OR ?1 = 'GLOBAL') AND (d.workspaceId = 'ALL' OR d.workspaceId = 'GLOBAL' OR d.workspaceId IS NULL OR d.workspaceId = '' OR d.workspaceId = 'default-workspace' OR d.workspaceId = 'workspace-default') AND (d.departmentId = 'ALL' OR d.departmentId = 'GLOBAL' OR d.departmentId IS NULL OR d.departmentId = '')) " +
+           "OR ((?1 != 'ALL' AND ?1 != 'GLOBAL') AND d.workspaceId = ?1) ORDER BY d.createdAt DESC")
     Page<Document> findByWorkspaceIdOrderByCreatedAtDesc(String workspaceId, Pageable pageable);
 
     @Query("SELECT d FROM Document d WHERE d.workspaceId = ?1 OR " +
-           "((d.workspaceId = 'GLOBAL' OR d.workspaceId = '' OR d.workspaceId IS NULL OR d.workspaceId = 'default-workspace' OR d.workspaceId = 'workspace-default' OR d.workspaceId = 'all') " +
-           "AND d.departmentId = ?2 AND d.departmentId != 'GLOBAL' AND d.departmentId IS NOT NULL AND d.departmentId != '') ORDER BY d.createdAt DESC")
+           "((d.workspaceId = 'ALL' OR d.workspaceId = 'GLOBAL' OR d.workspaceId = '' OR d.workspaceId IS NULL OR d.workspaceId = 'default-workspace' OR d.workspaceId = 'workspace-default' OR d.workspaceId = 'all') " +
+           "AND d.departmentId = ?2 AND d.departmentId != 'ALL' AND d.departmentId != 'GLOBAL' AND d.departmentId IS NOT NULL AND d.departmentId != '') ORDER BY d.createdAt DESC")
     List<Document> findByWorkspaceIdOrDepartmentIdAndWorkspaceIdEmpty(String workspaceId, String departmentId);
 
     @Query("SELECT d FROM Document d WHERE d.workspaceId = ?1 OR " +
-           "((d.workspaceId = 'GLOBAL' OR d.workspaceId = '' OR d.workspaceId IS NULL OR d.workspaceId = 'default-workspace' OR d.workspaceId = 'workspace-default' OR d.workspaceId = 'all') " +
-           "AND d.departmentId = ?2 AND d.departmentId != 'GLOBAL' AND d.departmentId IS NOT NULL AND d.departmentId != '') ORDER BY d.createdAt DESC")
+           "((d.workspaceId = 'ALL' OR d.workspaceId = 'GLOBAL' OR d.workspaceId = '' OR d.workspaceId IS NULL OR d.workspaceId = 'default-workspace' OR d.workspaceId = 'workspace-default' OR d.workspaceId = 'all') " +
+           "AND d.departmentId = ?2 AND d.departmentId != 'ALL' AND d.departmentId != 'GLOBAL' AND d.departmentId IS NOT NULL AND d.departmentId != '') ORDER BY d.createdAt DESC")
     Page<Document> findByWorkspaceIdOrDepartmentIdAndWorkspaceIdEmpty(String workspaceId, String departmentId, Pageable pageable);
 
     @Query("SELECT d FROM Document d WHERE " +
-           "((?1 = 'GLOBAL' AND (d.workspaceId = 'GLOBAL' OR d.workspaceId IS NULL OR d.workspaceId = '' OR d.workspaceId = 'default-workspace' OR d.workspaceId = 'workspace-default') AND (d.departmentId = 'GLOBAL' OR d.departmentId IS NULL OR d.departmentId = '')) " +
-           "OR (?1 != 'GLOBAL' AND d.workspaceId = ?1)) AND d.status = 'COMPLETED' ORDER BY d.createdAt DESC")
+           "(((?1 = 'ALL' OR ?1 = 'GLOBAL') AND (d.workspaceId = 'ALL' OR d.workspaceId = 'GLOBAL' OR d.workspaceId IS NULL OR d.workspaceId = '' OR d.workspaceId = 'default-workspace' OR d.workspaceId = 'workspace-default') AND (d.departmentId = 'ALL' OR d.departmentId = 'GLOBAL' OR d.departmentId IS NULL OR d.departmentId = '')) " +
+           "OR ((?1 != 'ALL' AND ?1 != 'GLOBAL') AND d.workspaceId = ?1)) AND d.status = 'COMPLETED' ORDER BY d.createdAt DESC")
     List<Document> findCompletedByWorkspaceIdOrderByCreatedAtDesc(String workspaceId);
 
     @Query("SELECT d FROM Document d WHERE " +
-           "((?1 = 'GLOBAL' AND (d.workspaceId = 'GLOBAL' OR d.workspaceId IS NULL OR d.workspaceId = '' OR d.workspaceId = 'default-workspace' OR d.workspaceId = 'workspace-default') AND (d.departmentId = 'GLOBAL' OR d.departmentId IS NULL OR d.departmentId = '')) " +
-           "OR (?1 != 'GLOBAL' AND d.workspaceId = ?1)) AND d.status = 'COMPLETED' ORDER BY d.createdAt DESC")
+           "(((?1 = 'ALL' OR ?1 = 'GLOBAL') AND (d.workspaceId = 'ALL' OR d.workspaceId = 'GLOBAL' OR d.workspaceId IS NULL OR d.workspaceId = '' OR d.workspaceId = 'default-workspace' OR d.workspaceId = 'workspace-default') AND (d.departmentId = 'ALL' OR d.departmentId = 'GLOBAL' OR d.departmentId IS NULL OR d.departmentId = '')) " +
+           "OR ((?1 != 'ALL' AND ?1 != 'GLOBAL') AND d.workspaceId = ?1)) AND d.status = 'COMPLETED' ORDER BY d.createdAt DESC")
     Page<Document> findCompletedByWorkspaceIdOrderByCreatedAtDesc(String workspaceId, Pageable pageable);
 
     List<Document> findByFileHashAndStatus(String fileHash, com.security.security.entity.enumeration.DocStatus status);

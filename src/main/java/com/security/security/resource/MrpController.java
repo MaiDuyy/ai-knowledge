@@ -54,7 +54,7 @@ public class MrpController {
      */
     private void validateWorkspaceAccess(String userId, String workspaceId) {
         String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
-        if ("GLOBAL".equals(normalizedWorkspaceId) || "all".equals(normalizedWorkspaceId)) {
+        if ("ALL".equals(normalizedWorkspaceId) || "GLOBAL".equals(normalizedWorkspaceId) || "all".equals(normalizedWorkspaceId)) {
             return; // Allow public, default, or all-workspaces
         }
         var workspace = workspaceServiceClient.getWorkspace(normalizedWorkspaceId, userId);
@@ -73,18 +73,18 @@ public class MrpController {
         String pageWsId = ScopeNormalizer.normalizeWorkspace(page.getWorkspaceId());
         String allowed = page.getAllowedRoles();
 
-        boolean isGlobalScope = "GLOBAL".equals(pageDeptId) && "GLOBAL".equals(pageWsId);
+        boolean isGlobalScope = ("ALL".equals(pageDeptId) || "GLOBAL".equals(pageDeptId)) && ("ALL".equals(pageWsId) || "GLOBAL".equals(pageWsId));
 
         // Rule 1: Global scope → all users
         if (isGlobalScope) return;
 
         // INTERNAL company-wide pages without department restriction
-        if ("GLOBAL".equals(pageDeptId) && SecurityClassification.INTERNAL == page.getSecurityClassification()) {
+        if (("ALL".equals(pageDeptId) || "GLOBAL".equals(pageDeptId)) && SecurityClassification.INTERNAL == page.getSecurityClassification()) {
             return;
         }
 
         // Rules 2+3+4: Department-scoped → must be a member of that department
-        if (!"GLOBAL".equals(pageDeptId)) {
+        if (!"ALL".equals(pageDeptId) && !"GLOBAL".equals(pageDeptId)) {
             boolean isHead = perm.getDeptIdsWhereHead().contains(pageDeptId);
             boolean isMember = perm.getDeptIdsWhereMember().contains(pageDeptId);
 
@@ -420,7 +420,7 @@ public class MrpController {
             @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
             @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
             @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
-        String resolvedWsId = (workspaceId == null || workspaceId.isBlank() || "all".equalsIgnoreCase(workspaceId) || "GLOBAL".equalsIgnoreCase(workspaceId))
+        String resolvedWsId = (workspaceId == null || workspaceId.isBlank() || "all".equalsIgnoreCase(workspaceId) || "GLOBAL".equalsIgnoreCase(workspaceId) || "ALL".equalsIgnoreCase(workspaceId))
                 ? "default-workspace" : workspaceId;
         String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(resolvedWsId);
         log.info("[MrpController] Fetching wiki pages for workspace: {}, page: {}, size: {}, user: {}", normalizedWorkspaceId, page, size, userId);
@@ -431,7 +431,7 @@ public class MrpController {
         }
         
         String workspaceDeptId = null;
-        if (!"GLOBAL".equals(normalizedWorkspaceId)) {
+        if (!"ALL".equals(normalizedWorkspaceId) && !"GLOBAL".equals(normalizedWorkspaceId)) {
             try {
                 Map<String, Object> workspaceInfo = workspaceServiceClient.getWorkspace(normalizedWorkspaceId, userId);
                 if (workspaceInfo != null && workspaceInfo.containsKey("departmentId")) {
@@ -464,7 +464,7 @@ public class MrpController {
             @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
             @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
             @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
-        String resolvedWsId = (workspaceId == null || workspaceId.isBlank() || "all".equalsIgnoreCase(workspaceId) || "GLOBAL".equalsIgnoreCase(workspaceId))
+        String resolvedWsId = (workspaceId == null || workspaceId.isBlank() || "all".equalsIgnoreCase(workspaceId) || "GLOBAL".equalsIgnoreCase(workspaceId) || "ALL".equalsIgnoreCase(workspaceId))
                 ? "default-workspace" : workspaceId;
         String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(resolvedWsId);
         log.info("[MrpController] Fetching lightweight wiki metadata with parsed links for workspace: {} by user: {}", normalizedWorkspaceId, userId);
@@ -475,7 +475,7 @@ public class MrpController {
         }
         
         String workspaceDeptId = null;
-        if (!"GLOBAL".equals(normalizedWorkspaceId)) {
+        if (!"ALL".equals(normalizedWorkspaceId) && !"GLOBAL".equals(normalizedWorkspaceId)) {
             try {
                 Map<String, Object> workspaceInfo = workspaceServiceClient.getWorkspace(normalizedWorkspaceId, userId);
                 if (workspaceInfo != null && workspaceInfo.containsKey("departmentId")) {
@@ -533,7 +533,7 @@ public class MrpController {
         }
         
         String workspaceDeptId = null;
-        if (!"GLOBAL".equals(normalizedWorkspaceId) && !"all".equals(normalizedWorkspaceId)) {
+        if (!"ALL".equals(normalizedWorkspaceId) && !"GLOBAL".equals(normalizedWorkspaceId) && !"all".equals(normalizedWorkspaceId)) {
             try {
                 Map<String, Object> workspaceInfo = workspaceServiceClient.getWorkspace(normalizedWorkspaceId, userId);
                 if (workspaceInfo != null && workspaceInfo.containsKey("departmentId")) {
@@ -622,7 +622,7 @@ public class MrpController {
         }
         
         String workspaceDeptId = null;
-        if (!"GLOBAL".equals(normalizedWorkspaceId) && !"all".equals(normalizedWorkspaceId)) {
+        if (!"ALL".equals(normalizedWorkspaceId) && !"GLOBAL".equals(normalizedWorkspaceId) && !"all".equals(normalizedWorkspaceId)) {
             try {
                 Map<String, Object> workspaceInfo = workspaceServiceClient.getWorkspace(normalizedWorkspaceId, userId);
                 if (workspaceInfo != null && workspaceInfo.containsKey("departmentId")) {
@@ -684,7 +684,7 @@ public class MrpController {
         
         boolean isAdmin = userRoles != null && (userRoles.contains("SUPER_ADMIN") || userRoles.contains("ADMIN"));
         
-        if ("GLOBAL".equals(normalizedWorkspaceId) && isAdmin) {
+        if (("ALL".equals(normalizedWorkspaceId) || "GLOBAL".equals(normalizedWorkspaceId)) && isAdmin) {
             if (page != null && size != null) {
                 Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt"));
                 Page<SourceCompilationPlan> pagedPlans = sourceCompilationPlanRepository.findAll(pageable);
@@ -877,7 +877,8 @@ public class MrpController {
         // Determine preferred workspace — if "all" or null/empty, pass null to get latest globally
         String preferredWorkspaceId = (workspaceId != null && !workspaceId.isBlank()
                 && !"all".equalsIgnoreCase(workspaceId.trim())
-                && !"GLOBAL".equalsIgnoreCase(workspaceId.trim()))
+                && !"GLOBAL".equalsIgnoreCase(workspaceId.trim())
+                && !"ALL".equalsIgnoreCase(workspaceId.trim()))
                 ? workspaceId.trim()
                 : null;
 

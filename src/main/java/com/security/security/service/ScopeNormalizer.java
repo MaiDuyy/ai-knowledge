@@ -10,8 +10,9 @@ public final class ScopeNormalizer {
         if (workspaceId == null || workspaceId.trim().isEmpty() 
             || "default-workspace".equalsIgnoreCase(workspaceId.trim()) 
             || "workspace-default".equalsIgnoreCase(workspaceId.trim())
-            || "all".equalsIgnoreCase(workspaceId.trim())) {
-            return "GLOBAL";
+            || "all".equalsIgnoreCase(workspaceId.trim())
+            || "GLOBAL".equalsIgnoreCase(workspaceId.trim())) {
+            return "ALL";
         }
         return workspaceId.trim();
     }
@@ -19,8 +20,9 @@ public final class ScopeNormalizer {
     public static String normalizeDepartment(String departmentId) {
         if (departmentId == null || departmentId.trim().isEmpty() 
             || "all".equalsIgnoreCase(departmentId.trim())
-            || "default".equalsIgnoreCase(departmentId.trim())) {
-            return "GLOBAL";
+            || "default".equalsIgnoreCase(departmentId.trim())
+            || "GLOBAL".equalsIgnoreCase(departmentId.trim())) {
+            return "ALL";
         }
         return departmentId.trim();
     }
