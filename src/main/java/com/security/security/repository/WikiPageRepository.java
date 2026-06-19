@@ -47,6 +47,28 @@ public interface WikiPageRepository extends JpaRepository<WikiPage, Long> {
         return results.isEmpty() ? Optional.empty() : Optional.of(results.get(0));
     }
 
+    /**
+     * Admin-only: find a page by slug across ALL workspaces.
+     * When multiple workspaces share the same slug, the most recently updated page wins.
+     * If targetWorkspaceId is provided (non-null, non-empty), we prefer that workspace.
+     */
+    @Query("SELECT w FROM WikiPage w WHERE w.slug = :slug "
+         + "ORDER BY "
+         + "CASE WHEN (:targetWorkspaceId IS NOT NULL AND :targetWorkspaceId != '' AND w.workspaceId = :targetWorkspaceId) THEN 0 ELSE 1 END ASC, "
+         + "w.updatedAt DESC")
+    List<WikiPage> findBySlugGlobalInternal(
+        @Param("slug") String slug,
+        @Param("targetWorkspaceId") String targetWorkspaceId,
+        Pageable pageable
+    );
+
+    default Optional<WikiPage> findBySlugGlobal(String slug, String preferredWorkspaceId) {
+        String target = (preferredWorkspaceId != null && !preferredWorkspaceId.isBlank() 
+                         && !"GLOBAL".equalsIgnoreCase(preferredWorkspaceId)) ? preferredWorkspaceId : "";
+        List<WikiPage> results = findBySlugGlobalInternal(slug, target, org.springframework.data.domain.PageRequest.of(0, 1));
+        return results.isEmpty() ? Optional.empty() : Optional.of(results.get(0));
+    }
+
     @Query("SELECT w FROM WikiPage w WHERE ("
          + "(:workspaceId = 'GLOBAL' AND (w.workspaceId = 'GLOBAL' OR w.workspaceId = '' OR w.workspaceId IS NULL OR w.workspaceId = 'default-workspace' OR w.workspaceId = 'workspace-default') AND (w.departmentId = 'GLOBAL' OR w.departmentId IS NULL OR w.departmentId = ''))"
          + "OR (:workspaceId != 'GLOBAL' AND ("
@@ -56,7 +78,7 @@ public interface WikiPageRepository extends JpaRepository<WikiPage, Long> {
          + "        AND :workspaceDeptId IS NOT NULL AND :workspaceDeptId != '' AND w.departmentId = :workspaceDeptId AND w.departmentId != 'GLOBAL')"
          + "))) AND ("
          + ":isAdmin = true OR "
-         + "w.securityClassification = 'PUBLIC' OR "
+         + "w.securityClassification = com.security.security.entity.enumeration.SecurityClassification.PUBLIC OR "
          + "(w.departmentId IS NULL OR w.departmentId = '' OR w.departmentId = 'GLOBAL') OR "
          + "(w.departmentId IN :deptIdsWhereHead) OR "
          + "(w.departmentId IN :deptIdsWhereMember AND (w.allowedRoles IS NULL OR w.allowedRoles = '' OR w.allowedRoles != 'HEAD'))"
@@ -78,7 +100,7 @@ public interface WikiPageRepository extends JpaRepository<WikiPage, Long> {
          + "        AND :workspaceDeptId IS NOT NULL AND :workspaceDeptId != '' AND w.departmentId = :workspaceDeptId AND w.departmentId != 'GLOBAL')"
          + "))) AND ("
          + ":isAdmin = true OR "
-         + "w.securityClassification = 'PUBLIC' OR "
+         + "w.securityClassification = com.security.security.entity.enumeration.SecurityClassification.PUBLIC OR "
          + "(w.departmentId IS NULL OR w.departmentId = '' OR w.departmentId = 'GLOBAL') OR "
          + "(w.departmentId IN :deptIdsWhereHead) OR "
          + "(w.departmentId IN :deptIdsWhereMember AND (w.allowedRoles IS NULL OR w.allowedRoles = '' OR w.allowedRoles != 'HEAD'))"
@@ -99,13 +121,13 @@ public interface WikiPageRepository extends JpaRepository<WikiPage, Long> {
         String getSlug();
         String getWorkspaceId();
         String getTags();
-        String getPageType();
+        com.security.security.entity.enumeration.WikiPageType getPageType();
         Integer getVersion();
         java.time.LocalDateTime getCreatedAt();
         java.time.LocalDateTime getUpdatedAt();
         String getDepartmentId();
         String getAllowedRoles();
-        String getSecurityClassification();
+        com.security.security.entity.enumeration.SecurityClassification getSecurityClassification();
     }
 
     @Query("SELECT w FROM WikiPage w WHERE ("
@@ -117,7 +139,7 @@ public interface WikiPageRepository extends JpaRepository<WikiPage, Long> {
          + "        AND :workspaceDeptId IS NOT NULL AND :workspaceDeptId != '' AND w.departmentId = :workspaceDeptId AND w.departmentId != 'GLOBAL')"
          + "))) AND ("
          + ":isAdmin = true OR "
-         + "w.securityClassification = 'PUBLIC' OR "
+         + "w.securityClassification = com.security.security.entity.enumeration.SecurityClassification.PUBLIC OR "
          + "(w.departmentId IS NULL OR w.departmentId = '' OR w.departmentId = 'GLOBAL') OR "
          + "(w.departmentId IN :deptIdsWhereHead) OR "
          + "(w.departmentId IN :deptIdsWhereMember AND (w.allowedRoles IS NULL OR w.allowedRoles = '' OR w.allowedRoles != 'HEAD'))"
@@ -125,6 +147,19 @@ public interface WikiPageRepository extends JpaRepository<WikiPage, Long> {
     List<WikiPageMetadata> findAccessibleMetadata(
         @Param("workspaceId") String workspaceId,
         @Param("workspaceDeptId") String workspaceDeptId,
+        @Param("isAdmin") boolean isAdmin,
+        @Param("deptIdsWhereHead") List<String> deptIdsWhereHead,
+        @Param("deptIdsWhereMember") List<String> deptIdsWhereMember
+    );
+
+    @Query("SELECT w FROM WikiPage w WHERE ("
+         + ":isAdmin = true OR "
+         + "w.securityClassification = com.security.security.entity.enumeration.SecurityClassification.PUBLIC OR "
+         + "(w.departmentId IS NULL OR w.departmentId = '' OR w.departmentId = 'GLOBAL') OR "
+         + "(w.departmentId IN :deptIdsWhereHead) OR "
+         + "(w.departmentId IN :deptIdsWhereMember AND (w.allowedRoles IS NULL OR w.allowedRoles = '' OR w.allowedRoles != 'HEAD'))"
+         + ")")
+    List<WikiPageMetadata> findAllAccessibleMetadata(
         @Param("isAdmin") boolean isAdmin,
         @Param("deptIdsWhereHead") List<String> deptIdsWhereHead,
         @Param("deptIdsWhereMember") List<String> deptIdsWhereMember
@@ -141,7 +176,7 @@ public interface WikiPageRepository extends JpaRepository<WikiPage, Long> {
          + "        AND :workspaceDeptId IS NOT NULL AND :workspaceDeptId != '' AND w.departmentId = :workspaceDeptId AND w.departmentId != 'GLOBAL')"
          + "))) AND ("
          + ":isAdmin = true OR "
-         + "w.securityClassification = 'PUBLIC' OR "
+         + "w.securityClassification = com.security.security.entity.enumeration.SecurityClassification.PUBLIC OR "
          + "(w.departmentId IS NULL OR w.departmentId = '' OR w.departmentId = 'GLOBAL') OR "
          + "(w.departmentId IN :deptIdsWhereHead) OR "
          + "(w.departmentId IN :deptIdsWhereMember AND (w.allowedRoles IS NULL OR w.allowedRoles = '' OR w.allowedRoles != 'HEAD'))"

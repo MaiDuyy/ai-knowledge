@@ -4,6 +4,11 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.security.security.entity.*;
+import com.security.security.entity.enumeration.SourceChunkStatus;
+import com.security.security.entity.enumeration.SourceCompilationStatus;
+import com.security.security.entity.enumeration.WikiPageDraftStatus;
+import com.security.security.entity.enumeration.SecurityClassification;
+import com.security.security.entity.enumeration.WikiPageType;
 import com.security.security.repository.*;
 import com.security.security.provider.LlmFactory;
 import com.security.security.provider.LlmProvider;
@@ -209,14 +214,14 @@ public class MrpPipelineService {
         // Copy security attributes from Document
         plan.setDepartmentId(docDeptId);
         plan.setAllowedRoles(doc.getAllowedRoles() != null ? doc.getAllowedRoles() : "ALL");
-        plan.setSecurityClassification(doc.getSecurityClassification() != null ? doc.getSecurityClassification() : "INTERNAL");
+        plan.setSecurityClassification(doc.getSecurityClassification() != null ? doc.getSecurityClassification() : SecurityClassification.INTERNAL);
 
-        plan.setStatus("PROCESSING");
+        plan.setStatus(SourceCompilationStatus.PROCESSING);
         plan.setPlanJson(null); // Clear previous plan if any, as we are re-compiling
         plan = sourceCompilationPlanRepository.save(plan);
 
         // Publish event that status is PROCESSING
-        natsEventPublisher.publishCompilationPlanUpdated(plan.getId(), plan.getSourceDocumentId(), targetWorkspaceId, plan.getStatus(), userId);
+        natsEventPublisher.publishCompilationPlanUpdated(plan.getId(), plan.getSourceDocumentId(), targetWorkspaceId, plan.getStatus().name(), userId);
 
         final Long planId = plan.getId();
         final String docContent = doc.getMarkdownContent();
@@ -272,12 +277,12 @@ public class MrpPipelineService {
                             .findBySourceDocumentIdAndChunkIndex(documentId, index);
                     
                     String chunkHash = computeSHA256(chunkText);
-                    if (existing.isPresent() && "DONE".equals(existing.get().getStatus())
+                    if (existing.isPresent() && SourceChunkStatus.DONE == existing.get().getStatus()
                             && chunkHash.equals(existing.get().getContentHash())) {
                         log.info("[MRP Pipeline] [Map Phase] Chunk {} unchanged (hash match), skipping.", index);
                         return existing.get();
                     }
-                    if (existing.isPresent() && "DONE".equals(existing.get().getStatus())
+                    if (existing.isPresent() && SourceChunkStatus.DONE == existing.get().getStatus()
                             && existing.get().getContentHash() == null) {
                         log.info("[MRP Pipeline] [Map Phase] Chunk {} DONE but no hash (legacy), skipping.", index);
                         return existing.get();
@@ -288,10 +293,10 @@ public class MrpPipelineService {
                             .chunkIndex(index)
                             .startChar(index * 19000)
                             .endChar(index * 19000 + chunkText.length())
-                            .status("PENDING")
+                            .status(SourceChunkStatus.PENDING)
                             .build());
 
-                    extract.setStatus("PROCESSING");
+                    extract.setStatus(SourceChunkStatus.PROCESSING);
                     sourceChunkExtractRepository.save(extract);
 
                     try {
@@ -356,13 +361,13 @@ public class MrpPipelineService {
                         }
 
                         extract.setExtractJson(cleanedJson);
-                        extract.setStatus("DONE");
+                        extract.setStatus(SourceChunkStatus.DONE);
                         extract.setContentHash(chunkHash);
                         extract.setErrorMessage(null);
                         log.info("[MRP Pipeline] [Map Phase] Trích xuất thành công chunk {}.", index);
                     } catch (Exception e) {
                         log.error("[MRP Pipeline] [Map Phase] Lỗi trích xuất chunk {}: {}", index, e.getMessage());
-                        extract.setStatus("ERROR");
+                        extract.setStatus(SourceChunkStatus.ERROR);
                         extract.setErrorMessage(e.getMessage());
                     }
 
@@ -378,7 +383,7 @@ public class MrpPipelineService {
 
             // --- PHASE 2: REDUCE PHASE (Tổng hợp, Deduplicate & Reconcile) ---
             log.info("[MRP Pipeline] [Reduce Phase] Bắt đầu tổng hợp tri thức trích xuất...");
-            List<SourceChunkExtract> doneChunks = sourceChunkExtractRepository.findBySourceDocumentIdAndStatus(documentId, "DONE");
+            List<SourceChunkExtract> doneChunks = sourceChunkExtractRepository.findBySourceDocumentIdAndStatus(documentId, SourceChunkStatus.DONE);
             
             List<Map<String, Object>> allEntities = new ArrayList<>();
             List<Map<String, Object>> allConcepts = new ArrayList<>();
@@ -617,9 +622,9 @@ public class MrpPipelineService {
                     .orElseThrow(() -> new IllegalArgumentException("Plan not found with ID: " + planId));
 
             plan.setPlanJson(planJson);
-            plan.setStatus(autoApprove ? "APPROVED" : "PENDING_REVIEW");
+            plan.setStatus(autoApprove ? SourceCompilationStatus.APPROVED : SourceCompilationStatus.PENDING_REVIEW);
             sourceCompilationPlanRepository.save(plan);
-            natsEventPublisher.publishCompilationPlanUpdated(plan.getId(), plan.getSourceDocumentId(), finalWorkspaceId, plan.getStatus(), userId);
+            natsEventPublisher.publishCompilationPlanUpdated(plan.getId(), plan.getSourceDocumentId(), finalWorkspaceId, plan.getStatus().name(), userId);
 
             log.info("[MRP Pipeline] [Reduce Phase] Đã hoàn thành Kế hoạch biên soạn ID: {}, trạng thái: {}", plan.getId(), plan.getStatus());
 
@@ -630,7 +635,7 @@ public class MrpPipelineService {
         } catch (Exception e) {
             log.error("[MRP Pipeline] [Async] Error in background compilation process: {}", e.getMessage(), e);
             sourceCompilationPlanRepository.findById(planId).ifPresent(plan -> {
-                plan.setStatus("FAILED");
+                plan.setStatus(SourceCompilationStatus.FAILED);
                 plan.setReviewNote("Compilation failed: " + e.getMessage());
                 sourceCompilationPlanRepository.save(plan);
                 natsEventPublisher.publishCompilationPlanUpdated(plan.getId(), plan.getSourceDocumentId(), finalWorkspaceId, "FAILED", userId);
@@ -854,21 +859,21 @@ public class MrpPipelineService {
                         .wikiPageId(wikiPageId)
                         .slug(slug)
                         .title(title)
-                        .pageType(normalizedPageType)
+                        .pageType(WikiPageType.fromValue(normalizedPageType))
                         .content(generatedContent)
                         .summary(String.format("Compiled from document ID: %d", plan.getSourceDocumentId()))
                         .workspaceId(finalWorkspaceId)
                         .departmentId(plan.getDepartmentId())
                         .allowedRoles(plan.getAllowedRoles() != null ? plan.getAllowedRoles() : "ALL")
-                        .securityClassification(plan.getSecurityClassification() != null ? plan.getSecurityClassification() : "INTERNAL")
+                        .securityClassification(plan.getSecurityClassification() != null ? plan.getSecurityClassification() : SecurityClassification.INTERNAL)
                         .authorId(userId)
-                        .status("PENDING")
+                        .status(WikiPageDraftStatus.PENDING)
                         .baseVersion(baseVersion)
                         .note("Automatically compiled from MRP pipeline.")
                         .build();
 
                 wikiPageDraftRepository.save(draft);
-                natsEventPublisher.publishWikiDraftUpdated(draft.getId(), draft.getTitle(), draft.getSlug(), draft.getWorkspaceId(), draft.getStatus(), userId);
+                natsEventPublisher.publishWikiDraftUpdated(draft.getId(), draft.getTitle(), draft.getSlug(), draft.getWorkspaceId(), draft.getStatus().name(), userId);
                 log.info("[MRP Pipeline] [Refine Phase] Đã tạo Draft nháp ID: {} cho trang '{}'", draft.getId(), title);
 
                 if (runAutoApproveDrafts) {
@@ -882,7 +887,7 @@ public class MrpPipelineService {
             }
 
             // Update plan status to DONE
-            plan.setStatus("DONE");
+            plan.setStatus(SourceCompilationStatus.DONE);
             plan.setReviewedBy(userId);
             plan.setReviewedAt(LocalDateTime.now());
             plan.setReviewNote("Plan executed successfully.");

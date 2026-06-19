@@ -4,6 +4,7 @@ import com.security.security.dto.DocumentUploadResponse;
 import com.security.security.entity.Document;
 import com.security.security.entity.enumeration.DocStatus;
 import com.security.security.entity.enumeration.DocType;
+import com.security.security.entity.enumeration.SecurityClassification;
 import com.security.security.event.NatsEventPublisher;
 import com.security.security.exception.ApiException;
 import com.security.security.repository.DocumentRepository;
@@ -303,7 +304,7 @@ public class DocumentService {
                 .parserMethod(parser != null ? parser : "gemini")
                 .departmentId(targetDeptId)
                 .allowedRoles(allowedRoles != null && !allowedRoles.isBlank() ? allowedRoles : "ALL")
-                .securityClassification(securityClassification != null && !securityClassification.isBlank() ? securityClassification : "INTERNAL")
+                .securityClassification(securityClassification != null && !securityClassification.isBlank() ? SecurityClassification.valueOf(securityClassification.toUpperCase().trim()) : SecurityClassification.INTERNAL)
                 .fileHash(fileHash)
                 .folderPath(folderPath)
                 .build();
@@ -421,6 +422,14 @@ public class DocumentService {
      * Falls back to company-wide listing if workspaceId is null/blank (backward compat).
      */
     public List<Document> getDocuments(String userId, String workspaceId, String userRole, String userDepartments) {
+        if ("all".equalsIgnoreCase(workspaceId)) {
+            UserPermissionContext perms = PermissionUtils.parse(userRole, userDepartments, objectMapper);
+            List<Document> docs = documentRepository.findAllByOrderByCreatedAtDesc();
+            if (perms.isAdmin()) {
+                return docs;
+            }
+            return filterDocumentsByRole(docs, userId, "all", userRole, userDepartments);
+        }
         String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
         validateWorkspaceAccess(normalizedWorkspaceId, userId);
         List<Document> docs;
@@ -447,6 +456,18 @@ public class DocumentService {
     }
 
     public Page<Document> getDocuments(String userId, String workspaceId, Pageable pageable, String userRole, String userDepartments) {
+        if ("all".equalsIgnoreCase(workspaceId)) {
+            UserPermissionContext perms = PermissionUtils.parse(userRole, userDepartments, objectMapper);
+            if (perms.isAdmin()) {
+                return documentRepository.findAllByOrderByCreatedAtDesc(pageable);
+            }
+            List<Document> allDocs = documentRepository.findAllByOrderByCreatedAtDesc();
+            List<Document> filteredList = filterDocumentsByRole(allDocs, userId, "all", userRole, userDepartments);
+            int start = (int) pageable.getOffset();
+            int end = Math.min((start + pageable.getPageSize()), filteredList.size());
+            List<Document> sub = (start <= filteredList.size()) ? filteredList.subList(start, end) : Collections.emptyList();
+            return new org.springframework.data.domain.PageImpl<>(sub, pageable, filteredList.size());
+        }
         String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
         validateWorkspaceAccess(normalizedWorkspaceId, userId);
         Page<Document> page;
@@ -978,7 +999,11 @@ public class DocumentService {
         }
 
         if (securityClassification != null) {
-            document.setSecurityClassification(securityClassification);
+            try {
+                document.setSecurityClassification(SecurityClassification.valueOf(securityClassification.toUpperCase().trim()));
+            } catch (IllegalArgumentException e) {
+                log.warn("Invalid security classification provided: {}, ignoring update", securityClassification);
+            }
         }
         if (departmentId != null) {
             document.setDepartmentId(departmentId);

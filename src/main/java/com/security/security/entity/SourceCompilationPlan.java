@@ -1,5 +1,7 @@
 package com.security.security.entity;
 
+import com.security.security.entity.enumeration.SourceCompilationStatus;
+import com.security.security.entity.enumeration.SecurityClassification;
 import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.CreationTimestamp;
@@ -31,8 +33,9 @@ public class SourceCompilationPlan {
     private String planJson;
 
     @Column(nullable = false, length = 50)
+    @Enumerated(EnumType.STRING)
     @Builder.Default
-    private String status = "PENDING_REVIEW"; // PENDING_REVIEW, APPROVED, DONE
+    private SourceCompilationStatus status = SourceCompilationStatus.PENDING_REVIEW; // PENDING_REVIEW, APPROVED, DONE
 
     @Column(name = "reviewed_by", length = 100)
     private String reviewedBy;
@@ -45,8 +48,9 @@ public class SourceCompilationPlan {
     private String allowedRoles = "ALL"; // ALL, HEAD, MEMBER
 
     @Column(name = "security_classification", length = 50)
+    @Enumerated(EnumType.STRING)
     @Builder.Default
-    private String securityClassification = "INTERNAL"; // PUBLIC, INTERNAL, CONFIDENTIAL, RESTRICTED
+    private SecurityClassification securityClassification = SecurityClassification.INTERNAL; // PUBLIC, INTERNAL, CONFIDENTIAL, RESTRICTED
 
     @Column(name = "review_note", columnDefinition = "TEXT")
     private String reviewNote;

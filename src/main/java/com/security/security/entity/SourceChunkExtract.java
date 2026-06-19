@@ -1,5 +1,6 @@
 package com.security.security.entity;
 
+import com.security.security.entity.enumeration.SourceChunkStatus;
 import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.CreationTimestamp;
@@ -38,8 +39,9 @@ public class SourceChunkExtract {
     private String sectionPath;
 
     @Column(nullable = false, length = 50)
+    @Enumerated(EnumType.STRING)
     @Builder.Default
-    private String status = "PENDING"; // PENDING, DONE, ERROR
+    private SourceChunkStatus status = SourceChunkStatus.PENDING; // PENDING, DONE, ERROR
 
     @Column(name = "extract_json", columnDefinition = "TEXT")
     private String extractJson;

@@ -9,6 +9,8 @@ import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
 import com.security.security.repository.WikiPageRepository;
 import com.security.security.entity.WikiPage;
+import com.security.security.entity.enumeration.WikiPageType;
+import com.security.security.entity.enumeration.WikiPageDraftStatus;
 
 import java.util.List;
 import java.util.Map;
@@ -246,8 +248,8 @@ public class AgentToolConfig {
                     .tags(input.tags())
                     .workspaceId(wsId)
                     .authorId(userId)
-                    .pageType("concept")
-                    .status("PENDING")
+                    .pageType(WikiPageType.CONCEPT)
+                    .status(WikiPageDraftStatus.PENDING)
                     .note(input.note() != null ? input.note() : "Đề xuất từ AI Agent")
                     .build();
 
@@ -278,7 +280,7 @@ public class AgentToolConfig {
                         .workspaceId(page.getWorkspaceId())
                         .pageType(page.getPageType())
                         .authorId(userId)
-                        .status("PENDING")
+                        .status(WikiPageDraftStatus.PENDING)
                         .baseVersion(page.getVersion())
                         .note(input.note() != null ? input.note() : "Chỉnh sửa đề xuất từ AI Agent")
                         .build();

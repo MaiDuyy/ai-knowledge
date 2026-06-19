@@ -1,5 +1,8 @@
 package com.security.security.entity;
 
+import com.security.security.entity.enumeration.SecurityClassification;
+import com.security.security.entity.enumeration.WikiPageType;
+import com.security.security.entity.enumeration.WikiPageDraftStatus;
 import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.CreationTimestamp;
@@ -33,7 +36,7 @@ public class WikiPageDraft {
     private String title;
 
     @Column(name = "page_type", length = 50)
-    private String pageType; // entity, concept, topic, source
+    private WikiPageType pageType; // entity, concept, topic, source
 
     @Column(columnDefinition = "TEXT", nullable = false)
     private String content;
@@ -55,15 +58,17 @@ public class WikiPageDraft {
     private String allowedRoles = "ALL"; // ALL, HEAD, MEMBER
 
     @Column(name = "security_classification", length = 50)
+    @Enumerated(EnumType.STRING)
     @Builder.Default
-    private String securityClassification = "INTERNAL"; // PUBLIC, INTERNAL, CONFIDENTIAL, RESTRICTED
+    private SecurityClassification securityClassification = SecurityClassification.INTERNAL; // PUBLIC, INTERNAL, CONFIDENTIAL, RESTRICTED
 
     @Column(name = "author_id", nullable = false, length = 100)
     private String authorId;
 
     @Column(nullable = false, length = 50)
+    @Enumerated(EnumType.STRING)
     @Builder.Default
-    private String status = "PENDING"; // PENDING, APPROVED, REJECTED, NEEDS_REVISION, WITHDRAWN
+    private WikiPageDraftStatus status = WikiPageDraftStatus.PENDING; // PENDING, APPROVED, REJECTED, NEEDS_REVISION, WITHDRAWN
 
     @Column(name = "note", length = 500)
     private String note; // Author's change/submission note

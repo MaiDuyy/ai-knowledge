@@ -11,7 +11,7 @@ import java.util.Optional;
 public interface SourceChunkExtractRepository extends JpaRepository<SourceChunkExtract, Long> {
     List<SourceChunkExtract> findBySourceDocumentId(Long sourceDocumentId);
     Optional<SourceChunkExtract> findBySourceDocumentIdAndChunkIndex(Long sourceDocumentId, Integer chunkIndex);
-    List<SourceChunkExtract> findBySourceDocumentIdAndStatus(Long sourceDocumentId, String status);
+    List<SourceChunkExtract> findBySourceDocumentIdAndStatus(Long sourceDocumentId, com.security.security.entity.enumeration.SourceChunkStatus status);
 
     @org.springframework.data.jpa.repository.Modifying
     @org.springframework.transaction.annotation.Transactional

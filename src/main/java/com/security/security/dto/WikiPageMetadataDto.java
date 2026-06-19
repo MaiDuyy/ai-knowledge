@@ -1,5 +1,7 @@
 package com.security.security.dto;
 
+import com.security.security.entity.enumeration.WikiPageType;
+import com.security.security.entity.enumeration.SecurityClassification;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -21,14 +23,14 @@ public class WikiPageMetadataDto {
     private String slug;
     private String workspaceId;
     private String tags;
-    private String pageType;
+    private WikiPageType pageType;
     private Integer version;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
     private List<String> links;
     private String departmentId;
     private String allowedRoles;
-    private String securityClassification;
+    private SecurityClassification securityClassification;
 
     private static final Pattern WIKILINK_PATTERN = Pattern.compile("\\[\\[([^\\]|]+)(?:\\|[^\\]]+)?\\]\\]");
 

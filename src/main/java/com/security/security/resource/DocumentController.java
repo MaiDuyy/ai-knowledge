@@ -109,9 +109,7 @@ public class DocumentController {
     {
         // Resolve workspaceId: query param takes priority over header
         String resolvedWsId = (workspaceId != null && !workspaceId.isBlank()) ? workspaceId : workspaceIdHeader;
-        if ("all".equalsIgnoreCase(resolvedWsId)) {
-            resolvedWsId = null;
-        } else if (resolvedWsId == null || resolvedWsId.isBlank()) {
+        if (resolvedWsId == null || resolvedWsId.isBlank() || "all".equalsIgnoreCase(resolvedWsId) || "GLOBAL".equalsIgnoreCase(resolvedWsId)) {
             resolvedWsId = "default-workspace";
         }
         if (page != null && size != null) {
@@ -221,11 +219,16 @@ public class DocumentController {
             @RequestBody ChunkSearchRequest request,
             @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) {
 
+        String wsId = request.getWorkspaceId();
+        if (wsId == null || wsId.isBlank() || "all".equalsIgnoreCase(wsId) || "GLOBAL".equalsIgnoreCase(wsId)) {
+            wsId = "default-workspace";
+        }
+
         ChunkSearchResponse response = chunkService.searchChunks(
                 request.getQuery(),
                 request.getTopK() != null ? request.getTopK() : 5,
                 request.getMinSimilarity() != null ? request.getMinSimilarity() : 0.5,
-                request.getWorkspaceId(),
+                wsId,
                 userId);
 
         return ResponseEntity.ok(response);
@@ -260,6 +263,56 @@ public class DocumentController {
         List<String> tags = (List<String>) payload.get("tags");
         Document doc = documentService.updateDocumentMetadata(id, securityClassification, departmentId, allowedRoles, tags, folderPath, workspaceId, userId);
         return ResponseEntity.ok(doc);
+    }
+
+    // ==================== ADMIN ENDPOINTS ====================
+
+    /**
+     * List all documents system-wide (Admin only)
+     */
+    @GetMapping("/admin")
+    @org.springframework.security.access.prepost.PreAuthorize("hasAnyRole('ADMIN', 'SUPER_ADMIN')")
+    public ResponseEntity<?> getAdminDocuments(
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-role", required = false) String userRole,
+            @RequestHeader(value = "x-user-departments", required = false) String userDepartments,
+            @RequestParam(required = false) Integer page,
+            @RequestParam(required = false) Integer size)
+    {
+        if (page != null && size != null) {
+            Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt"));
+            Page<Document> pagedDocs = documentService.getDocuments(userId, "all", pageable, userRole, userDepartments);
+            return ResponseEntity.ok(pagedDocs);
+        }
+        List<Document> documents = documentService.getDocuments(userId, "all", userRole, userDepartments);
+        return ResponseEntity.ok(documents);
+    }
+
+    /**
+     * Get details of any document system-wide (Admin only)
+     */
+    @GetMapping("/admin/{id}")
+    @org.springframework.security.access.prepost.PreAuthorize("hasAnyRole('ADMIN', 'SUPER_ADMIN')")
+    public ResponseEntity<Document> getAdminDocument(
+            @PathVariable Long id,
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-role", required = false) String userRole,
+            @RequestHeader(value = "x-user-departments", required = false) String userDepartments) {
+        Document document = documentService.getDocument(id, userId, userRole, userDepartments);
+        return ResponseEntity.ok(document);
+    }
+
+    /**
+     * Delete any document system-wide (Admin only)
+     */
+    @DeleteMapping("/admin/{id}")
+    @org.springframework.security.access.prepost.PreAuthorize("hasAnyRole('ADMIN', 'SUPER_ADMIN')")
+    public ResponseEntity<Map<String, String>> deleteAdminDocument(
+            @PathVariable Long id,
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-role", required = false) String userRole) {
+        documentService.deleteDocument(id, userId, userRole);
+        return ResponseEntity.ok(Map.of("message", "Document deleted successfully"));
     }
 
 }

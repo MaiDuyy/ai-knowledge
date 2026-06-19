@@ -2,6 +2,7 @@ package com.security.security.entity;
 
 import com.security.security.entity.enumeration.DocStatus;
 import com.security.security.entity.enumeration.DocType;
+import com.security.security.entity.enumeration.SecurityClassification;
 import com.security.security.entity.converter.StringListConverter;
 import jakarta.persistence.*;
 import lombok.*;
@@ -87,8 +88,9 @@ public class Document {
     private Integer avgTokensPerChunk = 0;
 
     @Column(name = "security_classification", length = 50)
+    @Enumerated(EnumType.STRING)
     @Builder.Default
-    private String securityClassification = "INTERNAL";
+    private SecurityClassification securityClassification = SecurityClassification.INTERNAL;
 
     @Column(name = "department_id", length = 100)
     private String departmentId;

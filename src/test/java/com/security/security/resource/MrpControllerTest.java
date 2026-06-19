@@ -88,7 +88,7 @@ class MrpControllerTest {
     @DisplayName("Should grant access to PUBLIC page for anyone")
     void checkPageAccess_PublicPage_GrantsAccess() throws Exception {
         WikiPage page = WikiPage.builder()
-                .securityClassification("PUBLIC")
+                .securityClassification(com.security.security.entity.enumeration.SecurityClassification.PUBLIC)
                 .departmentId("some-dept")
                 .allowedRoles("HEAD")
                 .build();
@@ -104,7 +104,7 @@ class MrpControllerTest {
     @DisplayName("Should deny access to department page if user has no department membership")
     void checkPageAccess_DeptHeadPage_DeniesAccess() throws Exception {
         WikiPage page = WikiPage.builder()
-                .securityClassification("INTERNAL")
+                .securityClassification(com.security.security.entity.enumeration.SecurityClassification.INTERNAL)
                 .departmentId("dept-vip")
                 .allowedRoles("HEAD")
                 .build();
@@ -125,7 +125,7 @@ class MrpControllerTest {
     @DisplayName("Should grant access to department page if user is HEAD of that department")
     void checkPageAccess_DeptHeadPage_GrantsAccessToHead() throws Exception {
         WikiPage page = WikiPage.builder()
-                .securityClassification("INTERNAL")
+                .securityClassification(com.security.security.entity.enumeration.SecurityClassification.INTERNAL)
                 .departmentId("dept-vip")
                 .allowedRoles("HEAD")
                 .build();
@@ -142,7 +142,7 @@ class MrpControllerTest {
     @DisplayName("Should deny access to department page if user is MEMBER but allowedRoles is HEAD")
     void checkPageAccess_DeptHeadPage_DeniesMember() throws Exception {
         WikiPage page = WikiPage.builder()
-                .securityClassification("INTERNAL")
+                .securityClassification(com.security.security.entity.enumeration.SecurityClassification.INTERNAL)
                 .departmentId("dept-vip")
                 .allowedRoles("HEAD")
                 .build();
@@ -171,7 +171,7 @@ class MrpControllerTest {
         SourceCompilationPlan mockPlan = SourceCompilationPlan.builder()
                 .id(100L)
                 .sourceDocumentId(documentId)
-                .status("PROCESSING")
+                .status(com.security.security.entity.enumeration.SourceCompilationStatus.PROCESSING)
                 .build();
 
         Mockito.when(workspaceServiceClient.getWorkspace(workspaceId, userId))
@@ -185,7 +185,7 @@ class MrpControllerTest {
 
         assertThat(response.getStatusCodeValue()).isEqualTo(202);
         assertThat(response.getBody()).isNotNull();
-        assertThat(response.getBody().getStatus()).isEqualTo("PROCESSING");
+        assertThat(response.getBody().getStatus()).isEqualTo(com.security.security.entity.enumeration.SourceCompilationStatus.PROCESSING);
     }
 
     @Test
@@ -204,13 +204,13 @@ class MrpControllerTest {
         Mockito.when(page1.getId()).thenReturn(1L);
         Mockito.when(page1.getSlug()).thenReturn("slug-1");
         Mockito.when(page1.getTitle()).thenReturn("Title 1");
-        Mockito.when(page1.getPageType()).thenReturn("concept");
+        Mockito.when(page1.getPageType()).thenReturn(com.security.security.entity.enumeration.WikiPageType.CONCEPT);
 
         WikiPageRepository.WikiPageMetadata page2 = Mockito.mock(WikiPageRepository.WikiPageMetadata.class);
         Mockito.when(page2.getId()).thenReturn(2L);
         Mockito.when(page2.getSlug()).thenReturn("slug-2");
         Mockito.when(page2.getTitle()).thenReturn("Title 2");
-        Mockito.when(page2.getPageType()).thenReturn("entity");
+        Mockito.when(page2.getPageType()).thenReturn(com.security.security.entity.enumeration.WikiPageType.ENTITY);
 
         Mockito.when(wikiPageRepository.findAccessibleMetadata(
                 Mockito.eq(workspaceId), Mockito.any(), Mockito.eq(false), Mockito.anyList(), Mockito.anyList()))

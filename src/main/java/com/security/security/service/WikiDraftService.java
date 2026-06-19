@@ -22,6 +22,8 @@ import java.util.stream.Collectors;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
+import com.security.security.entity.enumeration.WikiPageDraftStatus;
+import com.security.security.entity.enumeration.SecurityClassification;
 
 @Service
 @Slf4j
@@ -49,14 +51,14 @@ public class WikiDraftService {
         
         // Conflict Detection: check if another draft with status PENDING exists for the same slug and workspaceId
         List<WikiPageDraft> existingPendingDrafts = wikiPageDraftRepository.findBySlugAndWorkspaceId(draft.getSlug(), resolvedWorkspaceId);
-        boolean hasPending = existingPendingDrafts.stream().anyMatch(d -> "PENDING".equals(d.getStatus()));
+        boolean hasPending = existingPendingDrafts.stream().anyMatch(d -> WikiPageDraftStatus.PENDING == d.getStatus());
         if (hasPending) {
             throw new IllegalStateException("A pending draft already exists for the slug: " + draft.getSlug() + " in this workspace.");
         }
 
-        draft.setStatus("PENDING");
+        draft.setStatus(WikiPageDraftStatus.PENDING);
         WikiPageDraft saved = wikiPageDraftRepository.save(draft);
-        natsEventPublisher.publishWikiDraftUpdated(saved.getId(), saved.getTitle(), saved.getSlug(), saved.getWorkspaceId(), saved.getStatus(), saved.getAuthorId());
+        natsEventPublisher.publishWikiDraftUpdated(saved.getId(), saved.getTitle(), saved.getSlug(), saved.getWorkspaceId(), saved.getStatus().name(), saved.getAuthorId());
         return saved;
     }
 
@@ -71,7 +73,7 @@ public class WikiDraftService {
         WikiPageDraft draft = wikiPageDraftRepository.findById(draftId)
                 .orElseThrow(() -> new IllegalArgumentException("Draft not found with ID: " + draftId));
 
-        if ("APPROVED".equals(draft.getStatus())) {
+        if (WikiPageDraftStatus.APPROVED == draft.getStatus()) {
             log.warn("[WikiDraftService] Draft {} is already approved", draftId);
             return draft;
         }
@@ -91,7 +93,7 @@ public class WikiDraftService {
                         targetPage.getTitle(), targetPage.getVersion(), draft.getBaseVersion()
                 );
                 log.error("[WikiDraftService] " + errorMsg);
-                draft.setStatus("NEEDS_REVISION");
+                draft.setStatus(WikiPageDraftStatus.NEEDS_REVISION);
                 draft.setReviewerNote(errorMsg);
                 wikiPageDraftRepository.save(draft);
                 natsEventPublisher.publishWikiDraftUpdated(draft.getId(), draft.getTitle(), draft.getSlug(), draft.getWorkspaceId(), "NEEDS_REVISION", reviewerId);
@@ -110,7 +112,7 @@ public class WikiDraftService {
             targetPage.setWorkspaceId(resolvedWorkspaceId);
             targetPage.setDepartmentId(targetDeptId);
             targetPage.setAllowedRoles(draft.getAllowedRoles() != null ? draft.getAllowedRoles() : "ALL");
-            targetPage.setSecurityClassification(draft.getSecurityClassification() != null ? draft.getSecurityClassification() : "INTERNAL");
+            targetPage.setSecurityClassification(draft.getSecurityClassification() != null ? draft.getSecurityClassification() : SecurityClassification.INTERNAL);
             
             // JPA handles @Version increments automatically
             targetPage = wikiPageRepository.save(targetPage);
@@ -139,7 +141,7 @@ public class WikiDraftService {
                 targetPage.setWorkspaceId(resolvedWorkspaceId);
                 targetPage.setDepartmentId(targetDeptId);
                 targetPage.setAllowedRoles(draft.getAllowedRoles() != null ? draft.getAllowedRoles() : "ALL");
-                targetPage.setSecurityClassification(draft.getSecurityClassification() != null ? draft.getSecurityClassification() : "INTERNAL");
+                targetPage.setSecurityClassification(draft.getSecurityClassification() != null ? draft.getSecurityClassification() : SecurityClassification.INTERNAL);
                 targetPage = wikiPageRepository.save(targetPage);
             } else {
                 log.info("[WikiDraftService] Creating new WikiPage '{}' from draft", draft.getTitle());
@@ -151,7 +153,7 @@ public class WikiDraftService {
                         .workspaceId(resolvedWorkspaceId)
                         .departmentId(targetDeptId)
                         .allowedRoles(draft.getAllowedRoles() != null ? draft.getAllowedRoles() : "ALL")
-                        .securityClassification(draft.getSecurityClassification() != null ? draft.getSecurityClassification() : "INTERNAL")
+                        .securityClassification(draft.getSecurityClassification() != null ? draft.getSecurityClassification() : SecurityClassification.INTERNAL)
                         .pageType(draft.getPageType())
                         .summary(draft.getSummary())
                         .build();
@@ -168,7 +170,7 @@ public class WikiDraftService {
         refreshLinks(targetPage.getId(), targetPage.getSlug(), targetPage.getContent(), targetPage.getWorkspaceId());
 
         // Update draft status
-        draft.setStatus("APPROVED");
+        draft.setStatus(WikiPageDraftStatus.APPROVED);
         draft.setReviewerNote("Approved and committed successfully.");
         WikiPageDraft saved = wikiPageDraftRepository.save(draft);
         natsEventPublisher.publishWikiDraftUpdated(saved.getId(), saved.getTitle(), saved.getSlug(), saved.getWorkspaceId(), "APPROVED", reviewerId);
@@ -198,10 +200,10 @@ public class WikiDraftService {
                 metadata.put("workspaceId", ScopeNormalizer.normalizeWorkspace(p.getWorkspaceId()));
                 metadata.put("departmentId", ScopeNormalizer.normalizeDepartment(p.getDepartmentId()));
                 metadata.put("allowedRoles", p.getAllowedRoles() != null ? p.getAllowedRoles() : "ALL");
-                metadata.put("classification", p.getSecurityClassification() != null ? p.getSecurityClassification() : "INTERNAL");
-                metadata.put("securityClassification", p.getSecurityClassification() != null ? p.getSecurityClassification() : "INTERNAL");
+                metadata.put("classification", p.getSecurityClassification() != null ? p.getSecurityClassification().name() : "INTERNAL");
+                metadata.put("securityClassification", p.getSecurityClassification() != null ? p.getSecurityClassification().name() : "INTERNAL");
                 metadata.put("type", "wiki");
-                metadata.put("pageType", p.getPageType() != null ? p.getPageType() : "");
+                metadata.put("pageType", p.getPageType() != null ? p.getPageType().getValue() : "");
                 metadata.put("slug", p.getSlug() != null ? p.getSlug() : "");
                 metadata.put("sourceDocumentId", p.getSourceDocumentId() != null ? p.getSourceDocumentId().toString() : "");
                 metadata.put("fileName", p.getTitle() != null ? p.getTitle() : "");
@@ -241,10 +243,10 @@ public class WikiDraftService {
             metadata.put("workspaceId", ScopeNormalizer.normalizeWorkspace(page.getWorkspaceId()));
             metadata.put("departmentId", ScopeNormalizer.normalizeDepartment(page.getDepartmentId()));
             metadata.put("allowedRoles", page.getAllowedRoles() != null ? page.getAllowedRoles() : "ALL");
-            metadata.put("classification", page.getSecurityClassification() != null ? page.getSecurityClassification() : "INTERNAL");
-            metadata.put("securityClassification", page.getSecurityClassification() != null ? page.getSecurityClassification() : "INTERNAL");
+            metadata.put("classification", page.getSecurityClassification() != null ? page.getSecurityClassification().name() : "INTERNAL");
+            metadata.put("securityClassification", page.getSecurityClassification() != null ? page.getSecurityClassification().name() : "INTERNAL");
             metadata.put("type", "wiki");
-            metadata.put("pageType", page.getPageType() != null ? page.getPageType() : "");
+            metadata.put("pageType", page.getPageType() != null ? page.getPageType().getValue() : "");
             metadata.put("slug", page.getSlug() != null ? page.getSlug() : "");
             metadata.put("sourceDocumentId", page.getSourceDocumentId() != null ? page.getSourceDocumentId().toString() : "");
             metadata.put("fileName", page.getTitle() != null ? page.getTitle() : "");
@@ -373,7 +375,7 @@ public class WikiDraftService {
         WikiPageDraft draft = wikiPageDraftRepository.findById(draftId)
                 .orElseThrow(() -> new IllegalArgumentException("Draft not found with ID: " + draftId));
 
-        draft.setStatus("REJECTED");
+        draft.setStatus(WikiPageDraftStatus.REJECTED);
         draft.setReviewerNote(note);
         WikiPageDraft saved = wikiPageDraftRepository.save(draft);
         natsEventPublisher.publishWikiDraftUpdated(saved.getId(), saved.getTitle(), saved.getSlug(), saved.getWorkspaceId(), "REJECTED", reviewerId);
@@ -389,7 +391,7 @@ public class WikiDraftService {
         WikiPageDraft draft = wikiPageDraftRepository.findById(draftId)
                 .orElseThrow(() -> new IllegalArgumentException("Draft not found with ID: " + draftId));
 
-        draft.setStatus("NEEDS_REVISION");
+        draft.setStatus(WikiPageDraftStatus.NEEDS_REVISION);
         draft.setReviewerNote(note);
         WikiPageDraft saved = wikiPageDraftRepository.save(draft);
         natsEventPublisher.publishWikiDraftUpdated(saved.getId(), saved.getTitle(), saved.getSlug(), saved.getWorkspaceId(), "NEEDS_REVISION", reviewerId);
@@ -400,14 +402,14 @@ public class WikiDraftService {
      * Retrieve all pending drafts
      */
     public List<WikiPageDraft> getPendingDrafts() {
-        return wikiPageDraftRepository.findByStatus("PENDING");
+        return wikiPageDraftRepository.findByStatus(WikiPageDraftStatus.PENDING);
     }
 
     /**
      * Retrieve all pending drafts with pagination
      */
     public Page<WikiPageDraft> getPendingDrafts(Pageable pageable) {
-        return wikiPageDraftRepository.findByStatus("PENDING", pageable);
+        return wikiPageDraftRepository.findByStatus(WikiPageDraftStatus.PENDING, pageable);
     }
 
     /**

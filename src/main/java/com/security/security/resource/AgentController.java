@@ -57,6 +57,53 @@ public class AgentController {
             conversationService.getConversation(conversationId, userId);
         }
 
+        // Sanitize workspaceId for regular user
+        String wsId = request.getWorkspaceId();
+        if (wsId == null || wsId.isBlank() || "all".equalsIgnoreCase(wsId) || "GLOBAL".equalsIgnoreCase(wsId)) {
+            wsId = "default-workspace";
+        }
+
+        final Long finalConversationId = conversationId;
+        final String chatId = request.getChatId() != null ? request.getChatId() : "unknown";
+        final String finalWsId = wsId;
+
+        llmRateLimiterService.acquireAgentChat();
+        try {
+            return agentService.runAgent(finalConversationId, request.getMessage(), userId, chatId, request.getProvider(), request.getSkillId(), finalWsId)
+                    .onErrorResume(e -> {
+                         log.error("[AgentController] Agent error: {}", e.getMessage());
+                         return Flux.just("Đã xảy ra lỗi khi xử lý yêu cầu. Vui lòng thử lại.");
+                    })
+                    .doFinally(signalType -> llmRateLimiterService.releaseAgentChat());
+        } catch (Exception e) {
+            llmRateLimiterService.releaseAgentChat();
+            throw e;
+        }
+    }
+
+    /**
+     * Stream an agent response for admin.
+     */
+    @PostMapping(value = "/admin/chat", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    @org.springframework.security.access.prepost.PreAuthorize("hasAnyRole('ADMIN', 'SUPER_ADMIN')")
+    public Flux<String> adminAgentChat(
+            @RequestBody AgentRequest request,
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) {
+
+        log.info("[AgentController Admin] userId={}, chatId={}, message='{}'",
+                userId, request.getChatId(), request.getMessage());
+
+        // Resolve or create conversation
+        Long conversationId = request.getConversationId();
+        if (conversationId == null) {
+            String title = "Admin Agent — " + (request.getChatId() != null ? request.getChatId() : "General");
+            Conversation conv = conversationService.createConversation(userId, title, request.getChatId());
+            conversationId = conv.getId();
+        } else {
+            // Verify ownership
+            conversationService.getConversation(conversationId, userId);
+        }
+
         final Long finalConversationId = conversationId;
         final String chatId = request.getChatId() != null ? request.getChatId() : "unknown";
 
@@ -64,8 +111,8 @@ public class AgentController {
         try {
             return agentService.runAgent(finalConversationId, request.getMessage(), userId, chatId, request.getProvider(), request.getSkillId(), request.getWorkspaceId())
                     .onErrorResume(e -> {
-                        log.error("[AgentController] Agent error: {}", e.getMessage());
-                        return Flux.just("Đã xảy ra lỗi khi xử lý yêu cầu. Vui lòng thử lại.");
+                         log.error("[AgentController Admin] Agent error: {}", e.getMessage());
+                         return Flux.just("Đã xảy ra lỗi khi xử lý yêu cầu. Vui lòng thử lại.");
                     })
                     .doFinally(signalType -> llmRateLimiterService.releaseAgentChat());
         } catch (Exception e) {

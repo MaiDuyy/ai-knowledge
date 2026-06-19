@@ -1,5 +1,6 @@
 package com.security.security.entity;
 
+import com.security.security.entity.enumeration.OcrStatus;
 import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.CreationTimestamp;
@@ -30,8 +31,9 @@ public class OcrResult {
     private Integer pageNumber;
 
     @Column(nullable = false, length = 50)
+    @Enumerated(EnumType.STRING)
     @Builder.Default
-    private String status = "PENDING"; // PENDING, PROCESSING, COMPLETED, FAILED
+    private OcrStatus status = OcrStatus.PENDING; // PENDING, PROCESSING, COMPLETED, FAILED
 
     @Column(name = "markdown_content", columnDefinition = "TEXT")
     private String markdownContent;

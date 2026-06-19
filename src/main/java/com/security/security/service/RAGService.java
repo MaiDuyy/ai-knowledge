@@ -35,6 +35,8 @@ import com.security.security.entity.WikiPage;
 import com.security.security.entity.WikiLink;
 import com.security.security.repository.WikiPageRepository;
 import com.security.security.repository.WikiLinkRepository;
+import com.security.security.entity.enumeration.WikiPageType;
+import com.security.security.entity.enumeration.SecurityClassification;
 
 @Service
 @Slf4j
@@ -532,11 +534,11 @@ public class RAGService {
         }
         
         if (isGuest) {
-            return "PUBLIC".equalsIgnoreCase(page.getSecurityClassification());
+            return SecurityClassification.PUBLIC == page.getSecurityClassification();
         }
         
         // 4. PUBLIC pages are visible to all internal users
-        if ("PUBLIC".equalsIgnoreCase(page.getSecurityClassification())) {
+        if (SecurityClassification.PUBLIC == page.getSecurityClassification()) {
             return true;
         }
 
@@ -571,7 +573,7 @@ public class RAGService {
         }
 
         // 6. No department restriction — workspace-only or INTERNAL company-wide
-        if ("INTERNAL".equalsIgnoreCase(page.getSecurityClassification())) {
+        if (SecurityClassification.INTERNAL == page.getSecurityClassification()) {
             return true;
         }
 
@@ -656,7 +658,7 @@ public class RAGService {
                 }
 
                 // Signal 3: Type affinity (×1.0)
-                if (seed.getPageType() != null && seed.getPageType().equalsIgnoreCase(candidate.getPageType())) {
+                if (seed.getPageType() != null && seed.getPageType() == candidate.getPageType()) {
                     score += 1.0;
                 }
 
@@ -796,7 +798,7 @@ public class RAGService {
             if (pageType != null && !pageType.trim().isEmpty()) {
                 final String pt = pageType.trim();
                 keywordPages = keywordPages.stream()
-                        .filter(p -> pt.equalsIgnoreCase(p.getPageType()))
+                        .filter(p -> p.getPageType() != null && pt.equalsIgnoreCase(p.getPageType().getValue()))
                         .collect(Collectors.toList());
             }
         } catch (Exception e) {

@@ -3,6 +3,7 @@ package com.security.security.service.docling;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.security.security.entity.OcrResult;
+import com.security.security.entity.enumeration.OcrStatus;
 import com.security.security.repository.OcrResultRepository;
 import com.security.security.service.tika.HtmlToMarkdownConverter;
 import com.security.security.service.tika.TikaHtmlExtractor;
@@ -278,7 +279,7 @@ public class DoclingClient {
                 // 2. Check DB Cache first if documentId is present
                 if (documentId != null) {
                     Optional<OcrResult> cached = ocrResultRepository.findByDocumentIdAndPageNumber(documentId, pageNumber);
-                    if (cached.isPresent() && "COMPLETED".equals(cached.get().getStatus())) {
+                    if (cached.isPresent() && OcrStatus.COMPLETED == cached.get().getStatus()) {
                         log.debug("[DocumentConverter] Page {} / {} loaded from DB cache", pageNumber, totalPages);
                         pageMarkdowns[pageIndex] = cached.get().getMarkdownContent();
                         return;
@@ -293,7 +294,7 @@ public class DoclingClient {
                                     .documentId(documentId)
                                     .pageNumber(pageNumber)
                                     .build());
-                    ocrResult.setStatus("PROCESSING");
+                    ocrResult.setStatus(OcrStatus.PROCESSING);
                     ocrResultRepository.save(ocrResult);
                 }
 
@@ -358,7 +359,7 @@ public class DoclingClient {
 
                     // Save completed page to DB
                     if (ocrResult != null) {
-                        ocrResult.setStatus("COMPLETED");
+                        ocrResult.setStatus(OcrStatus.COMPLETED);
                         ocrResult.setMarkdownContent(pageMarkdown);
                         ocrResult.setElapsedMs(elapsed);
                         ocrResult.setErrorMessage(null);
@@ -369,7 +370,7 @@ public class DoclingClient {
                     pageMarkdowns[pageIndex] = "\n\n<!-- PAGE_ERROR: " + pageNumber + " - " + e.getMessage() + " -->\n\n";
 
                     if (ocrResult != null) {
-                        ocrResult.setStatus("FAILED");
+                        ocrResult.setStatus(OcrStatus.FAILED);
                         ocrResult.setErrorMessage(e.getMessage());
                         ocrResultRepository.save(ocrResult);
                     }

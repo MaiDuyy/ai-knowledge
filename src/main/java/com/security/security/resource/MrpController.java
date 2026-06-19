@@ -3,6 +3,8 @@ package com.security.security.resource;
 import com.security.security.entity.SourceCompilationPlan;
 import com.security.security.entity.WikiPage;
 import com.security.security.entity.WikiPageDraft;
+import com.security.security.entity.enumeration.SecurityClassification;
+import com.security.security.entity.enumeration.WikiPageDraftStatus;
 import com.security.security.repository.WikiPageRepository;
 import com.security.security.repository.WikiPageDraftRepository;
 import com.security.security.repository.SourceCompilationPlanRepository;
@@ -65,7 +67,7 @@ public class MrpController {
     private void checkPageAccess(WikiPage page, UserPermissionContext perm) {
         if (perm.isAdmin()) return;
 
-        if ("PUBLIC".equalsIgnoreCase(page.getSecurityClassification())) return;
+        if (SecurityClassification.PUBLIC == page.getSecurityClassification()) return;
 
         String pageDeptId = ScopeNormalizer.normalizeDepartment(page.getDepartmentId());
         String pageWsId = ScopeNormalizer.normalizeWorkspace(page.getWorkspaceId());
@@ -77,7 +79,7 @@ public class MrpController {
         if (isGlobalScope) return;
 
         // INTERNAL company-wide pages without department restriction
-        if ("GLOBAL".equals(pageDeptId) && "INTERNAL".equalsIgnoreCase(page.getSecurityClassification())) {
+        if ("GLOBAL".equals(pageDeptId) && SecurityClassification.INTERNAL == page.getSecurityClassification()) {
             return;
         }
 
@@ -193,22 +195,22 @@ public class MrpController {
         if (perm.isAdmin()) {
             if (page != null && size != null) {
                 Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt"));
-                Page<WikiPageDraft> pagedDrafts = wikiPageDraftRepository.findByStatus("PENDING", pageable);
+                Page<WikiPageDraft> pagedDrafts = wikiPageDraftRepository.findByStatus(WikiPageDraftStatus.PENDING, pageable);
                 return ResponseEntity.ok(pagedDrafts);
             }
-            List<WikiPageDraft> drafts = wikiPageDraftRepository.findByStatus("PENDING");
+            List<WikiPageDraft> drafts = wikiPageDraftRepository.findByStatus(WikiPageDraftStatus.PENDING);
             return ResponseEntity.ok(drafts);
         }
 
         if (page != null && size != null) {
             Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt"));
             Page<WikiPageDraft> pagedDrafts = wikiPageDraftRepository.findAccessibleDraftsByStatus(
-                normalizedWorkspaceId, "PENDING", perm.isAdmin(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember(), pageable);
+                normalizedWorkspaceId, WikiPageDraftStatus.PENDING, perm.isAdmin(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember(), pageable);
             return ResponseEntity.ok(pagedDrafts);
         }
         
         List<WikiPageDraft> drafts = wikiPageDraftRepository.findAccessibleDraftsByStatus(
-            normalizedWorkspaceId, "PENDING", perm.isAdmin(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
+            normalizedWorkspaceId, WikiPageDraftStatus.PENDING, perm.isAdmin(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
         return ResponseEntity.ok(drafts);
     }
 
@@ -412,13 +414,15 @@ public class MrpController {
      */
     @GetMapping("/wiki")
     public ResponseEntity<?> getWikiPages(
-            @RequestParam(defaultValue = "default-workspace") String workspaceId,
+            @RequestParam(required = false) String workspaceId,
             @RequestParam(required = false) Integer page,
             @RequestParam(required = false) Integer size,
             @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
             @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
             @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
-        String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
+        String resolvedWsId = (workspaceId == null || workspaceId.isBlank() || "all".equalsIgnoreCase(workspaceId) || "GLOBAL".equalsIgnoreCase(workspaceId))
+                ? "default-workspace" : workspaceId;
+        String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(resolvedWsId);
         log.info("[MrpController] Fetching wiki pages for workspace: {}, page: {}, size: {}, user: {}", normalizedWorkspaceId, page, size, userId);
         
         UserPermissionContext perm = PermissionUtils.parse(userRolesHeader, userDepartmentsHeader, objectMapper);
@@ -427,7 +431,7 @@ public class MrpController {
         }
         
         String workspaceDeptId = null;
-        if (!"GLOBAL".equals(normalizedWorkspaceId) && !"all".equals(normalizedWorkspaceId)) {
+        if (!"GLOBAL".equals(normalizedWorkspaceId)) {
             try {
                 Map<String, Object> workspaceInfo = workspaceServiceClient.getWorkspace(normalizedWorkspaceId, userId);
                 if (workspaceInfo != null && workspaceInfo.containsKey("departmentId")) {
@@ -456,11 +460,13 @@ public class MrpController {
      */
     @GetMapping("/wiki/metadata")
     public ResponseEntity<List<com.security.security.dto.WikiPageMetadataDto>> getWikiMetadata(
-            @RequestParam(defaultValue = "default-workspace") String workspaceId,
+            @RequestParam(required = false) String workspaceId,
             @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
             @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
             @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
-        String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
+        String resolvedWsId = (workspaceId == null || workspaceId.isBlank() || "all".equalsIgnoreCase(workspaceId) || "GLOBAL".equalsIgnoreCase(workspaceId))
+                ? "default-workspace" : workspaceId;
+        String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(resolvedWsId);
         log.info("[MrpController] Fetching lightweight wiki metadata with parsed links for workspace: {} by user: {}", normalizedWorkspaceId, userId);
         
         UserPermissionContext perm = PermissionUtils.parse(userRolesHeader, userDepartmentsHeader, objectMapper);
@@ -469,7 +475,7 @@ public class MrpController {
         }
         
         String workspaceDeptId = null;
-        if (!"GLOBAL".equals(normalizedWorkspaceId) && !"all".equals(normalizedWorkspaceId)) {
+        if (!"GLOBAL".equals(normalizedWorkspaceId)) {
             try {
                 Map<String, Object> workspaceInfo = workspaceServiceClient.getWorkspace(normalizedWorkspaceId, userId);
                 if (workspaceInfo != null && workspaceInfo.containsKey("departmentId")) {
@@ -721,5 +727,163 @@ public class MrpController {
             documentRepository.findById(plan.getSourceDocumentId())
                     .ifPresent(doc -> plan.setSourceDocumentName(doc.getFileName()));
         }
+    }
+
+    // ==================== ADMIN ENDPOINTS ====================
+
+    /**
+     * Lấy toàn bộ các trang Wiki trong hệ thống (Admin only)
+     */
+    @GetMapping("/admin/wiki")
+    @org.springframework.security.access.prepost.PreAuthorize("hasAnyRole('ADMIN', 'SUPER_ADMIN')")
+    public ResponseEntity<?> getAdminWikiPages(
+            @RequestParam(required = false) Integer page,
+            @RequestParam(required = false) Integer size,
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
+            @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
+        
+        UserPermissionContext perm = PermissionUtils.parse(userRolesHeader, userDepartmentsHeader, objectMapper);
+        if (page != null && size != null) {
+            Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "updatedAt"));
+            Page<WikiPage> pagedWiki = wikiPageRepository.findAll(pageable);
+            return ResponseEntity.ok(pagedWiki);
+        }
+        List<WikiPage> pages = wikiPageRepository.findAll();
+        return ResponseEntity.ok(pages);
+    }
+
+    /**
+     * Lấy danh sách metadata siêu nhẹ của toàn bộ các trang Wiki trong hệ thống (Admin only)
+     */
+    @GetMapping("/admin/wiki/metadata")
+    @org.springframework.security.access.prepost.PreAuthorize("hasAnyRole('ADMIN', 'SUPER_ADMIN')")
+    public ResponseEntity<List<com.security.security.dto.WikiPageMetadataDto>> getAdminWikiMetadata(
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
+            @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
+        
+        UserPermissionContext perm = PermissionUtils.parse(userRolesHeader, userDepartmentsHeader, objectMapper);
+        List<WikiPageRepository.WikiPageMetadata> pages = wikiPageRepository.findAllAccessibleMetadata(
+                true, perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
+        
+        List<com.security.security.dto.WikiPageMetadataDto> dtos = pages.stream().map(page -> {
+            List<String> dbLinks = wikiLinkRepository.findByFromPageId(page.getId()).stream()
+                    .map(com.security.security.entity.WikiLink::getToSlug)
+                    .toList();
+
+            return com.security.security.dto.WikiPageMetadataDto.builder()
+                    .id(page.getId())
+                    .title(page.getTitle())
+                    .slug(page.getSlug())
+                    .workspaceId(page.getWorkspaceId())
+                    .tags(page.getTags())
+                    .pageType(page.getPageType())
+                    .version(page.getVersion())
+                    .createdAt(page.getCreatedAt())
+                    .updatedAt(page.getUpdatedAt())
+                    .links(dbLinks)
+                    .departmentId(page.getDepartmentId())
+                    .allowedRoles(page.getAllowedRoles())
+                    .securityClassification(page.getSecurityClassification())
+                    .build();
+        }).toList();
+        return ResponseEntity.ok(dtos);
+    }
+
+    /**
+     * Lấy đồ thị liên kết tri thức (Wiki Graph) của toàn bộ hệ thống (Admin only)
+     */
+    @GetMapping("/admin/wiki/graph")
+    @org.springframework.security.access.prepost.PreAuthorize("hasAnyRole('ADMIN', 'SUPER_ADMIN')")
+    public ResponseEntity<com.security.security.dto.WikiGraphDto> getAdminWikiGraph(
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
+            @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
+        log.info("[MrpController] Fetching system-wide admin wiki link graph by user: {}", userId);
+        
+        UserPermissionContext perm = PermissionUtils.parse(userRolesHeader, userDepartmentsHeader, objectMapper);
+        
+        // Fetch all pages (metadata) system-wide
+        List<WikiPageRepository.WikiPageMetadata> pages = wikiPageRepository.findAllAccessibleMetadata(
+                true, perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
+                
+        // Map pages to Node DTOs and build a set of accessible slugs
+        java.util.Set<String> accessibleSlugs = new java.util.HashSet<>();
+        List<com.security.security.dto.WikiGraphDto.NodeDto> nodes = pages.stream().map(page -> {
+            accessibleSlugs.add(page.getSlug());
+            return com.security.security.dto.WikiGraphDto.NodeDto.builder()
+                .slug(page.getSlug())
+                .title(page.getTitle())
+                .pageType(page.getPageType())
+                .build();
+        }).collect(java.util.stream.Collectors.toList());
+        
+        // Fetch all edges for the pages
+        List<Long> pageIds = pages.stream().map(WikiPageRepository.WikiPageMetadata::getId).collect(java.util.stream.Collectors.toList());
+        List<com.security.security.dto.WikiGraphDto.EdgeDto> edges = new java.util.ArrayList<>();
+        
+        if (!pageIds.isEmpty()) {
+            List<com.security.security.entity.WikiLink> dbLinks = wikiLinkRepository.findByFromPageIdIn(pageIds);
+            
+            Map<Long, String> pageIdToSlugMap = pages.stream()
+                .collect(java.util.stream.Collectors.toMap(WikiPageRepository.WikiPageMetadata::getId, WikiPageRepository.WikiPageMetadata::getSlug));
+                
+            for (com.security.security.entity.WikiLink link : dbLinks) {
+                String fromSlug = pageIdToSlugMap.get(link.getFromPageId());
+                String toSlug = link.getToSlug();
+                
+                if (fromSlug != null && accessibleSlugs.contains(toSlug)) {
+                    edges.add(com.security.security.dto.WikiGraphDto.EdgeDto.builder()
+                        .from(fromSlug)
+                        .to(toSlug)
+                        .build());
+                }
+            }
+        }
+        
+        return ResponseEntity.ok(com.security.security.dto.WikiGraphDto.builder()
+            .nodes(nodes)
+            .edges(edges)
+            .build());
+    }
+
+    /**
+     * Admin-only: Lấy chi tiết một trang Wiki theo slug từ toàn bộ hệ thống.
+     * GET /api/mrp/admin/wiki/slug/{slug}?workspaceId=... (tùy chọn, để ưu tiên workspace)
+     */
+    @GetMapping("/admin/wiki/slug/{*slug}")
+    @org.springframework.security.access.prepost.PreAuthorize("hasAnyRole('ADMIN', 'SUPER_ADMIN')")
+    public ResponseEntity<WikiPage> getAdminWikiPageBySlug(
+            @PathVariable String slug,
+            @RequestParam(required = false) String workspaceId,
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
+            @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
+
+        log.info("[MrpController] ADMIN fetching wiki page slug: {} (preferred workspace: {}) by user: {}", slug, workspaceId, userId);
+
+        UserPermissionContext perm = PermissionUtils.parse(userRolesHeader, userDepartmentsHeader, objectMapper);
+        if (!perm.isAdmin()) {
+            // Fallback safety — @PreAuthorize should already block this
+            return ResponseEntity.status(403).build();
+        }
+
+        String cleanSlug = slug;
+        if (cleanSlug != null && cleanSlug.startsWith("/")) {
+            cleanSlug = cleanSlug.substring(1);
+        }
+
+        // Determine preferred workspace — if "all" or null/empty, pass null to get latest globally
+        String preferredWorkspaceId = (workspaceId != null && !workspaceId.isBlank()
+                && !"all".equalsIgnoreCase(workspaceId.trim())
+                && !"GLOBAL".equalsIgnoreCase(workspaceId.trim()))
+                ? workspaceId.trim()
+                : null;
+
+        WikiPage page = wikiPageRepository.findBySlugGlobal(cleanSlug, preferredWorkspaceId)
+                .orElseThrow(() -> new IllegalArgumentException("Wiki page not found with slug: " + slug));
+
+        return ResponseEntity.ok(page);
     }
 }

@@ -5,6 +5,7 @@ import com.security.security.client.WorkspaceServiceClient;
 import com.security.security.repository.WikiPageRepository;
 import com.security.security.repository.WikiLinkRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.security.security.entity.enumeration.SecurityClassification;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -221,7 +222,7 @@ class RAGServiceTest {
         keywordPage.setContent("Keyword Match Content");
         keywordPage.setWorkspaceId("workspace-abc");
         keywordPage.setSlug("keyword-slug");
-        keywordPage.setSecurityClassification("PUBLIC");
+        keywordPage.setSecurityClassification(SecurityClassification.PUBLIC);
 
         // Mock Vector Store Search
         when(vectorStore.similaritySearch(Mockito.any(org.springframework.ai.vectorstore.SearchRequest.class)))
@@ -288,7 +289,7 @@ class RAGServiceTest {
         currentPage.setWorkspaceId("workspace-abc");
         currentPage.setTitle("Base Page Title");
         currentPage.setContent("Base Page Content");
-        currentPage.setSecurityClassification("PUBLIC");
+        currentPage.setSecurityClassification(SecurityClassification.PUBLIC);
 
         // Linked target page (outgoing link target)
         com.security.security.entity.WikiPage targetPage = new com.security.security.entity.WikiPage();
@@ -297,7 +298,7 @@ class RAGServiceTest {
         targetPage.setWorkspaceId("workspace-abc");
         targetPage.setTitle("Target Page Title");
         targetPage.setSummary("Target Page Summary");
-        targetPage.setSecurityClassification("PUBLIC");
+        targetPage.setSecurityClassification(SecurityClassification.PUBLIC);
 
         // Mock wikiPageRepository findById for base page
         when(wikiPageRepository.findById(1L)).thenReturn(java.util.Optional.of(currentPage));

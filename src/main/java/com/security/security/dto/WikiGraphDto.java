@@ -1,5 +1,6 @@
 package com.security.security.dto;
 
+import com.security.security.entity.enumeration.WikiPageType;
 import lombok.*;
 import java.util.List;
 
@@ -18,7 +19,7 @@ public class WikiGraphDto {
     public static class NodeDto {
         private String slug;
         private String title;
-        private String pageType;
+        private WikiPageType pageType;
     }
 
     @Data

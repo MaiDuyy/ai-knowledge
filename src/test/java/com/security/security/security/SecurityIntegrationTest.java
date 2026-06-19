@@ -174,7 +174,7 @@ class SecurityIntegrationTest {
                 .workspaceId("workspace-a")
                 .departmentId("dept-a")
                 .authorId("author-user")
-                .status("PENDING")
+                .status(com.security.security.entity.enumeration.WikiPageDraftStatus.PENDING)
                 .build();
         draft = wikiPageDraftRepository.save(draft);
 
@@ -200,7 +200,7 @@ class SecurityIntegrationTest {
                 .workspaceId("workspace-a")
                 .departmentId("dept-a")
                 .authorId("author-user")
-                .status("PENDING")
+                .status(com.security.security.entity.enumeration.WikiPageDraftStatus.PENDING)
                 .build();
         draft = wikiPageDraftRepository.save(draft);
 
@@ -228,7 +228,7 @@ class SecurityIntegrationTest {
                 .workspaceId("workspace-a")
                 .departmentId("dept-a")
                 .authorId("author-user")
-                .status("PENDING")
+                .status(com.security.security.entity.enumeration.WikiPageDraftStatus.PENDING)
                 .build();
         draft = wikiPageDraftRepository.save(draft);
 

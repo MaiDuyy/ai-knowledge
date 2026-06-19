@@ -1,5 +1,7 @@
 package com.security.security.entity;
 
+import com.security.security.entity.enumeration.SecurityClassification;
+import com.security.security.entity.enumeration.WikiPageType;
 import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.CreationTimestamp;
@@ -38,14 +40,15 @@ public class WikiPage {
     private String allowedRoles = "ALL"; // ALL, HEAD, MEMBER
 
     @Column(name = "security_classification", length = 50)
+    @Enumerated(EnumType.STRING)
     @Builder.Default
-    private String securityClassification = "INTERNAL"; // PUBLIC, INTERNAL, CONFIDENTIAL, RESTRICTED
+    private SecurityClassification securityClassification = SecurityClassification.INTERNAL; // PUBLIC, INTERNAL, CONFIDENTIAL, RESTRICTED
 
     @Column(name = "tags")
     private String tags;
 
     @Column(name = "page_type", length = 50)
-    private String pageType; // entity, concept, topic, source
+    private WikiPageType pageType; // entity, concept, topic, source
 
     @Column(name = "summary", columnDefinition = "TEXT")
     private String summary;

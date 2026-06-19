@@ -126,6 +126,75 @@ public class ChatController {
             }
         }
 
+        // Sanitize workspaceId for regular user
+        String resolvedWorkspaceId = workspaceId;
+        if (resolvedWorkspaceId == null || resolvedWorkspaceId.isBlank() || "all".equalsIgnoreCase(resolvedWorkspaceId) || "GLOBAL".equalsIgnoreCase(resolvedWorkspaceId)) {
+            resolvedWorkspaceId = "default-workspace";
+        }
+
+        RAGQueryPayload.UserPermissionContext permissions = RAGQueryPayload.UserPermissionContext.builder()
+                .roles(rolesList)
+                .roleLevel(roleLevel)
+                .workspaceId(resolvedWorkspaceId)
+                .ragScope(ragScope)
+                .userDepartments(userDepts)
+                .build();
+
+        llmRateLimiterService.acquireChat();
+        try {
+            Flux<String> stream = ragService.generateAnswerStream(
+                    request.getConversationId(),
+                    request.getMessage(),
+                    userId,
+                    permissions
+            );
+            return stream.doFinally(signalType -> llmRateLimiterService.releaseChat());
+        } catch (Exception e) {
+            llmRateLimiterService.releaseChat();
+            throw e;
+        }
+    }
+
+    /**
+     * Send message and get streaming response (RAG) for admin
+     */
+    @PostMapping(value = "/admin/messages", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    @org.springframework.security.access.prepost.PreAuthorize("hasAnyRole('ADMIN', 'SUPER_ADMIN')")
+    public Flux<String> adminChat(
+            @RequestBody ChatRequest request,
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-role", required = false) String role,
+            @RequestHeader(value = "x-user-roles", required = false) String rolesJson,
+            @RequestHeader(value = "x-user-role-level", required = false) Integer roleLevel,
+            @RequestHeader(value = "x-workspace-id", required = false) String workspaceId,
+            @RequestHeader(value = "x-rag-scope", required = false) String ragScope,
+            @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsJson) {
+
+        // Verify conversation belongs to user
+        conversationService.getConversation(request.getConversationId(), userId);
+
+        List<String> rolesList = new ArrayList<>();
+        if (rolesJson != null && !rolesJson.isBlank()) {
+            try {
+                rolesList = objectMapper.readValue(rolesJson, new TypeReference<List<String>>() {});
+            } catch (Exception e) {
+                if (role != null && !role.isBlank()) {
+                    rolesList.add(role);
+                }
+            }
+        } else if (role != null && !role.isBlank()) {
+            rolesList.add(role);
+        }
+
+        List<RAGQueryPayload.DepartmentRole> userDepts = new ArrayList<>();
+        if (userDepartmentsJson != null && !userDepartmentsJson.isBlank()) {
+            try {
+                userDepts = objectMapper.readValue(userDepartmentsJson, new TypeReference<List<RAGQueryPayload.DepartmentRole>>() {});
+            } catch (Exception e) {
+                // Fallback gracefully: treat as empty list
+            }
+        }
+
         RAGQueryPayload.UserPermissionContext permissions = RAGQueryPayload.UserPermissionContext.builder()
                 .roles(rolesList)
                 .roleLevel(roleLevel)
@@ -161,6 +230,5 @@ public class ChatController {
 
         return ResponseEntity.ok(Map.of("message", "Conversation deleted successfully"));
     }
-
 
 }
