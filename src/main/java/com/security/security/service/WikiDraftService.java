@@ -312,7 +312,11 @@ public class WikiDraftService {
             }
 
             String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
-            List<WikiPage> allPages = wikiPageRepository.findByWorkspaceId(normalizedWorkspaceId);
+            List<WikiPage> allPages = new java.util.ArrayList<>();
+            allPages.addAll(wikiPageRepository.findByWorkspaceId(normalizedWorkspaceId));
+            if (!"GLOBAL".equals(normalizedWorkspaceId)) {
+                allPages.addAll(wikiPageRepository.findByWorkspaceId("GLOBAL"));
+            }
             
             java.util.Set<String> uniqueSlugs = new java.util.HashSet<>();
             for (String target : targets) {
