@@ -254,8 +254,8 @@ class DocumentServiceUploadPermissionTest {
 
         assertThat(response.getDocumentId()).isEqualTo(600L);
         Document savedDoc = docCaptor.getValue();
-        assertThat(savedDoc.getWorkspaceId()).isEqualTo("GLOBAL");
-        assertThat(savedDoc.getDepartmentId()).isEqualTo("GLOBAL");
+        assertThat(savedDoc.getWorkspaceId()).isEqualTo("ALL");
+        assertThat(savedDoc.getDepartmentId()).isEqualTo("ALL");
     }
 }
 

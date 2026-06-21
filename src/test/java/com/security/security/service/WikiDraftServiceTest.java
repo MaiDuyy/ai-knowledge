@@ -181,7 +181,7 @@ class WikiDraftServiceTest {
      }
 
     @Test
-    @DisplayName("Should propose draft with empty/default workspace and department mapped to GLOBAL sentinel value")
+    @DisplayName("Should propose draft with empty/default workspace and department mapped to ALL sentinel value")
     void proposeDraft_WithGlobalWorkspaceAndDepartment_SavesWithGlobalSentinel() {
         // Arrange
         WikiPageDraft newDraft = WikiPageDraft.builder()
@@ -193,7 +193,7 @@ class WikiDraftServiceTest {
                 .build();
 
         org.mockito.ArgumentCaptor<WikiPageDraft> draftCaptor = org.mockito.ArgumentCaptor.forClass(WikiPageDraft.class);
-        when(wikiPageDraftRepository.findBySlugAndWorkspaceId("global-slug", "GLOBAL"))
+        when(wikiPageDraftRepository.findBySlugAndWorkspaceId("global-slug", "ALL"))
                 .thenReturn(Collections.emptyList());
         when(wikiPageDraftRepository.save(draftCaptor.capture())).thenAnswer(inv -> inv.getArgument(0));
 
@@ -203,7 +203,7 @@ class WikiDraftServiceTest {
         // Assert
         assertThat(result).isNotNull();
         WikiPageDraft saved = draftCaptor.getValue();
-        assertThat(saved.getWorkspaceId()).isEqualTo("GLOBAL");
-        assertThat(saved.getDepartmentId()).isEqualTo("GLOBAL");
+        assertThat(saved.getWorkspaceId()).isEqualTo("ALL");
+        assertThat(saved.getDepartmentId()).isEqualTo("ALL");
     }
 }

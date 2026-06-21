@@ -12,7 +12,7 @@ public final class ScopeNormalizer {
             || "workspace-default".equalsIgnoreCase(workspaceId.trim())
             || "all".equalsIgnoreCase(workspaceId.trim())
             || "GLOBAL".equalsIgnoreCase(workspaceId.trim())) {
-            return "GLOBAL";
+            return "ALL";
         }
         return workspaceId.trim();
     }
@@ -22,7 +22,7 @@ public final class ScopeNormalizer {
             || "all".equalsIgnoreCase(departmentId.trim())
             || "default".equalsIgnoreCase(departmentId.trim())
             || "GLOBAL".equalsIgnoreCase(departmentId.trim())) {
-            return "GLOBAL";
+            return "ALL";
         }
         return departmentId.trim();
     }
