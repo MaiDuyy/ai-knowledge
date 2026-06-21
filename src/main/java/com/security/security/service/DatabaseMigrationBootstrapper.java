@@ -68,6 +68,53 @@ public class DatabaseMigrationBootstrapper implements CommandLineRunner {
             );
             log.info("Migrated {} embeddings workspace_id to 'ALL'", embedWs);
 
+            // PostgreSQL-specific vector_store JSONB metadata migration & GIN index creation
+            try (java.sql.Connection conn = jdbcTemplate.getDataSource().getConnection()) {
+                String dbProduct = conn.getMetaData().getDatabaseProductName();
+                if (dbProduct != null && dbProduct.toLowerCase().contains("postgres")) {
+                    log.info("PostgreSQL database detected. Migrating vector_store JSONB metadata and verifying GIN index...");
+
+                    // 1. Migrate workspaceId in JSONB metadata
+                    int vsWs = jdbcTemplate.update(
+                        "UPDATE vector_store SET metadata = jsonb_set(metadata, '{workspaceId}', '\"ALL\"') " +
+                        "WHERE metadata->>'workspaceId' IS NULL OR TRIM(metadata->>'workspaceId') = '' " +
+                        "OR LOWER(TRIM(metadata->>'workspaceId')) IN ('default-workspace', 'workspace-default', 'all', 'global')"
+                    );
+                    log.info("Migrated {} vector_store records workspaceId to 'ALL'", vsWs);
+
+                    // 2. Migrate departmentId in JSONB metadata
+                    int vsDept = jdbcTemplate.update(
+                        "UPDATE vector_store SET metadata = jsonb_set(metadata, '{departmentId}', '\"ALL\"') " +
+                        "WHERE metadata->>'departmentId' IS NULL OR TRIM(metadata->>'departmentId') = '' " +
+                        "OR LOWER(TRIM(metadata->>'departmentId')) IN ('all', 'default', 'global')"
+                    );
+                    log.info("Migrated {} vector_store records departmentId to 'ALL'", vsDept);
+
+                    // 3. Migrate allowedRoles in JSONB metadata
+                    int vsRoles = jdbcTemplate.update(
+                        "UPDATE vector_store SET metadata = jsonb_set(metadata, '{allowedRoles}', '\"ALL\"') " +
+                        "WHERE metadata->>'allowedRoles' IS NULL OR TRIM(metadata->>'allowedRoles') = ''"
+                    );
+                    log.info("Migrated {} vector_store records allowedRoles to 'ALL'", vsRoles);
+
+                    // 4. Migrate classification / securityClassification in JSONB metadata
+                    int vsClass = jdbcTemplate.update(
+                        "UPDATE vector_store SET metadata = jsonb_set(jsonb_set(metadata, '{classification}', '\"INTERNAL\"'), '{securityClassification}', '\"INTERNAL\"') " +
+                        "WHERE metadata->>'classification' IS NULL OR metadata->>'securityClassification' IS NULL " +
+                        "OR TRIM(metadata->>'classification') = '' OR TRIM(metadata->>'securityClassification') = ''"
+                    );
+                    log.info("Migrated {} vector_store records classification/securityClassification to 'INTERNAL'", vsClass);
+
+                    // 5. Create GIN index on metadata column
+                    jdbcTemplate.execute(
+                        "CREATE INDEX IF NOT EXISTS vector_store_metadata_gin_idx ON vector_store USING gin (metadata)"
+                    );
+                    log.info("GIN index verified/created on vector_store(metadata)");
+                }
+            } catch (Exception e) {
+                log.warn("Failed to migrate vector_store metadata or create GIN index (ignoring for non-PostgreSQL): {}", e.getMessage());
+            }
+
             log.info("[DatabaseMigrationBootstrapper] Legacy permission scope migration completed successfully.");
         } catch (Exception e) {
             log.error("[DatabaseMigrationBootstrapper] Failed to execute database migration for sentinel values", e);
