@@ -350,9 +350,63 @@ public class RAGService {
                 """.formatted(context, question);
     }
 
-    private String buildFilterExpression(RAGQueryPayload.UserPermissionContext context, String userId, boolean[] partialResults) {
+    private String formatFilter(org.springframework.ai.vectorstore.filter.FilterExpressionBuilder.Op op) {
+        return formatExpression(op.build());
+    }
+
+    private String formatExpression(org.springframework.ai.vectorstore.filter.Filter.Expression expr) {
+        if (expr == null) return "";
+        
+        org.springframework.ai.vectorstore.filter.Filter.ExpressionType type = expr.type();
+        org.springframework.ai.vectorstore.filter.Filter.Operand left = expr.left();
+        org.springframework.ai.vectorstore.filter.Filter.Operand right = expr.right();
+        
+        String opStr = "";
+        switch (type) {
+            case AND -> opStr = " && ";
+            case OR -> opStr = " || ";
+            case EQ -> opStr = " == ";
+            case NE -> opStr = " != ";
+            case GT -> opStr = " > ";
+            case GTE -> opStr = " >= ";
+            case LT -> opStr = " < ";
+            case LTE -> opStr = " <= ";
+            case IN -> opStr = " in ";
+            case NIN -> opStr = " nin ";
+            default -> throw new IllegalArgumentException("Unknown type: " + type);
+        }
+        
+        String leftStr = formatOperand(left);
+        String rightStr = formatOperand(right);
+        
+        if (type == org.springframework.ai.vectorstore.filter.Filter.ExpressionType.AND || type == org.springframework.ai.vectorstore.filter.Filter.ExpressionType.OR) {
+            return "(" + leftStr + opStr + rightStr + ")";
+        }
+        return leftStr + opStr + rightStr;
+    }
+
+    private String formatOperand(org.springframework.ai.vectorstore.filter.Filter.Operand operand) {
+        if (operand instanceof org.springframework.ai.vectorstore.filter.Filter.Expression subExpr) {
+            return formatExpression(subExpr);
+        } else if (operand instanceof org.springframework.ai.vectorstore.filter.Filter.Key key) {
+            return key.key();
+        } else if (operand instanceof org.springframework.ai.vectorstore.filter.Filter.Value val) {
+            Object v = val.value();
+            if (v instanceof String) {
+                return "'" + v + "'";
+            }
+            return String.valueOf(v);
+        } else if (operand instanceof org.springframework.ai.vectorstore.filter.Filter.Group group) {
+            return "(" + formatOperand(group.content()) + ")";
+        }
+        return "";
+    }
+
+    private org.springframework.ai.vectorstore.filter.Filter.Expression buildFilterExpressionAST(RAGQueryPayload.UserPermissionContext context, String userId, boolean[] partialResults) {
+        org.springframework.ai.vectorstore.filter.FilterExpressionBuilder b = new org.springframework.ai.vectorstore.filter.FilterExpressionBuilder();
+
         if (context == null) {
-            return "collectionId == 'none'";
+            return b.eq("collectionId", "none").build();
         }
 
         // 1. Resolve workspaceId
@@ -377,7 +431,7 @@ public class RAGService {
 
         if (isServiceFailure) {
             partialResults[0] = true;
-            return "workspaceId == '" + resolvedWorkspaceId + "'";
+            return b.eq("workspaceId", resolvedWorkspaceId).build();
         }
 
         // 3. Check Admin / Super Admin status from roles/level
@@ -402,22 +456,34 @@ public class RAGService {
                     String type = node.path("type").asText("");
                     String id = node.path("id").asText("");
                     if ("department".equalsIgnoreCase(type)) {
-                        return "((workspaceId == 'ALL' || workspaceId == 'GLOBAL') && departmentId == '" + id + "')";
+                        return b.and(
+                            b.or(b.eq("workspaceId", "ALL"), b.eq("workspaceId", "GLOBAL")),
+                            b.eq("departmentId", id)
+                        ).build();
                     } else if ("workspace".equalsIgnoreCase(type)) {
-                        return "workspaceId == '" + id + "'";
+                        return b.eq("workspaceId", id).build();
                     }
                 } catch (Exception e) {
                     log.error("Failed to parse x-rag-scope: {}", ragScope, e);
                 }
             }
             if ("ALL".equals(resolvedWorkspaceId) || "GLOBAL".equals(resolvedWorkspaceId)) {
-                return "(workspaceId == 'ALL' || workspaceId == 'GLOBAL') && (departmentId == 'ALL' || departmentId == 'GLOBAL')";
+                return b.and(
+                    b.or(b.eq("workspaceId", "ALL"), b.eq("workspaceId", "GLOBAL")),
+                    b.or(b.eq("departmentId", "ALL"), b.eq("departmentId", "GLOBAL"))
+                ).build();
             }
             // Default Admin scope: all documents in the current workspace or the workspace's department
             if (!"ALL".equals(workspaceDeptId) && !"GLOBAL".equals(workspaceDeptId)) {
-                return "(workspaceId == '" + resolvedWorkspaceId + "' || ((workspaceId == 'ALL' || workspaceId == 'GLOBAL') && departmentId == '" + workspaceDeptId + "'))";
+                return b.or(
+                    b.eq("workspaceId", resolvedWorkspaceId),
+                    b.and(
+                        b.or(b.eq("workspaceId", "ALL"), b.eq("workspaceId", "GLOBAL")),
+                        b.eq("departmentId", workspaceDeptId)
+                    )
+                ).build();
             }
-            return "workspaceId == '" + resolvedWorkspaceId + "'";
+            return b.eq("workspaceId", resolvedWorkspaceId).build();
         }
 
         // 4. Check if user is Guest
@@ -431,19 +497,37 @@ public class RAGService {
 
         if (isGuest) {
             // Guest can only access PUBLIC documents in current workspace or its department
+            org.springframework.ai.vectorstore.filter.FilterExpressionBuilder.Op publicClause = b.or(
+                b.eq("classification", "PUBLIC"),
+                b.eq("securityClassification", "PUBLIC")
+            );
+
             if ("ALL".equals(resolvedWorkspaceId) || "GLOBAL".equals(resolvedWorkspaceId)) {
-                return "(workspaceId == 'ALL' || workspaceId == 'GLOBAL') && (departmentId == 'ALL' || departmentId == 'GLOBAL') && (classification == 'PUBLIC' || securityClassification == 'PUBLIC')";
+                return b.and(
+                    b.and(
+                        b.or(b.eq("workspaceId", "ALL"), b.eq("workspaceId", "GLOBAL")),
+                        b.or(b.eq("departmentId", "ALL"), b.eq("departmentId", "GLOBAL"))
+                    ),
+                    publicClause
+                ).build();
             }
             if (!"ALL".equals(workspaceDeptId) && !"GLOBAL".equals(workspaceDeptId)) {
-                return "((workspaceId == '" + resolvedWorkspaceId + "' || ((workspaceId == 'ALL' || workspaceId == 'GLOBAL') && departmentId == '" + workspaceDeptId + "')) && (classification == 'PUBLIC' || securityClassification == 'PUBLIC'))";
+                return b.and(
+                    b.or(
+                        b.eq("workspaceId", resolvedWorkspaceId),
+                        b.and(
+                            b.or(b.eq("workspaceId", "ALL"), b.eq("workspaceId", "GLOBAL")),
+                            b.eq("departmentId", workspaceDeptId)
+                        )
+                    ),
+                    publicClause
+                ).build();
             }
-            return "workspaceId == '" + resolvedWorkspaceId + "' && (classification == 'PUBLIC' || securityClassification == 'PUBLIC')";
+            return b.and(b.eq("workspaceId", resolvedWorkspaceId), publicClause).build();
         }
 
         // 5. Normal Employee / Manager / HEAD
         // Build filter: current workspace OR department-specific docs OR company-wide docs
-
-        // Collect all department IDs where the user has any role (for multi-dept access)
         List<String> userDeptIds = new ArrayList<>();
         List<String> userHeadDeptIds = new ArrayList<>();
         if (context.getUserDepartments() != null) {
@@ -457,36 +541,76 @@ public class RAGService {
             }
         }
 
-        List<String> orClauses = new ArrayList<>();
+        boolean hasHeadRole = !userHeadDeptIds.isEmpty();
+        List<org.springframework.ai.vectorstore.filter.FilterExpressionBuilder.Op> exprList = new ArrayList<>();
 
         if ("ALL".equals(resolvedWorkspaceId) || "GLOBAL".equals(resolvedWorkspaceId)) {
             // Global workspace query: Only retrieve company-wide documents
-            orClauses.add("((workspaceId == 'ALL' || workspaceId == 'GLOBAL') && (departmentId == 'ALL' || departmentId == 'GLOBAL'))");
+            org.springframework.ai.vectorstore.filter.FilterExpressionBuilder.Op globalDocs = b.and(
+                b.or(b.eq("workspaceId", "ALL"), b.eq("workspaceId", "GLOBAL")),
+                b.or(b.eq("departmentId", "ALL"), b.eq("departmentId", "GLOBAL"))
+            );
+            if (!hasHeadRole) {
+                globalDocs = b.and(globalDocs, b.ne("allowedRoles", "HEAD"));
+            }
+            exprList.add(globalDocs);
         } else {
             // Clause 1: Current workspace documents with no department restriction
-            orClauses.add("(workspaceId == '" + resolvedWorkspaceId + "' && (departmentId == 'ALL' || departmentId == 'GLOBAL'))");
+            org.springframework.ai.vectorstore.filter.FilterExpressionBuilder.Op wsDocs = b.and(
+                b.eq("workspaceId", resolvedWorkspaceId),
+                b.or(b.eq("departmentId", "ALL"), b.eq("departmentId", "GLOBAL"))
+            );
+            if (!hasHeadRole) {
+                wsDocs = b.and(wsDocs, b.ne("allowedRoles", "HEAD"));
+            }
+            exprList.add(wsDocs);
+
             // Clause 2: Current workspace documents with the workspace department restriction
             if (!"ALL".equals(workspaceDeptId) && !"GLOBAL".equals(workspaceDeptId) && userDeptIds.contains(workspaceDeptId)) {
                 boolean isHeadInThisDept = userHeadDeptIds.contains(workspaceDeptId);
-                String deptClause = "(workspaceId == '" + resolvedWorkspaceId + "' && departmentId == '" + workspaceDeptId + "'";
+                org.springframework.ai.vectorstore.filter.FilterExpressionBuilder.Op deptClause = b.and(
+                    b.eq("workspaceId", resolvedWorkspaceId),
+                    b.eq("departmentId", workspaceDeptId)
+                );
                 if (!isHeadInThisDept) {
-                    deptClause += " && allowedRoles != 'HEAD'";
+                    deptClause = b.and(deptClause, b.ne("allowedRoles", "HEAD"));
                 }
-                deptClause += ")";
-                orClauses.add(deptClause);
+                exprList.add(deptClause);
 
                 // Also include department shared docs (workspaceId = ALL/GLOBAL, departmentId = workspaceDeptId)
-                String sharedClause = "((workspaceId == 'ALL' || workspaceId == 'GLOBAL') && departmentId == '" + workspaceDeptId + "'";
+                org.springframework.ai.vectorstore.filter.FilterExpressionBuilder.Op sharedClause = b.and(
+                    b.or(b.eq("workspaceId", "ALL"), b.eq("workspaceId", "GLOBAL")),
+                    b.eq("departmentId", workspaceDeptId)
+                );
                 if (!isHeadInThisDept) {
-                    sharedClause += " && allowedRoles != 'HEAD'";
+                    sharedClause = b.and(sharedClause, b.ne("allowedRoles", "HEAD"));
                 }
-                sharedClause += ")";
-                orClauses.add(sharedClause);
+                exprList.add(sharedClause);
             }
         }
 
-        return "(" + String.join(" || ", orClauses) + ")";
+        // Fold the expression list using OR
+        org.springframework.ai.vectorstore.filter.FilterExpressionBuilder.Op combined = null;
+        for (org.springframework.ai.vectorstore.filter.FilterExpressionBuilder.Op op : exprList) {
+            if (combined == null) {
+                combined = op;
+            } else {
+                combined = b.or(combined, op);
+            }
+        }
+
+        if (combined == null) {
+            return b.eq("collectionId", "none").build();
+        }
+
+        return combined.build();
     }
+
+    private String buildFilterExpression(RAGQueryPayload.UserPermissionContext context, String userId, boolean[] partialResults) {
+        org.springframework.ai.vectorstore.filter.Filter.Expression expr = buildFilterExpressionAST(context, userId, partialResults);
+        return formatExpression(expr);
+    }
+
 
     private String cleanResponse(String raw) {
         return raw
@@ -722,13 +846,16 @@ public class RAGService {
                 .similarityThreshold(minScore);
 
         boolean[] partialResults = new boolean[]{false};
-        String filterExpr = buildFilterExpression(permissions, userId, partialResults);
+        org.springframework.ai.vectorstore.filter.Filter.Expression finalExpr = buildFilterExpressionAST(permissions, userId, partialResults);
         if (pageType != null && !pageType.trim().isEmpty()) {
-            String ptFilter = "pageType == '" + pageType.trim() + "'";
-            filterExpr = (filterExpr != null && !filterExpr.trim().isEmpty())
-                    ? "(" + filterExpr + ") && " + ptFilter
-                    : ptFilter;
+            org.springframework.ai.vectorstore.filter.FilterExpressionBuilder b = new org.springframework.ai.vectorstore.filter.FilterExpressionBuilder();
+            finalExpr = new org.springframework.ai.vectorstore.filter.Filter.Expression(
+                org.springframework.ai.vectorstore.filter.Filter.ExpressionType.AND,
+                finalExpr,
+                b.eq("pageType", pageType.trim()).build()
+            );
         }
+        String filterExpr = formatExpression(finalExpr);
         if (filterExpr != null && !filterExpr.trim().isEmpty()) {
             searchRequestBuiler.filterExpression(filterExpr);
         }

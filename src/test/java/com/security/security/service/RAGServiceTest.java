@@ -322,4 +322,53 @@ class RAGServiceTest {
         assertThat(expanded.getMetadata().get("type")).isEqualTo("wiki-graph-extension");
         assertThat(expanded.getMetadata().get("slug")).isEqualTo("target-slug");
     }
+
+    @Test
+    @DisplayName("Should combine permissions and pageType filter programmatically")
+    void executeHybridSearchAndExpansion_WithPageType_CombinesFiltersProgrammatically() {
+        // Arrange
+        String query = "test query";
+        String userId = "user-123";
+        int maxResults = 5;
+        double minScore = 0.2;
+        String pageType = "wiki";
+
+        RAGQueryPayload.UserPermissionContext permissions = RAGQueryPayload.UserPermissionContext.builder()
+                .roles(Arrays.asList("ADMIN"))
+                .workspaceId("workspace-abc")
+                .build();
+
+        org.springframework.ai.document.Document vectorDoc = new org.springframework.ai.document.Document("doc-id-1", "Vector Match content", Map.of("fileName", "file1.txt"));
+        
+        org.mockito.ArgumentCaptor<org.springframework.ai.vectorstore.SearchRequest> requestCaptor = 
+                org.mockito.ArgumentCaptor.forClass(org.springframework.ai.vectorstore.SearchRequest.class);
+        
+        when(vectorStore.similaritySearch(requestCaptor.capture()))
+                .thenReturn(Arrays.asList(vectorDoc));
+
+        when(workspaceServiceClient.getWorkspace("workspace-abc", userId))
+                .thenReturn(Map.of("id", "workspace-abc"));
+
+        when(wikiPageRepository.searchAccessiblePagesByKeyword(
+                Mockito.anyString(),
+                Mockito.any(),
+                Mockito.anyBoolean(),
+                Mockito.anyBoolean(),
+                Mockito.anyList(),
+                Mockito.anyList(),
+                Mockito.anyString()
+        )).thenReturn(java.util.Collections.emptyList());
+
+        // Act
+        ragService.executeHybridSearchAndExpansion(
+                query, permissions, userId, maxResults, minScore, pageType
+        );
+
+        // Assert
+        org.springframework.ai.vectorstore.SearchRequest capturedRequest = requestCaptor.getValue();
+        assertThat(capturedRequest.getFilterExpression()).isNotNull();
+        String filter = capturedRequest.getFilterExpression().toString();
+        assertThat(filter).isEqualTo("Expression[type=AND, left=Expression[type=EQ, left=Key[key=workspaceId], right=Value[value=workspace-abc]], right=Expression[type=EQ, left=Key[key=pageType], right=Value[value=wiki]]]");
+    }
 }
+
