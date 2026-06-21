@@ -72,44 +72,93 @@ public class DatabaseMigrationBootstrapper implements CommandLineRunner {
             try (java.sql.Connection conn = jdbcTemplate.getDataSource().getConnection()) {
                 String dbProduct = conn.getMetaData().getDatabaseProductName();
                 if (dbProduct != null && dbProduct.toLowerCase().contains("postgres")) {
-                    log.info("PostgreSQL database detected. Migrating vector_store JSONB metadata and verifying GIN index...");
+                    log.info("PostgreSQL database detected. Checking vector_store table...");
 
-                    // 1. Migrate workspaceId in JSONB metadata
-                    int vsWs = jdbcTemplate.update(
-                        "UPDATE vector_store SET metadata = jsonb_set(metadata, '{workspaceId}', '\"ALL\"') " +
-                        "WHERE metadata->>'workspaceId' IS NULL OR TRIM(metadata->>'workspaceId') = '' " +
-                        "OR LOWER(TRIM(metadata->>'workspaceId')) IN ('default-workspace', 'workspace-default', 'all', 'global')"
-                    );
-                    log.info("Migrated {} vector_store records workspaceId to 'ALL'", vsWs);
+                    // Check if vector_store table exists
+                    boolean vsTableExists = false;
+                    String schema = "ai_knowledge";
+                    try (java.sql.ResultSet rs = conn.getMetaData().getTables(null, schema, "vector_store", null)) {
+                        if (rs.next()) {
+                            vsTableExists = true;
+                        }
+                    }
+                    if (!vsTableExists) {
+                        try (java.sql.ResultSet rs = conn.getMetaData().getTables(null, schema.toLowerCase(), "vector_store", null)) {
+                            if (rs.next()) {
+                                vsTableExists = true;
+                            }
+                        }
+                    }
+                    if (!vsTableExists) {
+                        try (java.sql.ResultSet rs = conn.getMetaData().getTables(null, null, "vector_store", null)) {
+                            if (rs.next()) {
+                                vsTableExists = true;
+                            }
+                        }
+                    }
 
-                    // 2. Migrate departmentId in JSONB metadata
-                    int vsDept = jdbcTemplate.update(
-                        "UPDATE vector_store SET metadata = jsonb_set(metadata, '{departmentId}', '\"ALL\"') " +
-                        "WHERE metadata->>'departmentId' IS NULL OR TRIM(metadata->>'departmentId') = '' " +
-                        "OR LOWER(TRIM(metadata->>'departmentId')) IN ('all', 'default', 'global')"
-                    );
-                    log.info("Migrated {} vector_store records departmentId to 'ALL'", vsDept);
+                    if (vsTableExists) {
+                        log.info("vector_store table exists. Altering metadata column type to jsonb and migrating...");
 
-                    // 3. Migrate allowedRoles in JSONB metadata
-                    int vsRoles = jdbcTemplate.update(
-                        "UPDATE vector_store SET metadata = jsonb_set(metadata, '{allowedRoles}', '\"ALL\"') " +
-                        "WHERE metadata->>'allowedRoles' IS NULL OR TRIM(metadata->>'allowedRoles') = ''"
-                    );
-                    log.info("Migrated {} vector_store records allowedRoles to 'ALL'", vsRoles);
+                        // 0. Alter column metadata type to JSONB for performance and index support
+                        try {
+                            jdbcTemplate.execute("ALTER TABLE vector_store ALTER COLUMN metadata TYPE jsonb USING metadata::jsonb");
+                            log.info("Successfully altered vector_store metadata column to JSONB");
+                        } catch (Exception e) {
+                            log.info("Could not alter vector_store metadata column to JSONB (it might already be JSONB): {}", e.getMessage());
+                        }
 
-                    // 4. Migrate classification / securityClassification in JSONB metadata
-                    int vsClass = jdbcTemplate.update(
-                        "UPDATE vector_store SET metadata = jsonb_set(jsonb_set(metadata, '{classification}', '\"INTERNAL\"'), '{securityClassification}', '\"INTERNAL\"') " +
-                        "WHERE metadata->>'classification' IS NULL OR metadata->>'securityClassification' IS NULL " +
-                        "OR TRIM(metadata->>'classification') = '' OR TRIM(metadata->>'securityClassification') = ''"
-                    );
-                    log.info("Migrated {} vector_store records classification/securityClassification to 'INTERNAL'", vsClass);
+                        // 1. Migrate workspaceId in JSONB metadata
+                        int vsWs = jdbcTemplate.update(
+                            "UPDATE vector_store SET metadata = jsonb_set(CAST(metadata AS jsonb), '{workspaceId}', '\"ALL\"') " +
+                            "WHERE metadata->>'workspaceId' IS NULL OR TRIM(metadata->>'workspaceId') = '' " +
+                            "OR LOWER(TRIM(metadata->>'workspaceId')) IN ('default-workspace', 'workspace-default', 'all', 'global')"
+                        );
+                        log.info("Migrated {} vector_store records workspaceId to 'ALL'", vsWs);
 
-                    // 5. Create GIN index on metadata column
-                    jdbcTemplate.execute(
-                        "CREATE INDEX IF NOT EXISTS vector_store_metadata_gin_idx ON vector_store USING gin (metadata)"
-                    );
-                    log.info("GIN index verified/created on vector_store(metadata)");
+                        // 2. Migrate departmentId in JSONB metadata
+                        int vsDept = jdbcTemplate.update(
+                            "UPDATE vector_store SET metadata = jsonb_set(CAST(metadata AS jsonb), '{departmentId}', '\"ALL\"') " +
+                            "WHERE metadata->>'departmentId' IS NULL OR TRIM(metadata->>'departmentId') = '' " +
+                            "OR LOWER(TRIM(metadata->>'departmentId')) IN ('all', 'default', 'global')"
+                        );
+                        log.info("Migrated {} vector_store records departmentId to 'ALL'", vsDept);
+
+                        // 3. Migrate allowedRoles in JSONB metadata
+                        int vsRoles = jdbcTemplate.update(
+                            "UPDATE vector_store SET metadata = jsonb_set(CAST(metadata AS jsonb), '{allowedRoles}', '\"ALL\"') " +
+                            "WHERE metadata->>'allowedRoles' IS NULL OR TRIM(metadata->>'allowedRoles') = ''"
+                        );
+                        log.info("Migrated {} vector_store records allowedRoles to 'ALL'", vsRoles);
+
+                        // 4. Migrate classification / securityClassification in JSONB metadata
+                        int vsClass = jdbcTemplate.update(
+                            "UPDATE vector_store SET metadata = jsonb_set(jsonb_set(CAST(metadata AS jsonb), '{classification}', '\"INTERNAL\"'), '{securityClassification}', '\"INTERNAL\"') " +
+                            "WHERE metadata->>'classification' IS NULL OR metadata->>'securityClassification' IS NULL " +
+                            "OR TRIM(metadata->>'classification') = '' OR TRIM(metadata->>'securityClassification') = ''"
+                        );
+                        log.info("Migrated {} vector_store records classification/securityClassification to 'INTERNAL'", vsClass);
+
+                        // 5. Create GIN index on metadata column
+                        try {
+                            jdbcTemplate.execute(
+                                "CREATE INDEX IF NOT EXISTS vector_store_metadata_gin_idx ON vector_store USING gin (metadata)"
+                            );
+                            log.info("GIN index verified/created on vector_store(metadata)");
+                        } catch (Exception e) {
+                            log.warn("Failed to create GIN index directly on metadata (trying expression GIN index): {}", e.getMessage());
+                            try {
+                                jdbcTemplate.execute(
+                                    "CREATE INDEX IF NOT EXISTS vector_store_metadata_gin_expr_idx ON vector_store USING gin (CAST(metadata AS jsonb))"
+                                );
+                                log.info("Expression GIN index created successfully on CAST(metadata AS jsonb)");
+                            } catch (Exception ex) {
+                                log.error("Failed to create expression GIN index: {}", ex.getMessage());
+                            }
+                        }
+                    } else {
+                        log.info("vector_store table does not exist yet. Skipping pgvector metadata migration.");
+                    }
                 }
             } catch (Exception e) {
                 log.warn("Failed to migrate vector_store metadata or create GIN index (ignoring for non-PostgreSQL): {}", e.getMessage());
