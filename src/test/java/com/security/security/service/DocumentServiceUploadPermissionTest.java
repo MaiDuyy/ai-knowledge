@@ -231,5 +231,31 @@ class DocumentServiceUploadPermissionTest {
         verify(valueOperations).get("doc:hash:bf0ecbdb9b814248d086c9b69cf26182d9d4138f2ad3d0637c4555fc8cbf68e5");
         verify(documentRepository).findByFileHashAndStatus("bf0ecbdb9b814248d086c9b69cf26182d9d4138f2ad3d0637c4555fc8cbf68e5", DocStatus.COMPLETED);
     }
+
+    @Test
+    @DisplayName("uploadDocument with empty/default workspace and department maps them to GLOBAL sentinel value")
+    void uploadDocument_WithGlobalWorkspaceAndDepartment_SavesWithGlobalSentinel() throws IOException {
+        MockMultipartFile file = new MockMultipartFile(
+                "file", "doc.pdf", "application/pdf", "dummy content".getBytes());
+
+        org.mockito.ArgumentCaptor<Document> docCaptor = org.mockito.ArgumentCaptor.forClass(Document.class);
+        when(documentRepository.save(docCaptor.capture())).thenAnswer(inv -> {
+            Document doc = inv.getArgument(0);
+            doc.setId(600L);
+            return doc;
+        });
+
+        DocumentUploadResponse response = documentService.uploadDocument(
+                file, "user-admin", false, "gemini",
+                "default-workspace", "", "ALL", "INTERNAL",
+                "ADMIN", "[]",
+                "HR/Policies"
+        );
+
+        assertThat(response.getDocumentId()).isEqualTo(600L);
+        Document savedDoc = docCaptor.getValue();
+        assertThat(savedDoc.getWorkspaceId()).isEqualTo("GLOBAL");
+        assertThat(savedDoc.getDepartmentId()).isEqualTo("GLOBAL");
+    }
 }
 
