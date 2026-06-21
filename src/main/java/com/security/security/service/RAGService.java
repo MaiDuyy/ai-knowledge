@@ -545,7 +545,7 @@ public class RAGService {
         List<org.springframework.ai.vectorstore.filter.FilterExpressionBuilder.Op> exprList = new ArrayList<>();
 
         if ("ALL".equals(resolvedWorkspaceId) || "GLOBAL".equals(resolvedWorkspaceId)) {
-            // Global workspace query: Only retrieve company-wide documents
+            // Global workspace query: retrieve company-wide documents
             org.springframework.ai.vectorstore.filter.FilterExpressionBuilder.Op globalDocs = b.and(
                 b.or(b.eq("workspaceId", "ALL"), b.eq("workspaceId", "GLOBAL")),
                 b.or(b.eq("departmentId", "ALL"), b.eq("departmentId", "GLOBAL"))
@@ -554,8 +554,31 @@ public class RAGService {
                 globalDocs = b.and(globalDocs, b.ne("allowedRoles", "HEAD"));
             }
             exprList.add(globalDocs);
+
+            // Also include department shared docs (workspace = ALL) for all departments the user belongs to
+            for (String deptId : userDeptIds) {
+                boolean isHeadInDept = userHeadDeptIds.contains(deptId);
+                org.springframework.ai.vectorstore.filter.FilterExpressionBuilder.Op sharedClause = b.and(
+                    b.or(b.eq("workspaceId", "ALL"), b.eq("workspaceId", "GLOBAL")),
+                    b.eq("departmentId", deptId)
+                );
+                if (!isHeadInDept) {
+                    sharedClause = b.and(sharedClause, b.ne("allowedRoles", "HEAD"));
+                }
+                exprList.add(sharedClause);
+            }
         } else {
-            // Clause 1: Current workspace documents with no department restriction
+            // 1. Company-wide (ALL/ALL) documents
+            org.springframework.ai.vectorstore.filter.FilterExpressionBuilder.Op companyDocs = b.and(
+                b.or(b.eq("workspaceId", "ALL"), b.eq("workspaceId", "GLOBAL")),
+                b.or(b.eq("departmentId", "ALL"), b.eq("departmentId", "GLOBAL"))
+            );
+            if (!hasHeadRole) {
+                companyDocs = b.and(companyDocs, b.ne("allowedRoles", "HEAD"));
+            }
+            exprList.add(companyDocs);
+
+            // 2. Current workspace documents with no department restriction
             org.springframework.ai.vectorstore.filter.FilterExpressionBuilder.Op wsDocs = b.and(
                 b.eq("workspaceId", resolvedWorkspaceId),
                 b.or(b.eq("departmentId", "ALL"), b.eq("departmentId", "GLOBAL"))
@@ -565,24 +588,26 @@ public class RAGService {
             }
             exprList.add(wsDocs);
 
-            // Clause 2: Current workspace documents with the workspace department restriction
-            if (!"ALL".equals(workspaceDeptId) && !"GLOBAL".equals(workspaceDeptId) && userDeptIds.contains(workspaceDeptId)) {
-                boolean isHeadInThisDept = userHeadDeptIds.contains(workspaceDeptId);
+            // 3. Department-restricted documents for all departments the user belongs to
+            for (String deptId : userDeptIds) {
+                boolean isHeadInDept = userHeadDeptIds.contains(deptId);
+                
+                // Department documents in the current workspace
                 org.springframework.ai.vectorstore.filter.FilterExpressionBuilder.Op deptClause = b.and(
                     b.eq("workspaceId", resolvedWorkspaceId),
-                    b.eq("departmentId", workspaceDeptId)
+                    b.eq("departmentId", deptId)
                 );
-                if (!isHeadInThisDept) {
+                if (!isHeadInDept) {
                     deptClause = b.and(deptClause, b.ne("allowedRoles", "HEAD"));
                 }
                 exprList.add(deptClause);
 
-                // Also include department shared docs (workspaceId = ALL/GLOBAL, departmentId = workspaceDeptId)
+                // Department shared documents (workspaceId = ALL)
                 org.springframework.ai.vectorstore.filter.FilterExpressionBuilder.Op sharedClause = b.and(
                     b.or(b.eq("workspaceId", "ALL"), b.eq("workspaceId", "GLOBAL")),
-                    b.eq("departmentId", workspaceDeptId)
+                    b.eq("departmentId", deptId)
                 );
-                if (!isHeadInThisDept) {
+                if (!isHeadInDept) {
                     sharedClause = b.and(sharedClause, b.ne("allowedRoles", "HEAD"));
                 }
                 exprList.add(sharedClause);
