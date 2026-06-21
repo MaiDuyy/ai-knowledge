@@ -7,10 +7,13 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.ai.vectorstore.filter.FilterExpressionBuilder;
 import com.security.security.repository.WikiPageRepository;
 import com.security.security.entity.WikiPage;
 import com.security.security.entity.enumeration.WikiPageType;
 import com.security.security.entity.enumeration.WikiPageDraftStatus;
+import com.security.security.service.RAGService;
+import com.security.security.dtorequest.RAGQueryPayload;
 
 import java.util.List;
 import java.util.Map;
@@ -27,22 +30,28 @@ public class AgentToolConfig {
     private final MessagingServiceClient messagingClient;
     private final WikiPageRepository wikiPageRepository;
     private final WikiPageDraftRepository wikiPageDraftRepository;
+    private final RAGService ragService;
     private final String userId;
     private final String workspaceId;
+    private final RAGQueryPayload.UserPermissionContext permissions;
 
     public AgentToolConfig(
             VectorStore vectorStore,
             MessagingServiceClient messagingClient,
             WikiPageRepository wikiPageRepository,
             WikiPageDraftRepository wikiPageDraftRepository,
+            RAGService ragService,
             String userId,
-            String workspaceId) {
+            String workspaceId,
+            RAGQueryPayload.UserPermissionContext permissions) {
         this.vectorStore = vectorStore;
         this.messagingClient = messagingClient;
         this.wikiPageRepository = wikiPageRepository;
         this.wikiPageDraftRepository = wikiPageDraftRepository;
+        this.ragService = ragService;
         this.userId = userId;
         this.workspaceId = workspaceId;
+        this.permissions = permissions;
     }
 
     public record KnowledgeSearchInput(String query) {}
@@ -52,11 +61,13 @@ public class AgentToolConfig {
     public KnowledgeSearchOutput searchKnowledge(KnowledgeSearchInput input) {
         log.info("[Agent Tool] searchKnowledge: query='{}'", input.query());
         try {
+            String filterExprStr = ragService.getFilterExpressionStr(permissions, userId);
             var docs = vectorStore.similaritySearch(
                     SearchRequest.builder()
                             .query(input.query())
                             .topK(5)
                             .similarityThreshold(0.2)
+                            .filterExpression(filterExprStr)
                             .build()
             );
             List<String> texts = docs.stream()
@@ -179,11 +190,14 @@ public class AgentToolConfig {
     public SearchWikiOutput searchWiki(SearchWikiInput input) {
         log.info("[Agent Tool] searchWiki: query='{}'", input.query());
         try {
+            String permExprStr = ragService.getFilterExpressionStr(permissions, userId);
+            String finalExprStr = "type == 'wiki' && (" + permExprStr + ")";
+
             var docs = vectorStore.similaritySearch(
                     SearchRequest.builder()
                             .query(input.query())
                             .topK(5)
-                            .filterExpression("type == 'wiki'")
+                            .filterExpression(finalExprStr)
                             .build()
             );
             List<String> texts = docs.stream()
@@ -203,7 +217,14 @@ public class AgentToolConfig {
     public ReadWikiPageOutput readWikiPage(ReadWikiPageInput input) {
         log.info("[Agent Tool] readWikiPage: id={}", input.id());
         return wikiPageRepository.findById(input.id())
-                .map(page -> new ReadWikiPageOutput(page.getTitle(), page.getContent(), page.getTags()))
+                .map(page -> {
+                    // RBAC: check same permission model as RAGService pipeline
+                    if (!ragService.isPageAccessible(page, permissions, userId)) {
+                        log.warn("[Agent Tool] readWikiPage: access denied for userId={} on page id={}", userId, input.id());
+                        return new ReadWikiPageOutput("Access Denied", "Bạn không có quyền xem trang wiki này.", "");
+                    }
+                    return new ReadWikiPageOutput(page.getTitle(), page.getContent(), page.getTags());
+                })
                 .orElse(new ReadWikiPageOutput("Not Found", "Không tìm thấy trang wiki với ID này.", ""));
     }
 
@@ -216,7 +237,9 @@ public class AgentToolConfig {
         String wsId = input.workspaceId() != null && !input.workspaceId().isBlank()
                 ? input.workspaceId()
                 : (this.workspaceId != null && !this.workspaceId.isBlank() ? this.workspaceId : "default-workspace");
+        // RBAC: filter pages the current user is allowed to see
         List<String> pages = wikiPageRepository.findByWorkspaceId(wsId).stream()
+                .filter(p -> ragService.isPageAccessible(p, permissions, userId))
                 .map(p -> String.format("ID: %d | Title: %s", p.getId(), p.getTitle()))
                 .collect(Collectors.toList());
         return new ListWikiPagesOutput(pages);
@@ -269,6 +292,11 @@ public class AgentToolConfig {
     public EditWikiPageOutput editWikiPage(EditWikiPageInput input) {
         log.info("[Agent Tool] editWikiPage (draft): id={}, userId='{}'", input.id(), userId);
         return wikiPageRepository.findById(input.id()).map(page -> {
+            // RBAC: user must be able to read the page before proposing an edit
+            if (!ragService.isPageAccessible(page, permissions, userId)) {
+                log.warn("[Agent Tool] editWikiPage: access denied for userId={} on page id={}", userId, input.id());
+                return new EditWikiPageOutput(false, null, "Bạn không có quyền chỉnh sửa trang wiki này.");
+            }
             try {
                 // Build draft based on current page, applying requested changes
                 WikiPageDraft draft = WikiPageDraft.builder()

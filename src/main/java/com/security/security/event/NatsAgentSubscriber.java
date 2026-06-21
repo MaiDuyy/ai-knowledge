@@ -7,6 +7,7 @@ import com.security.security.entity.Conversation;
 import com.security.security.repository.ConversationRepository;
 import com.security.security.service.AgentService;
 import com.security.security.service.ConversationService;
+import com.security.security.dtorequest.RAGQueryPayload;
 import io.nats.client.Connection;
 import io.nats.client.Dispatcher;
 import io.nats.client.Message;
@@ -109,7 +110,12 @@ public class NatsAgentSubscriber {
             // 3. Trigger Agent Service (streams Gemini response and updates Chat Memory)
             // We use virtual thread backing to collect the stream synchronously in this handler
             StringBuilder builder = new StringBuilder();
-            agentService.runAgent(conversationId, content, BOT_USER_ID, chatId, "gemini", null, workspaceId)
+            RAGQueryPayload.UserPermissionContext permissions = RAGQueryPayload.UserPermissionContext.builder()
+                    .roles(List.of("ORG_ADMIN"))
+                    .workspaceId(workspaceId)
+                    .build();
+
+            agentService.runAgent(conversationId, content, BOT_USER_ID, chatId, "gemini", null, permissions)
                     .doOnNext(builder::append)
                     .then() // waits for complete
                     .block(); // block safely inside NATS event executor thread

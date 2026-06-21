@@ -10,6 +10,7 @@ import com.security.security.entity.Conversation;
 import com.security.security.entity.Message;
 import com.security.security.service.ConversationService;
 import com.security.security.service.RAGService;
+import com.security.security.service.PermissionUtils;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -27,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 
 import com.security.security.service.LlmRateLimiterService;
+import com.security.security.client.WorkspaceServiceClient;
 
 @RestController
 @RequestMapping("/chat")
@@ -37,6 +39,7 @@ public class ChatController {
     private final ConversationService conversationService;
     private final ObjectMapper objectMapper;
     private final LlmRateLimiterService llmRateLimiterService;
+    private final WorkspaceServiceClient workspaceServiceClient;
 
     /**
      * Create new conversation
@@ -125,11 +128,26 @@ public class ChatController {
                 // Fallback gracefully: treat as empty list
             }
         }
+        if (userDepts.isEmpty() && userId != null) {
+            userDepts = workspaceServiceClient.getUserDepartments(userId);
+        }
+
+        boolean hasHeadRole = false;
+        for (RAGQueryPayload.DepartmentRole dr : userDepts) {
+            if (PermissionUtils.isHeadOrDeputy(dr.getRole())) {
+                hasHeadRole = true;
+                break;
+            }
+        }
 
         // Sanitize workspaceId for regular user
         String resolvedWorkspaceId = workspaceId;
         if (resolvedWorkspaceId == null || resolvedWorkspaceId.isBlank() || "all".equalsIgnoreCase(resolvedWorkspaceId) || "GLOBAL".equalsIgnoreCase(resolvedWorkspaceId)) {
-            resolvedWorkspaceId = "default-workspace";
+            if (hasHeadRole) {
+                resolvedWorkspaceId = "ALL";
+            } else {
+                resolvedWorkspaceId = "default-workspace";
+            }
         }
 
         RAGQueryPayload.UserPermissionContext permissions = RAGQueryPayload.UserPermissionContext.builder()
@@ -193,6 +211,9 @@ public class ChatController {
             } catch (Exception e) {
                 // Fallback gracefully: treat as empty list
             }
+        }
+        if (userDepts.isEmpty() && userId != null) {
+            userDepts = workspaceServiceClient.getUserDepartments(userId);
         }
 
         RAGQueryPayload.UserPermissionContext permissions = RAGQueryPayload.UserPermissionContext.builder()

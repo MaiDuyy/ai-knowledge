@@ -402,6 +402,17 @@ public class RAGService {
         return "";
     }
 
+    public org.springframework.ai.vectorstore.filter.Filter.Expression getFilterExpressionAST(RAGQueryPayload.UserPermissionContext context, String userId) {
+        boolean[] partialResults = new boolean[]{false};
+        return buildFilterExpressionAST(context, userId, partialResults);
+    }
+
+    public String getFilterExpressionStr(RAGQueryPayload.UserPermissionContext context, String userId) {
+        boolean[] partialResults = new boolean[]{false};
+        org.springframework.ai.vectorstore.filter.Filter.Expression expr = buildFilterExpressionAST(context, userId, partialResults);
+        return formatExpression(expr);
+    }
+
     private org.springframework.ai.vectorstore.filter.Filter.Expression buildFilterExpressionAST(RAGQueryPayload.UserPermissionContext context, String userId, boolean[] partialResults) {
         org.springframework.ai.vectorstore.filter.FilterExpressionBuilder b = new org.springframework.ai.vectorstore.filter.FilterExpressionBuilder();
 
@@ -534,7 +545,7 @@ public class RAGService {
             for (RAGQueryPayload.DepartmentRole dr : context.getUserDepartments()) {
                 if (dr.getDepartmentId() != null && !dr.getDepartmentId().isBlank()) {
                     userDeptIds.add(dr.getDepartmentId());
-                    if ("HEAD".equalsIgnoreCase(dr.getRole()) || "MANAGER".equalsIgnoreCase(dr.getRole())) {
+                    if (PermissionUtils.isHeadOrDeputy(dr.getRole())) {
                         userHeadDeptIds.add(dr.getDepartmentId());
                     }
                 }
@@ -646,7 +657,7 @@ public class RAGService {
                 .trim();
     }
 
-    private boolean isPageAccessible(WikiPage page, RAGQueryPayload.UserPermissionContext context, String userId) {
+    public boolean isPageAccessible(WikiPage page, RAGQueryPayload.UserPermissionContext context, String userId) {
         // 1. Check workspace access
         String resolvedWorkspaceId = ScopeNormalizer.normalizeWorkspace(context.getWorkspaceId());
         String pageWsId = ScopeNormalizer.normalizeWorkspace(page.getWorkspaceId());
@@ -700,7 +711,7 @@ public class RAGService {
                 String deptId = dept.getDepartmentId();
                 String role = dept.getRole();
                 if (deptId != null && !deptId.trim().isEmpty()) {
-                    if ("HEAD".equalsIgnoreCase(role) || "MANAGER".equalsIgnoreCase(role)) {
+                    if (PermissionUtils.isHeadOrDeputy(role)) {
                         deptIdsWhereHead.add(deptId);
                         deptIdsWhereMember.add(deptId);
                     } else {
@@ -708,6 +719,11 @@ public class RAGService {
                     }
                 }
             }
+        }
+
+        boolean hasHeadRole = !deptIdsWhereHead.isEmpty();
+        if ("HEAD".equalsIgnoreCase(page.getAllowedRoles()) && !hasHeadRole) {
+            return false;
         }
 
         // 5. Department-scoped pages: user must belong to that department
@@ -864,6 +880,13 @@ public class RAGService {
             double minScore,
             String pageType) {
 
+        log.info("[RAGService] executeHybridSearchAndExpansion for query='{}', userId={}, workspaceId={}", 
+                query, userId, permissions != null ? permissions.getWorkspaceId() : "null");
+        if (permissions != null) {
+            log.info("[RAGService] User permissions: roles={}, userDepartments={}", 
+                    permissions.getRoles(), permissions.getUserDepartments());
+        }
+
         // 1. Vector Search
         SearchRequest.Builder searchRequestBuiler = SearchRequest.builder()
                 .query(query)
@@ -881,6 +904,7 @@ public class RAGService {
             );
         }
         String filterExpr = formatExpression(finalExpr);
+        log.info("[RAGService] Final filter expression: {}", filterExpr);
         if (filterExpr != null && !filterExpr.trim().isEmpty()) {
             searchRequestBuiler.filterExpression(filterExpr);
         }
@@ -888,6 +912,7 @@ public class RAGService {
         List<org.springframework.ai.document.Document> vectorDocs = new ArrayList<>();
         try {
             vectorDocs = vectorStore.similaritySearch(searchRequestBuiler.build());
+            log.info("[RAGService] Vector search returned {} documents", vectorDocs.size());
         } catch (Exception e) {
             log.error("Vector search failed", e);
         }
@@ -905,7 +930,7 @@ public class RAGService {
                     String deptId = dept.getDepartmentId();
                     String role = dept.getRole();
                     if (deptId != null && !deptId.trim().isEmpty()) {
-                        if ("HEAD".equalsIgnoreCase(role) || "MANAGER".equalsIgnoreCase(role)) {
+                        if (PermissionUtils.isHeadOrDeputy(role)) {
                             deptIdsWhereHead.add(deptId);
                             deptIdsWhereMember.add(deptId);
                         } else {

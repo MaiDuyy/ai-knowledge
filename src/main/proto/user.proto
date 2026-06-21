@@ -10,6 +10,9 @@ service UserService {
   rpc ValidateWorkspaceQuota (QuotaRequest) returns (QuotaResponse);
   rpc CheckFriendship (CheckFriendshipRequest) returns (CheckFriendshipResponse);
   rpc CheckUserDepartment (CheckUserDepartmentRequest) returns (CheckUserDepartmentResponse);
+  rpc CheckWorkspaceAccess (CheckWorkspaceAccessRequest) returns (CheckWorkspaceAccessResponse);
+  rpc GetUserRolesAndScopes (UserRolesAndScopesRequest) returns (UserRolesAndScopesResponse);
+  rpc GetUserDetailedDepartments (UserDetailedDepartmentsRequest) returns (UserDetailedDepartmentsResponse);
 }
 
 message QuotaRequest {
@@ -45,6 +48,7 @@ message UserProfile {
   string status = 5;
   bool isOnline = 6;
   string userStatus = 7;
+  string role = 8;
 }
 
 message GetUsersResponse {
@@ -77,4 +81,38 @@ message CheckUserDepartmentRequest {
 
 message CheckUserDepartmentResponse {
   bool belongsToDepartment = 1;
+}
+
+message CheckWorkspaceAccessRequest {
+  string userId = 1;
+  string workspaceId = 2;
+  string departmentId = 3;
+  string workspaceCreatedAt = 4;
+}
+
+message CheckWorkspaceAccessResponse {
+  bool hasAccess = 1;
+}
+
+message UserRolesAndScopesRequest {
+  string userId = 1;
+}
+
+message UserRolesAndScopesResponse {
+  string globalRole = 1;
+  repeated string assignedWorkspaceIds = 2;
+  repeated string assignedDepartmentIds = 3;
+}
+
+message UserDetailedDepartmentsRequest {
+  string userId = 1;
+}
+
+message DepartmentRoleMessage {
+  string departmentId = 1;
+  string role = 2;
+}
+
+message UserDetailedDepartmentsResponse {
+  repeated DepartmentRoleMessage departments = 1;
 }

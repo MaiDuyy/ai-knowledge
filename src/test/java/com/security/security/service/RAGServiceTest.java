@@ -370,5 +370,56 @@ class RAGServiceTest {
         String filter = capturedRequest.getFilterExpression().toString();
         assertThat(filter).isEqualTo("Expression[type=AND, left=Expression[type=EQ, left=Key[key=workspaceId], right=Value[value=workspace-abc]], right=Expression[type=EQ, left=Key[key=pageType], right=Value[value=wiki]]]");
     }
+
+    @Test
+    @DisplayName("Should exclude HEAD-restricted page from wiki graph extension when user does not have HEAD role")
+    void expandContextWithWikiGraph_RestrictedToHead_NormalUser_ExcludesPage() {
+        // Arrange
+        String userId = "user-123";
+        RAGQueryPayload.UserPermissionContext permissions = RAGQueryPayload.UserPermissionContext.builder()
+                .roles(Arrays.asList("MEMBER"))
+                .workspaceId("workspace-abc")
+                .userDepartments(Arrays.asList(
+                        new RAGQueryPayload.DepartmentRole("dept-1", "MEMBER")
+                ))
+                .build();
+
+        org.springframework.ai.document.Document baseDoc = new org.springframework.ai.document.Document(
+                "doc-id-1", "Base Match Content", Map.of("wikiPageId", "1")
+        );
+
+        com.security.security.entity.WikiPage currentPage = new com.security.security.entity.WikiPage();
+        currentPage.setId(1L);
+        currentPage.setSlug("base-slug");
+        currentPage.setWorkspaceId("workspace-abc");
+        currentPage.setSecurityClassification(SecurityClassification.INTERNAL);
+        currentPage.setAllowedRoles("ALL");
+
+        com.security.security.entity.WikiPage targetPage = new com.security.security.entity.WikiPage();
+        targetPage.setId(2L);
+        targetPage.setSlug("target-slug");
+        targetPage.setWorkspaceId("workspace-abc");
+        targetPage.setTitle("Target Page Title");
+        targetPage.setSummary("Target Page Summary");
+        targetPage.setSecurityClassification(SecurityClassification.INTERNAL);
+        targetPage.setAllowedRoles("HEAD"); // Restricted to HEAD
+
+        // Mock wikiPageRepository findById for base page
+        when(wikiPageRepository.findById(1L)).thenReturn(java.util.Optional.of(currentPage));
+
+        // Mock outgoing link base-slug -> target-slug
+        com.security.security.entity.WikiLink link = new com.security.security.entity.WikiLink(10L, 1L, "target-slug");
+        when(wikiLinkRepository.findByFromPageId(1L)).thenReturn(Arrays.asList(link));
+        when(wikiPageRepository.fetchBySlugAndWorkspaceId("target-slug", "workspace-abc"))
+                .thenReturn(java.util.Optional.of(targetPage));
+
+        // Act
+        List<org.springframework.ai.document.Document> results = ragService.expandContextWithWikiGraph(
+                Arrays.asList(baseDoc), permissions, userId
+        );
+
+        // Assert
+        assertThat(results).hasSize(1); // Only base doc, expanded doc is excluded
+    }
 }
 

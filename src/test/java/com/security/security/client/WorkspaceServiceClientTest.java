@@ -32,7 +32,7 @@ class WorkspaceServiceClientTest {
 
     @BeforeEach
     void setUp() {
-        client = new WorkspaceServiceClient("http://localhost:3020", "http://localhost:3010");
+        client = new WorkspaceServiceClient("http://localhost:3020", "http://localhost:3010", "localhost", 50051);
         ReflectionTestUtils.setField(client, "httpClient", httpClient);
     }
 

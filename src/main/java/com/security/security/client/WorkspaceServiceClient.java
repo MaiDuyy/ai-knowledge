@@ -11,10 +11,20 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import com.security.security.dtorequest.RAGQueryPayload;
+import java.util.List;
+import java.util.ArrayList;
 import java.util.Map;
 
+import io.grpc.ManagedChannel;
+import io.grpc.ManagedChannelBuilder;
+import user.UserServiceGrpc;
+import user.User.UserDetailedDepartmentsRequest;
+import user.User.UserDetailedDepartmentsResponse;
+import user.User.DepartmentRoleMessage;
+
 /**
- * REST Client for workspace endpoints in messaging-service, matching the pattern of MessagingServiceClient.
+ * REST & gRPC Client for workspace/identity endpoints, matching the pattern of MessagingServiceClient.
  */
 @Component
 @Slf4j
@@ -24,16 +34,102 @@ public class WorkspaceServiceClient {
     private final String identityBaseUrl;
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
+    private final UserServiceGrpc.UserServiceBlockingStub userServiceStub;
 
     public WorkspaceServiceClient(
             @Value("${messaging.service.url:http://localhost:3020}") String messagingBaseUrl,
-            @Value("${identity.service.url:http://localhost:3010}") String identityBaseUrl) {
+            @Value("${identity.service.url:http://localhost:3010}") String identityBaseUrl,
+            @Value("${identity.service.grpc.host:localhost}") String identityGrpcHost,
+            @Value("${identity.service.grpc.port:50051}") int identityGrpcPort) {
         this.messagingBaseUrl = messagingBaseUrl;
         this.identityBaseUrl = identityBaseUrl;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(5))
                 .build();
         this.objectMapper = new ObjectMapper();
+
+        log.info("[WorkspaceServiceClient] Initializing gRPC channel to {}:{}", identityGrpcHost, identityGrpcPort);
+        ManagedChannel channel = ManagedChannelBuilder.forAddress(identityGrpcHost, identityGrpcPort)
+                .usePlaintext()
+                .build();
+        this.userServiceStub = UserServiceGrpc.newBlockingStub(channel);
+    }
+
+    /**
+     * Fetch user's department memberships from identity service.
+     */
+    @org.springframework.cache.annotation.Cacheable(
+            value = "userDepartments",
+            key = "#userId",
+            unless = "#result == null || #result.isEmpty()"
+    )
+    public List<RAGQueryPayload.DepartmentRole> getUserDepartments(String userId) {
+        if (userId == null || userId.isBlank() || "system-user".equals(userId)) {
+            return List.of();
+        }
+        try {
+            log.info("[WorkspaceServiceClient] Fetching department roles for userId={} via gRPC", userId);
+            UserDetailedDepartmentsRequest request = UserDetailedDepartmentsRequest.newBuilder()
+                    .setUserId(userId)
+                    .build();
+            UserDetailedDepartmentsResponse response = userServiceStub.getUserDetailedDepartments(request);
+
+            List<RAGQueryPayload.DepartmentRole> list = new ArrayList<>();
+            for (DepartmentRoleMessage deptMsg : response.getDepartmentsList()) {
+                String deptId = deptMsg.getDepartmentId();
+                String role = deptMsg.getRole();
+                if (deptId != null && !deptId.isBlank()) {
+                    list.add(RAGQueryPayload.DepartmentRole.builder()
+                            .departmentId(deptId)
+                            .role(role)
+                            .build());
+                }
+            }
+            log.info("[WorkspaceServiceClient] gRPC fetched {} department roles for userId={}", list.size(), userId);
+            return list;
+        } catch (Exception e) {
+            log.warn("[WorkspaceServiceClient] gRPC call failed for userId={}, falling back to REST. Error: {}", 
+                    userId, e.getMessage());
+            return getUserDepartmentsRestFallback(userId);
+        }
+    }
+
+    private List<RAGQueryPayload.DepartmentRole> getUserDepartmentsRestFallback(String userId) {
+        try {
+            String url = identityBaseUrl + "/users/" + userId + "/departments";
+            HttpRequest req = buildGet(url, userId);
+            HttpResponse<String> res = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+
+            if (res.statusCode() != 200) {
+                log.warn("[WorkspaceServiceClient] REST fallback getUserDepartments failed with HTTP {} for userId={}", 
+                        res.statusCode(), userId);
+                return List.of();
+            }
+
+            JsonNode root = objectMapper.readTree(res.body());
+            JsonNode data = root.path("data");
+            if (data.isMissingNode() || !data.isArray()) {
+                return List.of();
+            }
+
+            List<RAGQueryPayload.DepartmentRole> list = new ArrayList<>();
+            for (JsonNode node : data) {
+                String deptId = node.path("id").asText("");
+                String userRole = node.path("userRole").asText("");
+                if (!deptId.isBlank()) {
+                    list.add(RAGQueryPayload.DepartmentRole.builder()
+                            .departmentId(deptId)
+                            .role(userRole)
+                            .build());
+                }
+            }
+            log.info("[WorkspaceServiceClient] REST fallback fetched {} department roles for userId={}", list.size(), userId);
+            return list;
+        } catch (Exception e) {
+            log.error("[WorkspaceServiceClient] REST fallback error fetching departments for userId={}: {}", 
+                    userId, e.getMessage());
+            return List.of();
+        }
     }
 
     /**

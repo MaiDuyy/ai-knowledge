@@ -14,6 +14,14 @@ public final class PermissionUtils {
 
     private PermissionUtils() {}
 
+    public static boolean isHeadOrDeputy(String role) {
+        if (role == null) return false;
+        String r = role.toUpperCase();
+        return "HEAD".equals(r) || "MANAGER".equals(r) 
+            || "DEPUTY_HEAD".equals(r) || "VICE_HEAD".equals(r)
+            || "DEPUTY_MANAGER".equals(r) || "VICE_MANAGER".equals(r);
+    }
+
     public static UserPermissionContext parse(
             String userRolesHeader,
             String userDepartmentsHeader,
@@ -50,9 +58,15 @@ public final class PermissionUtils {
                 );
                 for (Map<String, String> dept : depts) {
                     String deptId = dept.get("departmentId");
+                    if (deptId == null) {
+                        deptId = dept.get("id");
+                    }
                     String role = dept.get("role");
+                    if (role == null) {
+                        role = dept.get("userRole");
+                    }
                     if (deptId != null && !deptId.trim().isEmpty()) {
-                        if ("HEAD".equalsIgnoreCase(role) || "MANAGER".equalsIgnoreCase(role)) {
+                        if (isHeadOrDeputy(role)) {
                             ctx.getDeptIdsWhereHead().add(deptId);
                             ctx.getDeptIdsWhereMember().add(deptId);
                         } else {

@@ -17,6 +17,7 @@ import com.security.security.entity.AgentSkill;
 import com.security.security.service.AgentSkillService;
 import com.security.security.repository.WikiPageRepository;
 import com.security.security.repository.WikiPageDraftRepository;
+import com.security.security.dtorequest.RAGQueryPayload;
 
 /**
  * Phase 2 — Autonomous AI Agent Service.
@@ -42,6 +43,7 @@ public class AgentService {
         private final MessagingServiceClient messagingClient;
         private final WikiPageRepository wikiPageRepository;
         private final WikiPageDraftRepository wikiPageDraftRepository;
+        private final RAGService ragService;
 
         private static final String AGENT_SYSTEM_PROMPT = """
                             Bạn là AI Assistant của OTT Chat Platform. Bạn có khả năng truy cập công cụ để hỗ trợ người dùng.
@@ -91,7 +93,8 @@ public class AgentService {
          * @param skillId        optional ID of custom agent skill
          * @return Flux of text tokens for SSE streaming
          */
-        public Flux<String> runAgent(Long conversationId, String message, String userId, String chatId, String providerName, Long skillId, String workspaceId) {
+        public Flux<String> runAgent(Long conversationId, String message, String userId, String chatId, String providerName, Long skillId, RAGQueryPayload.UserPermissionContext permissions) {
+                String workspaceId = permissions != null ? permissions.getWorkspaceId() : "default-workspace";
                 log.info("[Agent] Running for userId={}, chatId={}, workspaceId={}, skillId={}, query='{}'", userId, chatId, workspaceId, skillId, message);
 
                 String basePrompt = AGENT_SYSTEM_PROMPT;
@@ -109,8 +112,17 @@ public class AgentService {
                 // Save user message to conversation history
                 conversationService.saveMessage(conversationId, "user", message, null, null);
 
-                // Instantiate tool config with the current user ID and workspace ID
-                AgentToolConfig toolConfig = new AgentToolConfig(vectorStore, messagingClient, wikiPageRepository, wikiPageDraftRepository, userId, workspaceId);
+                // Instantiate tool config with the current user ID, workspace ID and permissions context
+                AgentToolConfig toolConfig = new AgentToolConfig(
+                                vectorStore,
+                                messagingClient,
+                                wikiPageRepository,
+                                wikiPageDraftRepository,
+                                ragService,
+                                userId,
+                                workspaceId,
+                                permissions
+                );
 
                 StringBuilder fullResponse = new StringBuilder();
 
