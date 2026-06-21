@@ -80,6 +80,64 @@ public class EmbeddingService {
                         metadata.putAll(chunk.getMetadata());
                     }
 
+                    // Extract and normalize workspaceId
+                    String wsId = null;
+                    if (chunk.getMetadata() != null && chunk.getMetadata().containsKey("workspaceId")) {
+                        wsId = String.valueOf(chunk.getMetadata().get("workspaceId"));
+                    }
+                    if (wsId == null && payload.getMetadata() != null && payload.getMetadata().getAcl() != null) {
+                        for (Map<String, String> map : payload.getMetadata().getAcl()) {
+                            if (map.containsKey("workspaceId")) {
+                                wsId = map.get("workspaceId");
+                                break;
+                            }
+                        }
+                    }
+                    metadata.put("workspaceId", ScopeNormalizer.normalizeWorkspace(wsId));
+
+                    // Extract and normalize departmentId
+                    String deptId = null;
+                    if (chunk.getMetadata() != null && chunk.getMetadata().containsKey("departmentId")) {
+                        deptId = String.valueOf(chunk.getMetadata().get("departmentId"));
+                    }
+                    if (deptId == null && payload.getMetadata() != null && payload.getMetadata().getAcl() != null) {
+                        for (Map<String, String> map : payload.getMetadata().getAcl()) {
+                            if (map.containsKey("departmentId")) {
+                                deptId = map.get("departmentId");
+                                break;
+                            }
+                        }
+                    }
+                    metadata.put("departmentId", ScopeNormalizer.normalizeDepartment(deptId));
+
+                    // Extract allowedRoles
+                    String allowedRoles = "ALL";
+                    if (chunk.getMetadata() != null && chunk.getMetadata().containsKey("allowedRoles")) {
+                        allowedRoles = String.valueOf(chunk.getMetadata().get("allowedRoles"));
+                    }
+                    if ("ALL".equals(allowedRoles) && payload.getMetadata() != null && payload.getMetadata().getAcl() != null) {
+                        for (Map<String, String> map : payload.getMetadata().getAcl()) {
+                            if (map.containsKey("allowedRoles")) {
+                                allowedRoles = map.get("allowedRoles");
+                                break;
+                            }
+                        }
+                    }
+                    metadata.put("allowedRoles", allowedRoles != null ? allowedRoles : "ALL");
+
+                    // Extract securityClassification
+                    String classification = "INTERNAL";
+                    if (payload.getMetadata() != null && payload.getMetadata().getClassification() != null) {
+                        classification = payload.getMetadata().getClassification();
+                    }
+                    if (chunk.getMetadata() != null && chunk.getMetadata().containsKey("securityClassification")) {
+                        classification = String.valueOf(chunk.getMetadata().get("securityClassification"));
+                    } else if (chunk.getMetadata() != null && chunk.getMetadata().containsKey("classification")) {
+                        classification = String.valueOf(chunk.getMetadata().get("classification"));
+                    }
+                    metadata.put("classification", classification);
+                    metadata.put("securityClassification", classification);
+
                     return new Document(chunk.getContent(), metadata);
                 })
                 .collect(Collectors.toList());
@@ -222,8 +280,8 @@ public class EmbeddingService {
             meta.put("charCount", String.valueOf(chunkText.length()));
             
             if (document.getSecurityClassification() != null) {
-                meta.put("classification", document.getSecurityClassification());
-                meta.put("securityClassification", document.getSecurityClassification());
+                meta.put("classification", document.getSecurityClassification().name());
+                meta.put("securityClassification", document.getSecurityClassification().name());
             }
             meta.put("uploadedBy", document.getUserId());
             meta.put("workspaceId", ScopeNormalizer.normalizeWorkspace(document.getWorkspaceId()));
