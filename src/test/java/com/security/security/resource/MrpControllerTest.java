@@ -161,6 +161,46 @@ class MrpControllerTest {
     }
 
     @Test
+    @DisplayName("Should deny access to global scope page if allowedRoles is HEAD but user has no head role")
+    void checkPageAccess_GlobalHeadOnlyPage_DeniesMember() throws Exception {
+        WikiPage page = WikiPage.builder()
+                .securityClassification(com.security.security.entity.enumeration.SecurityClassification.INTERNAL)
+                .workspaceId("ALL")
+                .departmentId("ALL")
+                .allowedRoles("HEAD")
+                .build();
+
+        com.security.security.dto.UserPermissionContext perm = 
+                com.security.security.service.PermissionUtils.parse("MEMBER", null, objectMapper);
+
+        assertThatThrownBy(() -> {
+            try {
+                checkAccessMethod.invoke(mrpController, page, perm);
+            } catch (Exception e) {
+                throw e.getCause();
+            }
+        }).isInstanceOf(AccessDeniedException.class);
+    }
+
+    @Test
+    @DisplayName("Should grant access to workspace-scoped page with global/all department for a workspace member")
+    void checkPageAccess_WorkspaceScopedGlobalDept_GrantsAccess() throws Exception {
+        WikiPage page = WikiPage.builder()
+                .securityClassification(com.security.security.entity.enumeration.SecurityClassification.INTERNAL)
+                .workspaceId("ws-1")
+                .departmentId("ALL")
+                .allowedRoles("ALL")
+                .build();
+
+        com.security.security.dto.UserPermissionContext perm = 
+                com.security.security.service.PermissionUtils.parse("MEMBER", null, objectMapper);
+
+        // Should not throw exception
+        checkAccessMethod.invoke(mrpController, page, perm);
+    }
+
+
+    @Test
     @DisplayName("Should return 202 Accepted and the initial plan when compilation is triggered")
     void compileDocument_ReturnsAccepted() {
         Long documentId = 1L;

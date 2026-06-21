@@ -508,12 +508,16 @@ public class DocumentService {
         UserPermissionContext perms = PermissionUtils.parse(userRole, userDepartments, objectMapper);
         if (perms.isAdmin()) return doc;
 
+        if (com.security.security.entity.enumeration.SecurityClassification.PUBLIC == doc.getSecurityClassification()) {
+            return doc;
+        }
+
         String docDeptId = ScopeNormalizer.normalizeDepartment(doc.getDepartmentId());
         String docWsId = ScopeNormalizer.normalizeWorkspace(doc.getWorkspaceId());
         String allowed = doc.getAllowedRoles();
 
-        boolean isGlobalScope = ("ALL".equals(docDeptId) || "GLOBAL".equals(docDeptId) || docDeptId == null || docDeptId.isBlank()) 
-            && ("ALL".equals(docWsId) || "GLOBAL".equals(docWsId) || docWsId == null || docWsId.isBlank());
+        boolean isGlobalScope = ("ALL".equals(docDeptId) || "GLOBAL".equals(docDeptId)) 
+            && ("ALL".equals(docWsId) || "GLOBAL".equals(docWsId));
 
         if (isGlobalScope) {
             if ("HEAD".equalsIgnoreCase(allowed) && !perms.hasHeadRole()) {
@@ -522,7 +526,7 @@ public class DocumentService {
             return doc;
         }
 
-        if (docDeptId != null && !docDeptId.isBlank()) {
+        if (!"ALL".equals(docDeptId) && !"GLOBAL".equals(docDeptId)) {
             boolean isHead = perms.getDeptIdsWhereHead().contains(docDeptId);
             boolean isMember = perms.getDeptIdsWhereMember().contains(docDeptId);
 
@@ -535,10 +539,16 @@ public class DocumentService {
             if ("MEMBER".equalsIgnoreCase(allowed) && !isMember && !isHead) {
                 throw new AccessDeniedException("Chỉ thành viên thuộc phòng ban này mới được phép truy cập tài liệu.");
             }
+        } else {
+            // Workspace-scoped but no department restriction
+            if ("HEAD".equalsIgnoreCase(allowed) && !perms.hasHeadRole()) {
+                throw new AccessDeniedException("Chỉ Trưởng phòng hoặc Quản trị viên mới được phép truy cập tài liệu này.");
+            }
         }
 
         return doc;
     }
+
 
     public org.springframework.core.io.Resource getDocumentFileResource(Long documentId, String userId, String userRole, String userDepartments) {
         Document doc = getDocument(documentId, userId, userRole, userDepartments);

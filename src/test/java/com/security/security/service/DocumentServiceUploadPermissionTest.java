@@ -257,5 +257,99 @@ class DocumentServiceUploadPermissionTest {
         assertThat(savedDoc.getWorkspaceId()).isEqualTo("ALL");
         assertThat(savedDoc.getDepartmentId()).isEqualTo("ALL");
     }
+
+    @Test
+    @DisplayName("getDocument denies access to department-scoped document if user is not in that department")
+    void getDocument_unauthorizedDept_throwsAccessDenied() {
+        Document doc = Document.builder()
+                .id(700L)
+                .userId("creator-1")
+                .workspaceId("ALL")
+                .departmentId("dept-vip")
+                .allowedRoles("ALL")
+                .securityClassification(com.security.security.entity.enumeration.SecurityClassification.INTERNAL)
+                .build();
+
+        when(documentRepository.findById(700L)).thenReturn(Optional.of(doc));
+
+        assertThatThrownBy(() -> documentService.getDocument(
+                700L, "user-2", "WORKSPACE_MEMBER",
+                "[{\"departmentId\":\"dept-other\",\"role\":\"MEMBER\"}]"
+        )).isInstanceOf(AccessDeniedException.class)
+          .hasMessageContaining("Bạn không thuộc phòng ban được phép truy cập tài liệu này");
+    }
+
+    @Test
+    @DisplayName("getDocument denies access to global HEAD restricted document for a non-head user")
+    void getDocument_globalHeadOnly_nonHeadThrowsAccessDenied() {
+        Document doc = Document.builder()
+                .id(701L)
+                .userId("creator-1")
+                .workspaceId("ALL")
+                .departmentId("ALL")
+                .allowedRoles("HEAD")
+                .securityClassification(com.security.security.entity.enumeration.SecurityClassification.INTERNAL)
+                .build();
+
+        when(documentRepository.findById(701L)).thenReturn(Optional.of(doc));
+
+        assertThatThrownBy(() -> documentService.getDocument(
+                701L, "user-2", "WORKSPACE_MEMBER",
+                "[{\"departmentId\":\"dept-other\",\"role\":\"MEMBER\"}]"
+        )).isInstanceOf(AccessDeniedException.class)
+          .hasMessageContaining("Chỉ Trưởng phòng hoặc Quản trị viên mới được phép truy cập tài liệu này");
+    }
+
+    @Test
+    @DisplayName("getDocument grants access to global HEAD restricted document for a head user")
+    void getDocument_globalHeadOnly_headGrantsAccess() {
+        Document doc = Document.builder()
+                .id(702L)
+                .userId("creator-1")
+                .workspaceId("ALL")
+                .departmentId("ALL")
+                .allowedRoles("HEAD")
+                .securityClassification(com.security.security.entity.enumeration.SecurityClassification.INTERNAL)
+                .build();
+
+        when(documentRepository.findById(702L)).thenReturn(Optional.of(doc));
+
+        Document retrieved = documentService.getDocument(
+                702L, "user-2", "WORKSPACE_MEMBER",
+                "[{\"departmentId\":\"dept-other\",\"role\":\"HEAD\"}]"
+        );
+
+        assertThat(retrieved).isNotNull();
+        assertThat(retrieved.getId()).isEqualTo(702L);
+    }
+
+    @Test
+    @DisplayName("getDocument grants access to workspace-scoped document with global/all department")
+    void getDocument_workspaceScopedGlobalDept_grantsAccess() {
+        Document doc = Document.builder()
+                .id(703L)
+                .userId("creator-1")
+                .workspaceId("ws-1")
+                .departmentId("ALL")
+                .allowedRoles("ALL")
+                .securityClassification(com.security.security.entity.enumeration.SecurityClassification.INTERNAL)
+                .build();
+
+        when(documentRepository.findById(703L)).thenReturn(Optional.of(doc));
+
+        // Mock workspace service client validation
+        when(workspaceServiceClient.getWorkspace("ws-1", "user-2"))
+                .thenReturn(Map.of("id", "ws-1", "departmentId", "dept-other"));
+
+        Document retrieved = documentService.getDocument(
+                703L, "user-2", "WORKSPACE_MEMBER",
+                "[{\"departmentId\":\"dept-other\",\"role\":\"MEMBER\"}]"
+        );
+
+        assertThat(retrieved).isNotNull();
+        assertThat(retrieved.getId()).isEqualTo(703L);
+    }
 }
+
+
 

@@ -73,13 +73,14 @@ public class MrpController {
         String pageWsId = ScopeNormalizer.normalizeWorkspace(page.getWorkspaceId());
         String allowed = page.getAllowedRoles();
 
-        boolean isGlobalScope = ("ALL".equals(pageDeptId) || "GLOBAL".equals(pageDeptId)) && ("ALL".equals(pageWsId) || "GLOBAL".equals(pageWsId));
+        boolean isGlobalScope = ("ALL".equals(pageDeptId) || "GLOBAL".equals(pageDeptId)) 
+            && ("ALL".equals(pageWsId) || "GLOBAL".equals(pageWsId));
 
-        // Rule 1: Global scope → all users
-        if (isGlobalScope) return;
-
-        // INTERNAL company-wide pages without department restriction
-        if (("ALL".equals(pageDeptId) || "GLOBAL".equals(pageDeptId)) && SecurityClassification.INTERNAL == page.getSecurityClassification()) {
+        // Rule 1: Global scope → all users (unless restricted by role)
+        if (isGlobalScope) {
+            if ("HEAD".equalsIgnoreCase(allowed) && !perm.hasHeadRole()) {
+                throw new AccessDeniedException("You do not have permission to access this wiki page.");
+            }
             return;
         }
 
@@ -96,10 +97,14 @@ public class MrpController {
             if ("MEMBER".equalsIgnoreCase(allowed) && (isMember || isHead)) return;
 
             throw new AccessDeniedException("You do not have permission to access this wiki page.");
+        } else {
+            // Workspace-scoped but no department restriction
+            if ("HEAD".equalsIgnoreCase(allowed) && !perm.hasHeadRole()) {
+                throw new AccessDeniedException("You do not have permission to access this wiki page.");
+            }
         }
-
-        // Workspace-specific but no department → workspace access already validated upstream
     }
+
 
     /**
      * Khởi tạo quy trình MRP Compile (Map & Reduce Phase).
