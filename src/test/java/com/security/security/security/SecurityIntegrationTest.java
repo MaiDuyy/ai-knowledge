@@ -270,4 +270,16 @@ class SecurityIntegrationTest {
         java.util.List<String> chunks = embeddingService.getDocumentChunks(999L);
         org.assertj.core.api.Assertions.assertThat(chunks).isEmpty();
     }
+
+    @Test
+    @DisplayName("Should successfully authenticate user role and departments via Gateway headers")
+    void whenProvidingGatewayHeaders_shouldAuthenticateUserAndRolesCorrectly() throws Exception {
+        mockMvc.perform(get("/chat/conversations")
+                        .header("x-internal-gateway-key", "test-gateway-key")
+                        .header("x-user-id", "test-user-123")
+                        .header("x-user-role", "ADMIN")
+                        .header("x-user-roles", "[\"ADMIN\", \"EMPLOYEE\"]")
+                        .header("x-user-departments", "[{\"departmentId\":\"dept-alpha\",\"role\":\"HEAD\"}]"))
+                .andExpect(status().isOk());
+    }
 }

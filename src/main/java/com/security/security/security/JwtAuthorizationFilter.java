@@ -68,9 +68,15 @@ public class JwtAuthorizationFilter extends OncePerRequestFilter {
                 // Thêm các quyền mặc định cho Document
                 authBuilder.append("document:create,document:read,document:update,document:delete");
 
-                // Thêm các roles từ Gateway (nếu có)
+                // Thêm các roles từ Gateway (nếu có), đảm bảo cả tiền tố ROLE_ cho hasRole/hasAnyRole
                 if (!cleanedRoles.isEmpty()) {
-                    authBuilder.append(",").append(cleanedRoles);
+                    String[] rolesArr = cleanedRoles.split(",");
+                    for (String r : rolesArr) {
+                        if (!r.trim().isEmpty()) {
+                            authBuilder.append(",ROLE_").append(r.trim());
+                            authBuilder.append(",").append(r.trim());
+                        }
+                    }
                 }
 
                 // Thêm Role hiện tại với prefix ROLE_ (Bắt buộc cho hasRole() trong Spring Security)
