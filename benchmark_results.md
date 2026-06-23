@@ -2,7 +2,7 @@
 
 Tài liệu này tổng hợp kết quả chạy thử nghiệm Benchmark tự động cho dịch vụ **ai-knowledge**, bao gồm kiểm thử bảo mật phân quyền RAG, độ phủ tìm kiếm mở rộng đồ thị (Graph Hop Recall), hiệu năng luồng ảo Java 21 (Virtual Threads), và độ chính xác của đường ống biên dịch tri thức (ETL & Wiki Graph Accuracy).
 
-Chạy kiểm thử ngày: Tue Jun 23 12:13:55 ICT 2026
+Chạy kiểm thử ngày: Tue Jun 23 12:40:32 ICT 2026
 
 ---
 
@@ -40,8 +40,8 @@ So sánh thông lượng, độ trễ và dung lượng bộ nhớ tiêu thụ g
 
 | Chỉ số đo lường (Metric) | Platform Threads (Pool=50) | Virtual Threads (Java 21) | Tỷ lệ cải thiện |
 | :--- | :---: | :---: | :---: |
-| Tổng thời gian xử lý | 1.8497 s | 0.9591 s | **Giảm 48.15%** |
-| Thông lượng trung bình (Throughput) | 270.32 RPS | 521.33 RPS | **Tăng 92.86%** |
+| Tổng thời gian xử lý | 2.1324 s | 1.3658 s | **Giảm 35.95%** |
+| Thông lượng trung bình (Throughput) | 234.48 RPS | 366.07 RPS | **Tăng 56.12%** |
 | Platform Threads khởi tạo | 51 threads | 9 threads | **Giảm 82.35%** |
 | Ước tính bộ nhớ tiêu thụ (RAM) | 51.00 MB | 9.98 MB | **Giảm 80.44%** |
 
@@ -49,8 +49,8 @@ So sánh thông lượng, độ trễ và dung lượng bộ nhớ tiêu thụ g
 
 **1. Throughput (Requests Per Second - RPS - Càng cao càng tốt):**
 ```
-Platform Threads: [█████████████████████                   ] 270.32 RPS
-Virtual Threads : [████████████████████████████████████████] 521.33 RPS (+92.86%)
+Platform Threads: [██████████████████████████              ] 234.48 RPS
+Virtual Threads : [████████████████████████████████████████] 366.07 RPS (+56.12%)
 ```
 
 **2. Memory Consumption (MB - Càng thấp càng tốt):**
@@ -67,7 +67,7 @@ Virtual Threads : [████████                                ] 9.9
 
 *   **Table Cell Retention Rate (TCRR - Độ bảo toàn cấu trúc bảng biểu)**:
     *   **Docling (Layout-Aware AI)**: **100.00%** (Nhận diện chính xác 20/20 ô bảng lưới phức tạp).
-    *   **Apache Tika (Plain OCR/Text)**: **15.00%** (Làm vỡ dòng, gộp cột khiến dữ liệu mất cấu trúc).
+    *   **Apache Tika (Plain OCR/Text)**: **0.00%** (Làm vỡ dòng, gộp cột khiến dữ liệu mất cấu trúc).
 *   **WikiLinks Compiler (Độ chính xác bộ biên dịch liên kết tri thức)**:
     *   **Precision (Độ chính xác)**: **100.00%** (100% liên kết được sinh khớp chuẩn tài liệu).
     *   **Recall (Độ phủ)**: **100.00%** (Trích xuất đầy đủ 100% các liên kết do tác giả chỉ định).
