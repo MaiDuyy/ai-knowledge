@@ -10,6 +10,8 @@ import java.util.List;
 public interface WikiLinkRepository extends JpaRepository<WikiLink, Long> {
     List<WikiLink> findByFromPageId(Long fromPageId);
     List<WikiLink> findByToSlug(String toSlug);
+    @org.springframework.data.jpa.repository.Modifying
+    @org.springframework.transaction.annotation.Transactional
     void deleteByFromPageId(Long fromPageId);
     List<WikiLink> findByFromPageIdIn(List<Long> fromPageIds);
 }

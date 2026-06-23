@@ -205,6 +205,19 @@ public class EmbeddingService {
     }
 
     /**
+     * Delete embeddings by wikiPageId from VectorStore.
+     */
+    @Transactional
+    public void deleteWikiPageEmbedding(Long wikiPageId) {
+        log.info("Deleting embeddings for wiki page: {}", wikiPageId);
+        try {
+            vectorStore.delete(String.format("wikiPageId == '%s'", wikiPageId.toString()));
+        } catch (Exception e) {
+            log.warn("Could not delete wiki page from VectorStore: {}", e.getMessage());
+        }
+    }
+
+    /**
      * Ingest document markdown into VectorStore and database with semantic chunking and batch loading.
      */
     @Transactional

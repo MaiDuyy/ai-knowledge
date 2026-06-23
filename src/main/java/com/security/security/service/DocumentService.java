@@ -626,6 +626,11 @@ public class DocumentService {
                 log.warn("Could not delete wiki links from page {}: {}", page.getId(), e.getMessage());
             }
             try {
+                embeddingService.deleteWikiPageEmbedding(page.getId());
+            } catch (Exception e) {
+                log.warn("Could not delete wiki page embeddings for ID {}: {}", page.getId(), e.getMessage());
+            }
+            try {
                 wikiPageRepository.delete(page);
             } catch (Exception e) {
                 log.warn("Could not delete wiki page {}: {}", page.getId(), e.getMessage());

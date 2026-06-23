@@ -2,7 +2,7 @@
 
 Tài liệu này tổng hợp kết quả chạy thử nghiệm Benchmark tự động cho dịch vụ **ai-knowledge**, bao gồm kiểm thử bảo mật phân quyền RAG, độ phủ tìm kiếm mở rộng đồ thị (Graph Hop Recall), hiệu năng luồng ảo Java 21 (Virtual Threads), và độ chính xác của đường ống biên dịch tri thức (ETL & Wiki Graph Accuracy).
 
-Chạy kiểm thử ngày: Tue Jun 23 12:48:38 ICT 2026
+Chạy kiểm thử ngày: Tue Jun 23 22:30:25 ICT 2026
 
 ---
 
@@ -40,23 +40,23 @@ So sánh thông lượng, độ trễ và dung lượng bộ nhớ tiêu thụ g
 
 | Chỉ số đo lường (Metric) | Platform Threads (Pool=50) | Virtual Threads (Java 21) | Tỷ lệ cải thiện |
 | :--- | :---: | :---: | :---: |
-| Tổng thời gian xử lý | 1.4478 s | 0.9765 s | **Giảm 32.55%** |
-| Thông lượng trung bình (Throughput) | 345.35 RPS | 512.01 RPS | **Tăng 48.26%** |
-| Platform Threads khởi tạo | 51 threads | 9 threads | **Giảm 82.35%** |
-| Ước tính bộ nhớ tiêu thụ (RAM) | 51.00 MB | 9.98 MB | **Giảm 80.44%** |
+| Tổng thời gian xử lý | 0.9985 s | 1.4035 s | **Giảm -40.56%** |
+| Thông lượng trung bình (Throughput) | 500.77 RPS | 356.26 RPS | **Tăng -28.86%** |
+| Platform Threads khởi tạo | 50 threads | 1 threads | **Giảm 98.00%** |
+| Ước tính bộ nhớ tiêu thụ (RAM) | 50.00 MB | 1.98 MB | **Giảm 96.05%** |
 
 ### Biểu đồ so sánh trực quan (Text chart):
 
 **1. Throughput (Requests Per Second - RPS - Càng cao càng tốt):**
 ```
-Platform Threads: [███████████████████████████             ] 345.35 RPS
-Virtual Threads : [████████████████████████████████████████] 512.01 RPS (+48.26%)
+Platform Threads: [████████████████████████████████████████] 500.77 RPS
+Virtual Threads : [████████████████████████████            ] 356.26 RPS (+-28.86%)
 ```
 
 **2. Memory Consumption (MB - Càng thấp càng tốt):**
 ```
-Platform Threads: [████████████████████████████████████████] 51.00 MB
-Virtual Threads : [████████                                ] 9.98 MB (-80.44%)
+Platform Threads: [████████████████████████████████████████] 50.00 MB
+Virtual Threads : [██                                      ] 1.98 MB (-96.05%)
 ```
 
 ---

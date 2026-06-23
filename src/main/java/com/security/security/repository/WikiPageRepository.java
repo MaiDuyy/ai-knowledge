@@ -206,4 +206,32 @@ public interface WikiPageRepository extends JpaRepository<WikiPage, Long> {
         @Param("deptIdsWhereMember") List<String> deptIdsWhereMember,
         @Param("query") String query
     );
+
+    @Query("SELECT w FROM WikiPage w WHERE ("
+         + "(:workspaceId = 'ALL' AND (w.workspaceId = 'ALL' OR w.workspaceId = 'GLOBAL' OR w.workspaceId = '' OR w.workspaceId IS NULL OR w.workspaceId = 'default-workspace' OR w.workspaceId = 'workspace-default') AND (w.departmentId = 'ALL' OR w.departmentId = 'GLOBAL' OR w.departmentId IS NULL OR w.departmentId = ''))"
+         + "OR (:workspaceId != 'ALL' AND ("
+         + "    w.workspaceId = :workspaceId "
+         + "    OR (w.workspaceId = 'all') "
+         + "    OR ((w.workspaceId = 'ALL' OR w.workspaceId = 'GLOBAL' OR w.workspaceId = '' OR w.workspaceId IS NULL OR w.workspaceId = 'default-workspace' OR w.workspaceId = 'workspace-default') "
+         + "        AND (w.departmentId = 'ALL' OR w.departmentId = 'GLOBAL' OR w.departmentId IS NULL OR w.departmentId = '' "
+         + "             OR (:workspaceDeptId IS NOT NULL AND :workspaceDeptId != '' AND w.departmentId = :workspaceDeptId)))"
+         + "))) AND ("
+         + ":isAdmin = true OR "
+         + "w.securityClassification = com.security.security.entity.enumeration.SecurityClassification.PUBLIC OR "
+         + "((w.departmentId IS NULL OR w.departmentId = '' OR w.departmentId = 'ALL' OR w.departmentId = 'GLOBAL') "
+         + "  AND (w.allowedRoles IS NULL OR w.allowedRoles = '' OR w.allowedRoles != 'HEAD' OR :hasHeadRole = true)) OR "
+         + "(w.departmentId IN :deptIdsWhereHead) OR "
+         + "(w.departmentId IN :deptIdsWhereMember AND (w.allowedRoles IS NULL OR w.allowedRoles = '' OR w.allowedRoles != 'HEAD'))"
+         + ") AND w.pageType = :pageType")
+    Page<WikiPage> findAccessiblePagesByType(
+        @Param("workspaceId") String workspaceId,
+        @Param("workspaceDeptId") String workspaceDeptId,
+        @Param("isAdmin") boolean isAdmin,
+        @Param("hasHeadRole") boolean hasHeadRole,
+        @Param("deptIdsWhereHead") List<String> deptIdsWhereHead,
+        @Param("deptIdsWhereMember") List<String> deptIdsWhereMember,
+        @Param("pageType") com.security.security.entity.enumeration.WikiPageType pageType,
+        Pageable pageable
+    );
 }
+

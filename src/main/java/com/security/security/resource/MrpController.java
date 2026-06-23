@@ -30,6 +30,8 @@ import com.security.security.service.ScopeNormalizer;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+
 
 @RestController
 @RequestMapping("/api/mrp")
@@ -639,8 +641,25 @@ public class MrpController {
         }
         String normalizedDeptId = ScopeNormalizer.normalizeDepartment(workspaceDeptId);
 
-        WikiPage page = wikiPageRepository.fetchBySlugAndWorkspaceId(cleanSlug, normalizedWorkspaceId, normalizedDeptId)
-                .orElseThrow(() -> new IllegalArgumentException("Wiki page not found with slug: " + slug));
+        Optional<WikiPage> pageOpt = wikiPageRepository.fetchBySlugAndWorkspaceId(cleanSlug, normalizedWorkspaceId, normalizedDeptId);
+        if (pageOpt.isEmpty() && "index".equalsIgnoreCase(cleanSlug)) {
+            // Return virtual default index page to avoid 404/500 crash on new workspaces
+            WikiPage defaultIndex = WikiPage.builder()
+                .title("Wiki Index Overview")
+                .slug("index")
+                .content("Chào mừng bạn đến với hệ thống quản lý tri thức. Vui lòng phê duyệt các bản thảo (Drafts) hoặc biên soạn tài liệu để hiển thị nội dung chi tiết tại đây.")
+                .summary("Default wiki index page.")
+                .workspaceId(normalizedWorkspaceId)
+                .departmentId(normalizedDeptId != null ? normalizedDeptId : "ALL")
+                .allowedRoles("ALL")
+                .securityClassification(SecurityClassification.PUBLIC)
+                .pageType(com.security.security.entity.enumeration.WikiPageType.CONCEPT)
+                .version(1)
+                .build();
+            return ResponseEntity.ok(defaultIndex);
+        }
+
+        WikiPage page = pageOpt.orElseThrow(() -> new IllegalArgumentException("Wiki page not found with slug: " + slug));
                 
         checkPageAccess(page, perm);
         
@@ -887,9 +906,171 @@ public class MrpController {
                 ? workspaceId.trim()
                 : null;
 
-        WikiPage page = wikiPageRepository.findBySlugGlobal(cleanSlug, preferredWorkspaceId)
-                .orElseThrow(() -> new IllegalArgumentException("Wiki page not found with slug: " + slug));
+        Optional<WikiPage> pageOpt = wikiPageRepository.findBySlugGlobal(cleanSlug, preferredWorkspaceId);
+        if (pageOpt.isEmpty() && "index".equalsIgnoreCase(cleanSlug)) {
+            // Return virtual default index page to avoid 404/500 crash for admin
+            WikiPage defaultIndex = WikiPage.builder()
+                .title("Wiki Index Overview")
+                .slug("index")
+                .content("Chào mừng bạn đến với hệ thống quản lý tri thức. Vui lòng phê duyệt các bản thảo (Drafts) hoặc biên soạn tài liệu để hiển thị nội dung chi tiết tại đây.")
+                .summary("Default wiki index page.")
+                .workspaceId(preferredWorkspaceId != null ? preferredWorkspaceId : "default-workspace")
+                .departmentId("ALL")
+                .allowedRoles("ALL")
+                .securityClassification(SecurityClassification.PUBLIC)
+                .pageType(com.security.security.entity.enumeration.WikiPageType.CONCEPT)
+                .version(1)
+                .build();
+            return ResponseEntity.ok(defaultIndex);
+        }
+
+        WikiPage page = pageOpt.orElseThrow(() -> new IllegalArgumentException("Wiki page not found with slug: " + slug));
 
         return ResponseEntity.ok(page);
     }
+
+    /**
+     * Lấy structured index view cho wiki. Trả về intro (từ page slug="index") và danh sách các trang phân nhóm.
+     * GET /api/mrp/wiki/index?workspaceId=...&types=...&limit=...&cursor=...
+     */
+    @GetMapping("/wiki/index")
+    public ResponseEntity<com.security.security.dto.WikiIndexResponse> getWikiIndex(
+            @RequestParam(required = false) String workspaceId,
+            @RequestParam(required = false) List<String> types,
+            @RequestParam(defaultValue = "50") int limit,
+            @RequestParam(required = false) String cursor,
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
+            @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
+
+        String resolvedWsId = (workspaceId == null || workspaceId.isBlank() || "all".equalsIgnoreCase(workspaceId) || "GLOBAL".equalsIgnoreCase(workspaceId) || "ALL".equalsIgnoreCase(workspaceId))
+                ? "default-workspace" : workspaceId;
+        String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(resolvedWsId);
+        log.info("[MrpController] Fetching wiki index for workspace: {}, types: {}, limit: {}, cursor: {}, user: {}", normalizedWorkspaceId, types, limit, cursor, userId);
+
+        UserPermissionContext perm = PermissionUtils.parse(userRolesHeader, userDepartmentsHeader, objectMapper);
+        if (!perm.isAdmin()) {
+            validateWorkspaceAccess(userId, normalizedWorkspaceId);
+        }
+
+        String workspaceDeptId = null;
+        if (!"ALL".equals(normalizedWorkspaceId) && !"GLOBAL".equals(normalizedWorkspaceId)) {
+            try {
+                Map<String, Object> workspaceInfo = workspaceServiceClient.getWorkspace(normalizedWorkspaceId, userId);
+                if (workspaceInfo != null && workspaceInfo.containsKey("departmentId")) {
+                    workspaceDeptId = (String) workspaceInfo.get("departmentId");
+                }
+            } catch (Exception e) {
+                log.warn("[MrpController] Could not resolve department for workspace: {}", normalizedWorkspaceId, e);
+            }
+        }
+        String normalizedDeptId = ScopeNormalizer.normalizeDepartment(workspaceDeptId);
+
+        // 1. Fetch index page with slug = "index"
+        Optional<WikiPage> indexPageOpt = wikiPageRepository.fetchBySlugAndWorkspaceId("index", normalizedWorkspaceId, normalizedDeptId);
+        String intro = "";
+        int version = 0;
+        if (indexPageOpt.isPresent()) {
+            WikiPage indexPage = indexPageOpt.get();
+            checkPageAccess(indexPage, perm);
+            intro = indexPage.getContent();
+            if (intro == null || intro.trim().isEmpty()) {
+                intro = indexPage.getSummary();
+            }
+            version = indexPage.getVersion();
+        }
+
+        // 2. Parse pagination limit & cursor (offset)
+        int cappedLimit = Math.min(Math.max(1, limit), 200);
+        int offset = 0;
+        if (cursor != null && !cursor.trim().isEmpty()) {
+            try {
+                offset = Integer.parseInt(cursor.trim());
+            } catch (NumberFormatException e) {
+                log.warn("[MrpController] Invalid cursor format: {}", cursor);
+            }
+        }
+
+        // 3. Resolve selected types
+        List<com.security.security.entity.enumeration.WikiPageType> selectedTypes = new java.util.ArrayList<>();
+        if (types != null && !types.isEmpty()) {
+            for (String t : types) {
+                com.security.security.entity.enumeration.WikiPageType pt = com.security.security.entity.enumeration.WikiPageType.fromValue(t);
+                if (pt != null) {
+                    selectedTypes.add(pt);
+                }
+            }
+        } else {
+            // Default to all known types
+            selectedTypes.addAll(List.of(
+                com.security.security.entity.enumeration.WikiPageType.CONCEPT,
+                com.security.security.entity.enumeration.WikiPageType.ENTITY,
+                com.security.security.entity.enumeration.WikiPageType.TOPIC,
+                com.security.security.entity.enumeration.WikiPageType.SOURCE
+            ));
+        }
+
+        // 4. Build groups
+        List<com.security.security.dto.WikiIndexGroup> groups = new java.util.ArrayList<>();
+        Pageable pageable = PageRequest.of(offset / cappedLimit, cappedLimit, Sort.by(Sort.Direction.ASC, "title"));
+
+        for (com.security.security.entity.enumeration.WikiPageType pt : selectedTypes) {
+            Page<WikiPage> pagedResult = wikiPageRepository.findAccessiblePagesByType(
+                normalizedWorkspaceId, normalizedDeptId, perm.isAdmin(), perm.hasHeadRole(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember(), pt, pageable);
+
+            List<com.security.security.dto.WikiIndexEntry> entries = pagedResult.getContent().stream().map(page -> {
+                // Populate category path from tags (splitting tags by comma)
+                List<String> categoryPath = new java.util.ArrayList<>();
+                if (page.getTags() != null && !page.getTags().trim().isEmpty()) {
+                    for (String tag : page.getTags().split(",")) {
+                        String cleanTag = tag.trim();
+                        if (!cleanTag.isEmpty()) {
+                            categoryPath.add(cleanTag);
+                        }
+                    }
+                }
+                
+                String display = page.getTitle() != null ? page.getTitle().trim() : "";
+                if (display.isEmpty()) {
+                    display = page.getSlug();
+                }
+
+                // Assembles the wikiPath: "type/cat.../title"
+                java.util.List<String> pathParts = new java.util.ArrayList<>();
+                pathParts.add(pt.getValue());
+                pathParts.addAll(categoryPath);
+                pathParts.add(display);
+                String wikiPath = String.join("/", pathParts);
+
+                return com.security.security.dto.WikiIndexEntry.builder()
+                    .slug(page.getSlug())
+                    .title(page.getTitle())
+                    .summary(page.getSummary() != null ? page.getSummary() : "")
+                    .categoryPath(categoryPath)
+                    .wikiPath(wikiPath)
+                    .depth(categoryPath.size())
+                    .sortOrder(0)
+                    .build();
+            }).toList();
+
+            String nextCursor = null;
+            if (pagedResult.hasNext()) {
+                nextCursor = String.valueOf(offset + cappedLimit);
+            }
+
+            groups.add(com.security.security.dto.WikiIndexGroup.builder()
+                .type(pt.getValue())
+                .total(pagedResult.getTotalElements())
+                .items(entries)
+                .nextCursor(nextCursor)
+                .build());
+        }
+
+        return ResponseEntity.ok(com.security.security.dto.WikiIndexResponse.builder()
+            .intro(intro)
+            .version(version)
+            .groups(groups)
+            .build());
+    }
 }
+

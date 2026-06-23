@@ -176,6 +176,9 @@ public class WikiDraftService {
         // Refresh knowledge graph wiki links
         refreshLinks(targetPage.getId(), targetPage.getSlug(), targetPage.getContent(), targetPage.getWorkspaceId());
 
+        // Rebuild index page intro asynchronously
+        rebuildIndexPage(targetPage.getWorkspaceId(), targetPage.getDepartmentId());
+
         // Update draft status
         draft.setStatus(WikiPageDraftStatus.APPROVED);
         draft.setReviewerNote("Approved and committed successfully.");
@@ -183,6 +186,112 @@ public class WikiDraftService {
         natsEventPublisher.publishWikiDraftUpdated(saved.getId(), saved.getTitle(), saved.getSlug(), saved.getWorkspaceId(), "APPROVED", reviewerId);
         return saved;
     }
+
+    /**
+     * Rebuild the special overview wiki page with slug "index" for the workspace.
+     * Uses LLM to generate/update the introductory paragraph summarizing recent wiki pages.
+     */
+    public void rebuildIndexPage(String workspaceId, String departmentId) {
+        String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
+        String normalizedDeptId = ScopeNormalizer.normalizeDepartment(departmentId);
+        
+        log.info("[WikiDraftService] Rebuilding index page for workspace: {}, department: {}", normalizedWorkspaceId, normalizedDeptId);
+        
+        CompletableFuture.runAsync(() -> {
+            try {
+                // Fetch first 15 most recent wiki pages (excluding slug = "index")
+                List<WikiPage> pages = wikiPageRepository.findAccessiblePages(
+                    normalizedWorkspaceId, normalizedDeptId, true, true, List.of(), List.of());
+                
+                List<WikiPage> activePages = pages.stream()
+                    .filter(p -> !"index".equalsIgnoreCase(p.getSlug()))
+                    .sorted((a, b) -> b.getUpdatedAt().compareTo(a.getUpdatedAt()))
+                    .limit(15)
+                    .toList();
+
+                if (activePages.isEmpty()) {
+                    log.info("[WikiDraftService] No active wiki pages found. Skipping index page rebuild.");
+                    return;
+                }
+
+                // Construct summaries string for LLM
+                StringBuilder summariesBuilder = new StringBuilder();
+                for (WikiPage p : activePages) {
+                    summariesBuilder.append("<document>\n<title>")
+                        .append(p.getTitle())
+                        .append("</title>\n<summary>")
+                        .append(p.getSummary() != null && !p.getSummary().isBlank() ? p.getSummary() : (p.getContent().length() > 200 ? p.getContent().substring(0, 200) + "..." : p.getContent()))
+                        .append("</summary>\n</document>\n\n");
+                }
+
+                String systemPrompt = """
+                    You are an expert enterprise knowledge indexer.
+                    You are given a list of documents and topics that have recently been added/updated in the wiki knowledge base.
+                    Your job is to write a cohesive, professional introductory paragraph (approx 100-200 words) summarizing what this knowledge base is about and what key topics it covers.
+                    Do not add markdown headings, lists, or tags. Just return the raw paragraph text.
+                    """;
+
+                String userContent = "Here is the list of documents and summaries:\n\n" + summariesBuilder.toString();
+                
+                String generatedIntro = chatClient.prompt()
+                    .system(systemPrompt)
+                    .user(userContent)
+                    .call()
+                    .content();
+
+                if (generatedIntro == null || generatedIntro.trim().isEmpty()) {
+                    log.warn("[WikiDraftService] LLM returned empty intro. Using fallback intro.");
+                    generatedIntro = "This wiki contains knowledge extracted from uploaded documents.";
+                }
+
+                // Construct the index content: LLM intro + list of recent page links
+                StringBuilder contentBuilder = new StringBuilder();
+                contentBuilder.append(generatedIntro.trim());
+                contentBuilder.append("\n\n### Danh mục tài liệu gần đây\n");
+                for (WikiPage p : activePages) {
+                    contentBuilder.append("- [[")
+                        .append(p.getSlug())
+                        .append("|")
+                        .append(p.getTitle())
+                        .append("]]\n");
+                }
+                String finalContent = contentBuilder.toString();
+
+                // Create or update the "index" page
+                Optional<WikiPage> existingIndexPageOpt = wikiPageRepository.fetchBySlugAndWorkspaceId("index", normalizedWorkspaceId, normalizedDeptId);
+                WikiPage indexPage;
+                if (existingIndexPageOpt.isPresent()) {
+                    indexPage = existingIndexPageOpt.get();
+                    indexPage.setContent(finalContent);
+                    indexPage.setSummary("Generated index page intro with links.");
+                    log.info("[WikiDraftService] Updating existing index page.");
+                } else {
+                    indexPage = WikiPage.builder()
+                        .title("Wiki Index Overview")
+                        .slug("index")
+                        .content(finalContent)
+                        .summary("Generated index page intro with links.")
+                        .workspaceId(normalizedWorkspaceId)
+                        .departmentId(normalizedDeptId)
+                        .allowedRoles("ALL")
+                        .securityClassification(SecurityClassification.INTERNAL)
+                        .pageType(com.security.security.entity.enumeration.WikiPageType.CONCEPT)
+                        .build();
+                    log.info("[WikiDraftService] Creating new index page.");
+                }
+                
+                WikiPage savedIndex = wikiPageRepository.save(indexPage);
+                // Also vectorize the index page
+                revectorizeWikiPageSync(savedIndex, existingIndexPageOpt.isPresent());
+                // Refresh index page wiki links in graph
+                refreshLinks(savedIndex.getId(), savedIndex.getSlug(), savedIndex.getContent(), savedIndex.getWorkspaceId());
+                log.info("[WikiDraftService] Successfully rebuilt index page for workspace: {}", normalizedWorkspaceId);
+            } catch (Exception e) {
+                log.error("[WikiDraftService] Error rebuilding index page: {}", e.getMessage(), e);
+            }
+        });
+    }
+
 
     /**
      * Vectorize (or re-vectorize) a WikiPage in the VectorStore asynchronously.
