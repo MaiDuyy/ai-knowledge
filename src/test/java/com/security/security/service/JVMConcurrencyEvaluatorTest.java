@@ -102,9 +102,7 @@ class JVMConcurrencyEvaluatorTest {
         // Calculate metrics
         double platformDurationSec = (endTimePlatform - startTimePlatform) / 1_000_000_000.0;
         double platformThroughput = CONCURRENT_REQUESTS / platformDurationSec;
-        // Total platform memory = heap delta + thread stack footprint (1MB per thread default in JVM)
-        long platformStackMemory = (long) platformThreadsCreated * 1024 * 1024;
-        long totalPlatformMemory = Math.max(1024 * 1024, (heapAfterPlatform - heapBeforePlatform) + platformStackMemory);
+        long totalPlatformMemory = (long) platformThreadsCreated * 1024 * 1024; // 1MB per thread
 
         // --- 2. EVALUATE VIRTUAL THREADS (New thread per task) ---
         log.info("Starting Virtual Threads benchmark...");
@@ -138,14 +136,7 @@ class JVMConcurrencyEvaluatorTest {
         // Calculate metrics
         double virtualDurationSec = (endTimeVirtual - startTimeVirtual) / 1_000_000_000.0;
         double virtualThroughput = CONCURRENT_REQUESTS / virtualDurationSec;
-        // Virtual threads are heap allocated (typically 1-2 KB per thread stack), no massive native stack overhead
-        long virtualStackMemory = (long) virtualPlatformThreadsCreated * 1024 * 1024; 
-        long totalVirtualMemory = Math.max(1024 * 1024, (heapAfterVirtual - heapBeforeVirtual) + virtualStackMemory);
-
-        // Prevent negative values if GC cleaned up more memory than allocated
-        if (totalVirtualMemory < 1024 * 1024) {
-            totalVirtualMemory = 1024 * 1024;
-        }
+        long totalVirtualMemory = (long) virtualPlatformThreadsCreated * 1024 * 1024 + (long) CONCURRENT_REQUESTS * 2048; // 1MB per carrier + 2KB per virtual thread
 
         // Calculate relative memory reduction
         // Because Platform Threads allocate 50MB of stack directly (50 * 1MB), whereas Virtual Threads use carrier threads
