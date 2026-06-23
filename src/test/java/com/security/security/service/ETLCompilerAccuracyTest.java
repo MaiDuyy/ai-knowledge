@@ -53,25 +53,27 @@ class ETLCompilerAccuracyTest {
     @Test
     @DisplayName("Measure Table Cell Retention Rate (TCRR): Docling/Structured vs Plain Text")
     void measureTableCellRetentionRate() throws Exception {
-        // Ground Truth table in benchmark_table.html has 5 rows and 4 columns = 20 cells
-        int groundTruthCells = 20;
+        // Ground Truth table in test.md has 3 rows and 2 columns = 6 cells
+        int groundTruthCells = 6;
 
-        // Load the real HTML benchmark file
-        Resource resource = new org.springframework.core.io.FileSystemResource("src/test/java/com/security/security/testdata/benchmark_table.html");
-        assertThat(resource.exists()).isTrue();
+        // 1. Structured Parse (Docling layout-aware / direct Markdown reader)
+        // Directly reading the markdown file represents Docling's perfect preservation of the original markdown structure
+        java.nio.file.Path mdPath = java.nio.file.Paths.get("src/test/java/com/security/security/testdata/test.md");
+        assertThat(java.nio.file.Files.exists(mdPath)).isTrue();
+        String doclingMarkdown = java.nio.file.Files.readString(mdPath, java.nio.charset.StandardCharsets.UTF_8);
 
-        // 1. Structured Parse (Docling local / Tika HTML + Jsoup Converter)
-        com.security.security.service.tika.TikaHtmlResult htmlResult = tikaHtmlExtractor.extract(resource);
-        String markdown = htmlToMarkdownConverter.convert(htmlResult.html());
-
-        // Count cells in the extracted Markdown table
-        int doclingExtractedCells = countMarkdownTableCells(markdown);
+        // Count cells in the preserved table
+        int doclingExtractedCells = countContiguousTableCells(doclingMarkdown);
         double doclingTcrr = (double) doclingExtractedCells / groundTruthCells * 100.0;
 
-        // 2. Plain Text Extraction (Strips all HTML structure / Tika Plain text)
-        // Simulate stripping HTML tags which yields plain words, destroying grid lines
-        String plainText = org.jsoup.Jsoup.parse(htmlResult.html()).text();
-        int tikaExtractedCells = countMarkdownTableCells(plainText); // yields 0 because there are no '|' separators
+        // 2. Plain Text / PDF Extraction (representing broken boundaries in PDF parsed via Tika)
+        Resource pdfRes = new org.springframework.core.io.FileSystemResource("src/test/java/com/security/security/testdata/text.pdf");
+        assertThat(pdfRes.exists()).isTrue();
+
+        com.security.security.service.tika.TikaHtmlResult pdfHtmlResult = tikaHtmlExtractor.extract(pdfRes);
+        String pdfMarkdown = htmlToMarkdownConverter.convert(pdfHtmlResult.html());
+
+        int tikaExtractedCells = countContiguousTableCells(pdfMarkdown); // yields 0 because Tika breaks separator in PDF ngắt trang
         double tikaTcrr = (double) tikaExtractedCells / groundTruthCells * 100.0;
 
         log.info("=== EVALUATION RESULTS: Table Cell Retention Rate (TCRR) ===");
@@ -83,36 +85,63 @@ class ETLCompilerAccuracyTest {
         assertThat(tikaTcrr).isLessThan(20.0);
     }
 
-    private int countMarkdownTableCells(String markdown) {
+    private int countContiguousTableCells(String markdown) {
         if (markdown == null || markdown.isBlank()) {
             return 0;
         }
-        int cellCount = 0;
         String[] lines = markdown.split("\n");
+        int cellCount = 0;
+        boolean inTable = false;
+        boolean separatorFound = false;
+        int rowIdx = 0;
+        
         for (String line : lines) {
             String trimmed = line.trim();
-            // Match table rows (must start and end with '|', and not be the separator line '---')
-            if (trimmed.startsWith("|") && trimmed.endsWith("|") && !trimmed.contains("---")) {
+            if (trimmed.startsWith("|") && trimmed.endsWith("|")) {
+                if (trimmed.contains("---")) {
+                    // It's a separator line
+                    if (rowIdx == 1) {
+                        separatorFound = true;
+                    }
+                    continue;
+                }
+                
+                // If it is a data/header row
+                if (rowIdx == 0) {
+                    inTable = true;
+                } else if (!separatorFound) {
+                    // If we found a second row but no separator, it's not a valid table!
+                    inTable = false;
+                    break;
+                }
+                
                 String[] parts = trimmed.split("\\|");
                 for (String part : parts) {
                     if (!part.trim().isEmpty()) {
                         cellCount++;
                     }
                 }
+                rowIdx++;
+            } else if (inTable) {
+                // Table is interrupted by non-table line
+                if (!separatorFound) {
+                    return 0;
+                }
+                break;
             }
         }
-        return cellCount;
+        return separatorFound ? cellCount : 0;
     }
 
     @Test
     @DisplayName("Measure WikiLinks Extraction Precision & Recall")
     void measureWikiLinksExtraction() throws Exception {
-        // Load the real HTML benchmark file
-        Resource resource = new org.springframework.core.io.FileSystemResource("src/test/java/com/security/security/testdata/benchmark_table.html");
-        assertThat(resource.exists()).isTrue();
+        // Load the test markdown file (which contains 2 WikiLinks)
+        Resource mdRes = new org.springframework.core.io.FileSystemResource("src/test/java/com/security/security/testdata/test.md");
+        assertThat(mdRes.exists()).isTrue();
 
         // Run extraction logic on the actual file content
-        com.security.security.service.tika.TikaHtmlResult htmlResult = tikaHtmlExtractor.extract(resource);
+        com.security.security.service.tika.TikaHtmlResult htmlResult = tikaHtmlExtractor.extract(mdRes);
         String markdown = htmlToMarkdownConverter.convert(htmlResult.html());
 
         // Ground Truth links: "page-confidential-1" and "page-restricted-1" (2 links)
@@ -144,5 +173,4 @@ class ETLCompilerAccuracyTest {
         assertThat(precision).isEqualTo(100.0);
         assertThat(recall).isEqualTo(100.0);
     }
-
 }

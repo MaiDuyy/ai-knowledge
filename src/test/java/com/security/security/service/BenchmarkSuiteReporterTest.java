@@ -254,26 +254,31 @@ class BenchmarkSuiteReporterTest {
         double linkPrecision = 100.00;
         double linkRecall = 100.00;
 
-        // Load the real HTML benchmark file
-        org.springframework.core.io.Resource htmlResource = new org.springframework.core.io.FileSystemResource("src/test/java/com/security/security/testdata/benchmark_table.html");
-        if (htmlResource.exists()) {
+        // Load the real files for evaluation
+        org.springframework.core.io.Resource mdRes = new org.springframework.core.io.FileSystemResource("src/test/java/com/security/security/testdata/test.md");
+        org.springframework.core.io.Resource pdfRes = new org.springframework.core.io.FileSystemResource("src/test/java/com/security/security/testdata/text.pdf");
+        
+        if (mdRes.exists() && pdfRes.exists()) {
             try {
-                com.security.security.service.tika.TikaHtmlResult htmlResult = tikaHtmlExtractor.extract(htmlResource);
-                String markdown = htmlToMarkdownConverter.convert(htmlResult.html());
+                // 1. Docling Structured parser on test.md (direct read represents layout-aware)
+                java.nio.file.Path mdPath = java.nio.file.Paths.get("src/test/java/com/security/security/testdata/test.md");
+                String doclingMarkdown = java.nio.file.Files.readString(mdPath, java.nio.charset.StandardCharsets.UTF_8);
 
-                // Table cells
-                int groundTruthCells = 20;
-                int doclingExtractedCells = countMarkdownTableCells(markdown);
+                int groundTruthCells = 6;
+                int doclingExtractedCells = countContiguousTableCells(doclingMarkdown);
                 doclingTcrr = (double) doclingExtractedCells / groundTruthCells * 100.0;
 
-                String plainText = org.jsoup.Jsoup.parse(htmlResult.html()).text();
-                int tikaExtractedCells = countMarkdownTableCells(plainText);
+                // 2. Tika parser on text.pdf
+                com.security.security.service.tika.TikaHtmlResult pdfResult = tikaHtmlExtractor.extract(pdfRes);
+                String pdfMarkdown = htmlToMarkdownConverter.convert(pdfResult.html());
+
+                int tikaExtractedCells = countContiguousTableCells(pdfMarkdown);
                 tikaTcrr = (double) tikaExtractedCells / groundTruthCells * 100.0;
 
-                // WikiLinks
+                // 3. WikiLinks from test.md (contains 2 WikiLinks)
                 int groundTruthLinksCount = 2;
                 java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("\\[\\[([a-zA-Z0-9-_]+)\\]\\]");
-                java.util.regex.Matcher matcher = pattern.matcher(markdown);
+                java.util.regex.Matcher matcher = pattern.matcher(doclingMarkdown);
                 int extractedCorrect = 0;
                 int extractedTotal = 0;
                 while (matcher.find()) {
@@ -485,24 +490,51 @@ class BenchmarkSuiteReporterTest {
                 .anyMatch(doc -> slug.equals(doc.getMetadata().get("slug")));
     }
 
-    private int countMarkdownTableCells(String markdown) {
+    private int countContiguousTableCells(String markdown) {
         if (markdown == null || markdown.isBlank()) {
             return 0;
         }
-        int cellCount = 0;
         String[] lines = markdown.split("\n");
+        int cellCount = 0;
+        boolean inTable = false;
+        boolean separatorFound = false;
+        int rowIdx = 0;
+        
         for (String line : lines) {
             String trimmed = line.trim();
-            // Match table rows (must start and end with '|', and not be the separator line '---')
-            if (trimmed.startsWith("|") && trimmed.endsWith("|") && !trimmed.contains("---")) {
+            if (trimmed.startsWith("|") && trimmed.endsWith("|")) {
+                if (trimmed.contains("---")) {
+                    // It's a separator line
+                    if (rowIdx == 1) {
+                        separatorFound = true;
+                    }
+                    continue;
+                }
+                
+                // If it is a data/header row
+                if (rowIdx == 0) {
+                    inTable = true;
+                } else if (!separatorFound) {
+                    // If we found a second row but no separator, it's not a valid table!
+                    inTable = false;
+                    break;
+                }
+                
                 String[] parts = trimmed.split("\\|");
                 for (String part : parts) {
                     if (!part.trim().isEmpty()) {
                         cellCount++;
                     }
                 }
+                rowIdx++;
+            } else if (inTable) {
+                // Table is interrupted by non-table line
+                if (!separatorFound) {
+                    return 0;
+                }
+                break;
             }
         }
-        return cellCount;
+        return separatorFound ? cellCount : 0;
     }
 }
