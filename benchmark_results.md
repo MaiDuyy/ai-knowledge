@@ -1,8 +1,8 @@
 # BÁO CÁO KẾT QUẢ KIỂM THỬ BENCHMARK (SECWIKI-BENCH)
 
-Tài liệu này tổng hợp kết quả chạy thử nghiệm Benchmark tự động cho dịch vụ **ai-knowledge**, bao gồm kiểm thử bảo mật phân quyền RAG, độ phủ tìm kiếm mở rộng đồ thị (Graph Hop Recall), và hiệu năng luồng ảo Java 21 (Virtual Threads).
+Tài liệu này tổng hợp kết quả chạy thử nghiệm Benchmark tự động cho dịch vụ **ai-knowledge**, bao gồm kiểm thử bảo mật phân quyền RAG, độ phủ tìm kiếm mở rộng đồ thị (Graph Hop Recall), hiệu năng luồng ảo Java 21 (Virtual Threads), và độ chính xác của đường ống biên dịch tri thức (ETL & Wiki Graph Accuracy).
 
-Chạy kiểm thử ngày: Tue Jun 23 11:56:56 ICT 2026
+Chạy kiểm thử ngày: Tue Jun 23 12:13:55 ICT 2026
 
 ---
 
@@ -40,8 +40,8 @@ So sánh thông lượng, độ trễ và dung lượng bộ nhớ tiêu thụ g
 
 | Chỉ số đo lường (Metric) | Platform Threads (Pool=50) | Virtual Threads (Java 21) | Tỷ lệ cải thiện |
 | :--- | :---: | :---: | :---: |
-| Tổng thời gian xử lý | 1.5534 s | 0.9433 s | **Giảm 39.27%** |
-| Thông lượng trung bình (Throughput) | 321.87 RPS | 530.04 RPS | **Tăng 64.67%** |
+| Tổng thời gian xử lý | 1.8497 s | 0.9591 s | **Giảm 48.15%** |
+| Thông lượng trung bình (Throughput) | 270.32 RPS | 521.33 RPS | **Tăng 92.86%** |
 | Platform Threads khởi tạo | 51 threads | 9 threads | **Giảm 82.35%** |
 | Ước tính bộ nhớ tiêu thụ (RAM) | 51.00 MB | 9.98 MB | **Giảm 80.44%** |
 
@@ -49,8 +49,8 @@ So sánh thông lượng, độ trễ và dung lượng bộ nhớ tiêu thụ g
 
 **1. Throughput (Requests Per Second - RPS - Càng cao càng tốt):**
 ```
-Platform Threads: [████████████████████████                ] 321.87 RPS
-Virtual Threads : [████████████████████████████████████████] 530.04 RPS (+64.67%)
+Platform Threads: [█████████████████████                   ] 270.32 RPS
+Virtual Threads : [████████████████████████████████████████] 521.33 RPS (+92.86%)
 ```
 
 **2. Memory Consumption (MB - Càng thấp càng tốt):**
@@ -59,4 +59,17 @@ Platform Threads: [████████████████████�
 Virtual Threads : [████████                                ] 9.98 MB (-80.44%)
 ```
 
-- **Kết luận**: Sử dụng Virtual Threads trên Java 21 giúp hệ thống cải thiện đáng kể khả năng phục vụ truy cập đồng thời lớn, giảm thiểu rủi ro cạn kiệt tài nguyên RAM và cải thiện độ trễ phản hồi tổng thể của RAG pipeline.
+---
+
+## 4. Đánh giá Độ chính xác của Biên dịch Tri thức (ETL & Wiki Graph Accuracy)
+
+Đo lường khả năng trích xuất cấu trúc văn bản thô (PDF/DOCX) sang định dạng máy đọc và biên dịch liên kết đồ thị tri thức.
+
+*   **Table Cell Retention Rate (TCRR - Độ bảo toàn cấu trúc bảng biểu)**:
+    *   **Docling (Layout-Aware AI)**: **100.00%** (Nhận diện chính xác 20/20 ô bảng lưới phức tạp).
+    *   **Apache Tika (Plain OCR/Text)**: **15.00%** (Làm vỡ dòng, gộp cột khiến dữ liệu mất cấu trúc).
+*   **WikiLinks Compiler (Độ chính xác bộ biên dịch liên kết tri thức)**:
+    *   **Precision (Độ chính xác)**: **100.00%** (100% liên kết được sinh khớp chuẩn tài liệu).
+    *   **Recall (Độ phủ)**: **100.00%** (Trích xuất đầy đủ 100% các liên kết do tác giả chỉ định).
+
+- **Kết luận**: Sử dụng Docling kết hợp thuật toán biên dịch WikiLinks bằng Regex & toán học đồ thị JGraphT giúp hệ thống biên dịch tri thức hoàn toàn chính xác cấu trúc tài liệu gốc và tự động phát hiện quan hệ liên kết sâu, làm nền tảng vững chắc cho RAG.
