@@ -123,22 +123,30 @@ public class NatsConfig {
                 io.nats.client.api.StreamInfo streamInfo = jsm.getStreamInfo("AI_KNOWLEDGE_EVENTS");
                 log.info("[NATS] Stream 'AI_KNOWLEDGE_EVENTS' already exists. Updating subjects if necessary.");
                 List<String> subjects = new ArrayList<>(streamInfo.getConfiguration().getSubjects());
+                boolean needsUpdate = false;
                 if (!subjects.contains("document.ingest.requested")) {
                     subjects.add("document.ingest.requested");
+                    needsUpdate = true;
+                }
+                if (!subjects.contains("datasource.sync.requested")) {
+                    subjects.add("datasource.sync.requested");
+                    needsUpdate = true;
+                }
+                if (needsUpdate) {
                     io.nats.client.api.StreamConfiguration updatedConfig = io.nats.client.api.StreamConfiguration.builder(streamInfo.getConfiguration())
                             .subjects(subjects)
                             .build();
                     jsm.updateStream(updatedConfig);
-                    log.info("[NATS] Updated 'AI_KNOWLEDGE_EVENTS' stream configuration with subject 'document.ingest.requested'");
+                    log.info("[NATS] Updated 'AI_KNOWLEDGE_EVENTS' stream configuration with required subjects");
                 }
             } catch (io.nats.client.JetStreamApiException e) {
                 io.nats.client.api.StreamConfiguration streamConfig = io.nats.client.api.StreamConfiguration.builder()
                         .name("AI_KNOWLEDGE_EVENTS")
-                        .subjects("document.status.updated", "compilation.plan.updated", "wiki.draft.updated", "document.ingest.requested")
+                        .subjects("document.status.updated", "compilation.plan.updated", "wiki.draft.updated", "document.ingest.requested", "datasource.sync.requested")
                         .storageType(io.nats.client.api.StorageType.File)
                         .build();
                 jsm.addStream(streamConfig);
-                log.info("[NATS] Created JetStream stream 'AI_KNOWLEDGE_EVENTS' with subjects including 'document.ingest.requested'");
+                log.info("[NATS] Created JetStream stream 'AI_KNOWLEDGE_EVENTS' with subjects including 'document.ingest.requested' and 'datasource.sync.requested'");
             }
         } catch (Exception e) {
             log.warn("[NATS] Failed to initialize JetStream streams: {}", e.getMessage());
