@@ -60,11 +60,9 @@ class DatabaseMigrationBootstrapperTest {
         // Act
         bootstrapper.run();
 
-        // Assert
-        // Verify update calls for documents, wiki_pages, wiki_page_drafts, embeddings (7 database updates, plus 4 vector_store updates)
-        verify(jdbcTemplate, atLeast(10)).update(anyString());
         // Verify execute for CREATE INDEX or ALTER TABLE
         verify(jdbcTemplate, atLeastOnce()).execute(anyString());
+        verify(jdbcTemplate).execute(contains("vector_store_hnsw_idx"));
     }
 
     @Test

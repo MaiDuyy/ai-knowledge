@@ -156,6 +156,17 @@ public class DatabaseMigrationBootstrapper implements CommandLineRunner {
                                 log.error("Failed to create expression GIN index: {}", ex.getMessage());
                             }
                         }
+
+                        // 6. Create HNSW index on embedding column (pgvector)
+                        try {
+                            jdbcTemplate.execute("CREATE EXTENSION IF NOT EXISTS vector");
+                            jdbcTemplate.execute(
+                                "CREATE INDEX IF NOT EXISTS vector_store_hnsw_idx ON vector_store USING hnsw (embedding vector_cosine_ops)"
+                            );
+                            log.info("HNSW index verified/created on vector_store(embedding)");
+                        } catch (Exception e) {
+                            log.warn("Failed to create HNSW index on embedding column (pgvector version might not support HNSW or extension missing): {}", e.getMessage());
+                        }
                     } else {
                         log.info("vector_store table does not exist yet. Skipping pgvector metadata migration.");
                     }

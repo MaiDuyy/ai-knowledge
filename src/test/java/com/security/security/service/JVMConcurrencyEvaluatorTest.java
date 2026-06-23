@@ -30,7 +30,7 @@ class JVMConcurrencyEvaluatorTest {
 
     private static final Logger log = LoggerFactory.getLogger(JVMConcurrencyEvaluatorTest.class);
     private static final int CONCURRENT_REQUESTS = 500;
-    private static final int SIMULATED_LATENCY_MS = 20;
+    private static final int SIMULATED_LATENCY_MS = 100;
 
     @MockBean
     private org.springframework.ai.vectorstore.VectorStore vectorStore;

@@ -188,57 +188,77 @@ class BenchmarkSuiteReporterTest {
 
         ThreadMXBean threadBean = ManagementFactory.getThreadMXBean();
 
-        // Platform threads evaluation
-        ExecutorService platformExecutor = Executors.newFixedThreadPool(50);
-        System.gc();
-        Thread.sleep(100);
-        long heapBeforePlatform = Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory();
-        int threadsBeforePlatform = threadBean.getThreadCount();
-
-        long startPlatform = System.nanoTime();
-        List<Future<Void>> platformFutures = new ArrayList<>();
-        for (int i = 0; i < CONCURRENT_REQUESTS; i++) {
-            platformFutures.add(platformExecutor.submit(() -> {
-                ragService.executeHybridSearchAndExpansion("onboard", itMemberCtx, "user-member-it", 5, 0.1);
-                return null;
-            }));
+        // Platform threads evaluation (5 trials)
+        double totalPlatformSec = 0.0;
+        int platformThreadsCreated = 50; // fallback default
+        
+        for (int trial = 1; trial <= 5; trial++) {
+            ExecutorService platformExecutor = Executors.newFixedThreadPool(50);
+            System.gc();
+            Thread.sleep(50);
+            int threadsBeforePlatform = threadBean.getThreadCount();
+            
+            long startPlatform = System.nanoTime();
+            List<Future<Void>> platformFutures = new ArrayList<>();
+            for (int i = 0; i < CONCURRENT_REQUESTS; i++) {
+                platformFutures.add(platformExecutor.submit(() -> {
+                    ragService.executeHybridSearchAndExpansion("onboard", itMemberCtx, "user-member-it", 5, 0.1);
+                    return null;
+                }));
+            }
+            for (Future<Void> f : platformFutures) f.get();
+            long endPlatform = System.nanoTime();
+            
+            int maxThreadsPlatform = threadBean.getThreadCount();
+            int createdThisTrial = Math.max(50, maxThreadsPlatform - threadsBeforePlatform);
+            platformExecutor.shutdown();
+            
+            double durationSec = (endPlatform - startPlatform) / 1_000_000_000.0;
+            log.info("Platform Threads - Trial {}: {}s", trial, durationSec);
+            
+            if (trial > 1) { // Discard warm-up trial
+                totalPlatformSec += durationSec;
+                platformThreadsCreated = Math.max(platformThreadsCreated, createdThisTrial);
+            }
         }
-        for (Future<Void> f : platformFutures) f.get();
-        long endPlatform = System.nanoTime();
-
-        long heapAfterPlatform = Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory();
-        int maxThreadsPlatform = threadBean.getThreadCount();
-        int platformThreadsCreated = Math.max(50, maxThreadsPlatform - threadsBeforePlatform);
-        platformExecutor.shutdown();
-
-        double platformSec = (endPlatform - startPlatform) / 1_000_000_000.0;
+        double platformSec = totalPlatformSec / 4.0;
         double platformRps = CONCURRENT_REQUESTS / platformSec;
         long platformTotalMem = (long) platformThreadsCreated * 1024 * 1024; // 1MB per thread
 
-        // Virtual threads evaluation
-        ExecutorService virtualExecutor = Executors.newVirtualThreadPerTaskExecutor();
-        System.gc();
-        Thread.sleep(100);
-        long heapBeforeVirtual = Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory();
-        int threadsBeforeVirtual = threadBean.getThreadCount();
-
-        long startVirtual = System.nanoTime();
-        List<Future<Void>> virtualFutures = new ArrayList<>();
-        for (int i = 0; i < CONCURRENT_REQUESTS; i++) {
-            virtualFutures.add(virtualExecutor.submit(() -> {
-                ragService.executeHybridSearchAndExpansion("onboard", itMemberCtx, "user-member-it", 5, 0.1);
-                return null;
-            }));
+        // Virtual threads evaluation (5 trials)
+        double totalVirtualSec = 0.0;
+        int virtualPlatformThreadsCreated = 1; // fallback default
+        
+        for (int trial = 1; trial <= 5; trial++) {
+            ExecutorService virtualExecutor = Executors.newVirtualThreadPerTaskExecutor();
+            System.gc();
+            Thread.sleep(50);
+            int threadsBeforeVirtual = threadBean.getThreadCount();
+            
+            long startVirtual = System.nanoTime();
+            List<Future<Void>> virtualFutures = new ArrayList<>();
+            for (int i = 0; i < CONCURRENT_REQUESTS; i++) {
+                virtualFutures.add(virtualExecutor.submit(() -> {
+                    ragService.executeHybridSearchAndExpansion("onboard", itMemberCtx, "user-member-it", 5, 0.1);
+                    return null;
+                }));
+            }
+            for (Future<Void> f : virtualFutures) f.get();
+            long endVirtual = System.nanoTime();
+            
+            int maxThreadsVirtual = threadBean.getThreadCount();
+            int createdThisTrial = Math.max(1, maxThreadsVirtual - threadsBeforeVirtual);
+            virtualExecutor.shutdown();
+            
+            double durationSec = (endVirtual - startVirtual) / 1_000_000_000.0;
+            log.info("Virtual Threads - Trial {}: {}s", trial, durationSec);
+            
+            if (trial > 1) { // Discard warm-up trial
+                totalVirtualSec += durationSec;
+                virtualPlatformThreadsCreated = Math.max(virtualPlatformThreadsCreated, createdThisTrial);
+            }
         }
-        for (Future<Void> f : virtualFutures) f.get();
-        long endVirtual = System.nanoTime();
-
-        long heapAfterVirtual = Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory();
-        int maxThreadsVirtual = threadBean.getThreadCount();
-        int virtualPlatformThreadsCreated = Math.max(1, maxThreadsVirtual - threadsBeforeVirtual);
-        virtualExecutor.shutdown();
-
-        double virtualSec = (endVirtual - startVirtual) / 1_000_000_000.0;
+        double virtualSec = totalVirtualSec / 4.0;
         double virtualRps = CONCURRENT_REQUESTS / virtualSec;
         long virtualTotalMem = (long) virtualPlatformThreadsCreated * 1024 * 1024 + (long) CONCURRENT_REQUESTS * 2048; // 1MB per carrier + 2KB per virtual thread
 

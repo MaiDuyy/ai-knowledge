@@ -6,6 +6,8 @@ import com.security.security.entity.Document;
 import com.security.security.entity.enumeration.DocStatus;
 import com.security.security.entity.enumeration.DocType;
 import com.security.security.repository.DocumentRepository;
+import com.security.security.entity.enumeration.SecurityClassification;
+import com.security.security.service.ScopeNormalizer;
 import io.nats.client.Connection;
 import io.nats.client.Dispatcher;
 import io.nats.client.Message;
@@ -132,6 +134,13 @@ public class NatsDocumentSubscriber {
             String url          = getTextField(payload, "url");
             String mimeType     = getTextField(payload, "mimeType");
             String originalName = getTextField(payload, "originalName");
+            String workspaceId  = getTextField(payload, "workspaceId");
+            String departmentId = getTextField(payload, "departmentId");
+            String allowedRoles = getTextField(payload, "allowedRoles");
+            String classification = getTextField(payload, "classification");
+            if (classification == null) {
+                classification = getTextField(payload, "securityClassification");
+            }
 
             if (url == null || url.isBlank()) {
                 log.warn("[NATS] Missing 'url' in payload, skipping");
@@ -158,6 +167,10 @@ public class NatsDocumentSubscriber {
                     .documentType(docType)
                     .status(DocStatus.PROCESSING)
                     .chunkCount(0)
+                    .workspaceId(ScopeNormalizer.normalizeWorkspace(workspaceId))
+                    .departmentId(ScopeNormalizer.normalizeDepartment(departmentId))
+                    .allowedRoles(allowedRoles != null ? allowedRoles : "ALL")
+                    .securityClassification(resolveSecurityClassification(classification))
                     .build();
 
             Document saved = documentRepository.save(document);
@@ -169,6 +182,15 @@ public class NatsDocumentSubscriber {
             msg.ack();
         } catch (Exception e) {
             log.error("[NATS] Error processing message: {}", e.getMessage(), e);
+        }
+    }
+
+    private SecurityClassification resolveSecurityClassification(String val) {
+        if (val == null) return SecurityClassification.INTERNAL;
+        try {
+            return SecurityClassification.valueOf(val.toUpperCase());
+        } catch (IllegalArgumentException e) {
+            return SecurityClassification.INTERNAL;
         }
     }
 
