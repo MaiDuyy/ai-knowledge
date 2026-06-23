@@ -2,7 +2,7 @@
 
 Tài liệu này tổng hợp kết quả chạy thử nghiệm Benchmark tự động cho dịch vụ **ai-knowledge**, bao gồm kiểm thử bảo mật phân quyền RAG, độ phủ tìm kiếm mở rộng đồ thị (Graph Hop Recall), hiệu năng luồng ảo Java 21 (Virtual Threads), và độ chính xác của đường ống biên dịch tri thức (ETL & Wiki Graph Accuracy).
 
-Chạy kiểm thử ngày: Tue Jun 23 12:47:32 ICT 2026
+Chạy kiểm thử ngày: Tue Jun 23 12:48:38 ICT 2026
 
 ---
 
@@ -40,8 +40,8 @@ So sánh thông lượng, độ trễ và dung lượng bộ nhớ tiêu thụ g
 
 | Chỉ số đo lường (Metric) | Platform Threads (Pool=50) | Virtual Threads (Java 21) | Tỷ lệ cải thiện |
 | :--- | :---: | :---: | :---: |
-| Tổng thời gian xử lý | 1.5806 s | 1.0823 s | **Giảm 31.53%** |
-| Thông lượng trung bình (Throughput) | 316.34 RPS | 461.98 RPS | **Tăng 46.04%** |
+| Tổng thời gian xử lý | 1.4478 s | 0.9765 s | **Giảm 32.55%** |
+| Thông lượng trung bình (Throughput) | 345.35 RPS | 512.01 RPS | **Tăng 48.26%** |
 | Platform Threads khởi tạo | 51 threads | 9 threads | **Giảm 82.35%** |
 | Ước tính bộ nhớ tiêu thụ (RAM) | 51.00 MB | 9.98 MB | **Giảm 80.44%** |
 
@@ -49,8 +49,8 @@ So sánh thông lượng, độ trễ và dung lượng bộ nhớ tiêu thụ g
 
 **1. Throughput (Requests Per Second - RPS - Càng cao càng tốt):**
 ```
-Platform Threads: [███████████████████████████             ] 316.34 RPS
-Virtual Threads : [████████████████████████████████████████] 461.98 RPS (+46.04%)
+Platform Threads: [███████████████████████████             ] 345.35 RPS
+Virtual Threads : [████████████████████████████████████████] 512.01 RPS (+48.26%)
 ```
 
 **2. Memory Consumption (MB - Càng thấp càng tốt):**
@@ -66,7 +66,7 @@ Virtual Threads : [████████                                ] 9.9
 Đo lường khả năng trích xuất cấu trúc văn bản thô (PDF/DOCX) sang định dạng máy đọc và biên dịch liên kết đồ thị tri thức.
 
 *   **Table Cell Retention Rate (TCRR - Độ bảo toàn cấu trúc bảng biểu)**:
-    *   **Docling (Layout-Aware AI)**: **100.00%** (Nhận diện chính xác 20/20 ô bảng lưới phức tạp).
+    *   **Docling (Layout-Aware AI)**: **100.00%** (Nhận diện chính xác 6/6 ô bảng lưới phức tạp).
     *   **Apache Tika (Plain OCR/Text)**: **0.00%** (Làm vỡ dòng, gộp cột khiến dữ liệu mất cấu trúc).
 *   **WikiLinks Compiler (Độ chính xác bộ biên dịch liên kết tri thức)**:
     *   **Precision (Độ chính xác)**: **100.00%** (100% liên kết được sinh khớp chuẩn tài liệu).

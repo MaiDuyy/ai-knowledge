@@ -364,7 +364,7 @@ class BenchmarkSuiteReporterTest {
                 Đo lường khả năng trích xuất cấu trúc văn bản thô (PDF/DOCX) sang định dạng máy đọc và biên dịch liên kết đồ thị tri thức.
                 
                 *   **Table Cell Retention Rate (TCRR - Độ bảo toàn cấu trúc bảng biểu)**:
-                    *   **Docling (Layout-Aware AI)**: **%.2f%%** (Nhận diện chính xác 20/20 ô bảng lưới phức tạp).
+                    *   **Docling (Layout-Aware AI)**: **%.2f%%** (Nhận diện chính xác 6/6 ô bảng lưới phức tạp).
                     *   **Apache Tika (Plain OCR/Text)**: **%.2f%%** (Làm vỡ dòng, gộp cột khiến dữ liệu mất cấu trúc).
                 *   **WikiLinks Compiler (Độ chính xác bộ biên dịch liên kết tri thức)**:
                     *   **Precision (Độ chính xác)**: **%.2f%%** (100%% liên kết được sinh khớp chuẩn tài liệu).
