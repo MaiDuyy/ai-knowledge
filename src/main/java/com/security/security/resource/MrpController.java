@@ -1072,5 +1072,92 @@ public class MrpController {
             .groups(groups)
             .build());
     }
+
+    @GetMapping("/wiki/stats")
+    public ResponseEntity<Map<String, Object>> getWikiStats(
+            @RequestParam(required = false) String workspaceId,
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) {
+
+        String resolvedWsId = ScopeNormalizer.normalizeWorkspace(
+            (workspaceId == null || workspaceId.isBlank() || "all".equalsIgnoreCase(workspaceId))
+                ? "default-workspace" : workspaceId);
+
+        long totalPages = wikiPageRepository.countByWorkspaceId(resolvedWsId);
+        long pendingDrafts = wikiPageDraftRepository.countByWorkspaceIdAndStatus(resolvedWsId,
+            com.security.security.entity.enumeration.WikiPageDraftStatus.PENDING);
+
+        long processingDocs = documentRepository.findProcessing().stream()
+            .filter(d -> resolvedWsId.equals(ScopeNormalizer.normalizeWorkspace(d.getWorkspaceId())))
+            .count();
+
+        long finalizingDocs = documentRepository.findAll().stream()
+            .filter(d -> "FINALIZING".equals(d.getProcessingStage()))
+            .filter(d -> resolvedWsId.equals(ScopeNormalizer.normalizeWorkspace(d.getWorkspaceId()))
+                || "ALL".equals(resolvedWsId) || "GLOBAL".equals(resolvedWsId))
+            .count();
+
+        Map<String, Object> stats = new java.util.LinkedHashMap<>();
+        stats.put("totalPages", totalPages);
+        stats.put("pendingDrafts", pendingDrafts);
+        stats.put("activeCompilations", processingDocs);
+        stats.put("finalizingDocs", finalizingDocs);
+        stats.put("isIndexing", processingDocs > 0 || finalizingDocs > 0);
+
+        return ResponseEntity.ok(stats);
+    }
+
+    @GetMapping("/wiki/activity")
+    public ResponseEntity<List<Map<String, Object>>> getWikiActivity(
+            @RequestParam(required = false) String workspaceId,
+            @RequestParam(defaultValue = "20") int limit,
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) {
+
+        String resolvedWsId = ScopeNormalizer.normalizeWorkspace(
+            (workspaceId == null || workspaceId.isBlank() || "all".equalsIgnoreCase(workspaceId))
+                ? "default-workspace" : workspaceId);
+
+        List<Map<String, Object>> activities = new java.util.ArrayList<>();
+
+        // Recent wiki pages (created/updated)
+        Pageable recentPageable = PageRequest.of(0, limit, Sort.by(Sort.Direction.DESC, "updatedAt"));
+        Page<WikiPage> recentPages = wikiPageRepository.findByWorkspaceId(resolvedWsId, recentPageable);
+        for (WikiPage p : recentPages.getContent()) {
+            Map<String, Object> entry = new java.util.LinkedHashMap<>();
+            boolean isNew = p.getCreatedAt() != null && p.getUpdatedAt() != null
+                && java.time.Duration.between(p.getCreatedAt(), p.getUpdatedAt()).toMinutes() < 2;
+            entry.put("action", isNew ? "PAGE_CREATED" : "PAGE_UPDATED");
+            entry.put("pageId", p.getId());
+            entry.put("title", p.getTitle());
+            entry.put("slug", p.getSlug());
+            entry.put("pageType", p.getPageType() != null ? p.getPageType().getValue() : null);
+            entry.put("timestamp", p.getUpdatedAt().toString());
+            entry.put("version", p.getVersion());
+            activities.add(entry);
+        }
+
+        // Recent drafts
+        List<com.security.security.entity.WikiPageDraft> recentDrafts =
+            wikiPageDraftRepository.findByWorkspaceIdOrderByUpdatedAtDesc(resolvedWsId);
+        for (var d : recentDrafts.stream().limit(limit).toList()) {
+            Map<String, Object> entry = new java.util.LinkedHashMap<>();
+            entry.put("action", "DRAFT_" + d.getStatus().name());
+            entry.put("draftId", d.getId());
+            entry.put("title", d.getTitle());
+            entry.put("slug", d.getSlug());
+            entry.put("authorId", d.getAuthorId());
+            entry.put("timestamp", d.getUpdatedAt().toString());
+            entry.put("revisionRound", d.getRevisionRound());
+            if (d.getReviewerNote() != null) entry.put("reviewerNote", d.getReviewerNote());
+            activities.add(entry);
+        }
+
+        // Sort all by timestamp desc, limit
+        activities.sort((a, b) -> String.valueOf(b.get("timestamp")).compareTo(String.valueOf(a.get("timestamp"))));
+        if (activities.size() > limit) {
+            activities = activities.subList(0, limit);
+        }
+
+        return ResponseEntity.ok(activities);
+    }
 }
 

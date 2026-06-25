@@ -234,6 +234,27 @@ public class DocumentController {
         return ResponseEntity.ok(response);
     }
 
+
+    @PostMapping("/search/hybrid")
+    public ResponseEntity<ChunkSearchResponse> hybridSearchChunks(
+            @RequestBody ChunkSearchRequest request,
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) {
+
+        String wsId = request.getWorkspaceId();
+        if (wsId == null || wsId.isBlank() || "all".equalsIgnoreCase(wsId) || "GLOBAL".equalsIgnoreCase(wsId)) {
+            wsId = "default-workspace";
+        }
+
+        ChunkSearchResponse response = chunkService.hybridSearchChunks(
+                request.getQuery(),
+                request.getTopK() != null ? request.getTopK() : 5,
+                request.getMinSimilarity() != null ? request.getMinSimilarity() : 0.3,
+                wsId,
+                userId);
+
+        return ResponseEntity.ok(response);
+    }
+
     /**
      * Approve document (trigger ETL pipeline)
      */

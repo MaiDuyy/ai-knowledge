@@ -38,6 +38,7 @@ public class ChunkService {
     private final VectorStore vectorStore;
     private final DocumentService documentService;
     private final EmbeddingRepository embeddingRepository;
+    private final HybridSearchService hybridSearchService;
 
     // ─────────────────────────────────────────────────────────────
     // 1. Lấy tất cả chunks của document  →  DB
@@ -145,6 +146,36 @@ public class ChunkService {
                 .query(query)
                 .totalResults(results.size())
                 .chunks(results)
+                .build();
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // 5. Hybrid search (Vector + Keyword RRF fusion)
+    // ─────────────────────────────────────────────────────────────
+
+    public ChunkSearchResponse hybridSearchChunks(String query, Integer topK, Double minSimilarity, String workspaceId, String userId) {
+        log.info("Hybrid search: query='{}', topK={}, threshold={}, workspaceId={}", query, topK, minSimilarity, workspaceId);
+
+        List<HybridSearchService.HybridResult> results = hybridSearchService.search(query, workspaceId, topK, minSimilarity);
+
+        List<ChunkSearchResponse.ChunkSearchResult> searchResults = results.stream()
+                .map(hr -> ChunkSearchResponse.ChunkSearchResult.builder()
+                        .documentId(parseLong(hr.getMetadata().get("documentId")))
+                        .fileName(getString(hr.getMetadata().get("fileName"), "Unknown"))
+                        .chunkIndex(parseInt(hr.getMetadata().get("chunkIndex")))
+                        .chunkTitle(getString(hr.getMetadata().get("chunkTitle"), "General"))
+                        .text(hr.getText())
+                        .similarity(hr.getScore())
+                        .tokenCount(parseInt(hr.getMetadata().get("tokenCount")))
+                        .build())
+                .collect(Collectors.toList());
+
+        log.info("Hybrid search found {} results for query='{}'", searchResults.size(), query);
+
+        return ChunkSearchResponse.builder()
+                .query(query)
+                .totalResults(searchResults.size())
+                .chunks(searchResults)
                 .build();
     }
 

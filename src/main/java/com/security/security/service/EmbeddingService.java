@@ -2,6 +2,7 @@ package com.security.security.service;
 
 import com.security.security.dtorequest.DocumentSyncPayload;
 import com.security.security.entity.Embedding;
+import com.security.security.entity.enumeration.ChunkType;
 import com.security.security.repository.EmbeddingRepository;
 import com.security.security.service.tika.SemanticMarkdownChunker;
 import com.security.security.client.WorkspaceServiceClient;
@@ -13,6 +14,7 @@ import org.springframework.ai.document.Document;
 import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -36,6 +38,7 @@ public class EmbeddingService {
     private final WorkspaceServiceClient workspaceServiceClient;
     private final DataSource dataSource;
     private final ObjectMapper objectMapper;
+    private final ChatModel chatModel;
 
     /**
      * Store document chunks in VectorStore
@@ -222,7 +225,7 @@ public class EmbeddingService {
      */
     @Transactional
     public List<SemanticMarkdownChunker.ChunkResult> ingestMarkdown(com.security.security.entity.Document document, String markdownContent) {
-        log.info("[EmbeddingService] Ingesting document {} markdown content", document.getId());
+        log.info("[EmbeddingService] Ingesting document {} markdown content with Parent-Child chunking", document.getId());
 
         List<SemanticMarkdownChunker.ChunkResult> chunkResults = semanticMarkdownChunker.chunk(markdownContent);
         if (chunkResults.isEmpty()) {
@@ -239,9 +242,14 @@ public class EmbeddingService {
         // Purge old database chunks
         embeddingRepository.deleteByDocumentId(document.getId());
 
-        int batchSize = 30;
-        List<org.springframework.ai.document.Document> vBatch = new ArrayList<>(batchSize);
-        List<Embedding> eBatch = new ArrayList<>(batchSize);
+        // Separate parents and children
+        List<SemanticMarkdownChunker.ChunkResult> parentChunks = chunkResults.stream()
+                .filter(cr -> cr.isParent() != null && cr.isParent())
+                .collect(Collectors.toList());
+
+        List<SemanticMarkdownChunker.ChunkResult> childChunks = chunkResults.stream()
+                .filter(cr -> cr.isParent() == null || !cr.isParent())
+                .collect(Collectors.toList());
 
         // Resolve workspace and department names once outside the loop
         String workspaceId = document.getWorkspaceId();
@@ -277,11 +285,51 @@ public class EmbeddingService {
 
         String prefix = String.format("[Context: Workspace: %s | Dept: %s | Path: %s] ", workspaceName, departmentName, folderPathStr);
 
-        for (int i = 0; i < chunkResults.size(); i++) {
-            SemanticMarkdownChunker.ChunkResult cr = chunkResults.get(i);
+        // 1. Save Parent chunks to DB first (WeKnora-inspired: typed chunks with context headers)
+        List<Embedding> parentEmbeddings = new ArrayList<>();
+        for (SemanticMarkdownChunker.ChunkResult cr : parentChunks) {
+            String contextHeader = cr.title() != null ? cr.title() : "";
+            Embedding p = Embedding.builder()
+                    .documentId(document.getId())
+                    .workspaceId(ScopeNormalizer.normalizeWorkspace(document.getWorkspaceId()))
+                    .chunkIndex(-1)
+                    .chunkText(cr.text())
+                    .chunkTitle(cr.title())
+                    .chunkType(ChunkType.PARENT_TEXT)
+                    .contextHeader(contextHeader)
+                    .sectionPath(contextHeader)
+                    .tokenCount(semanticMarkdownChunker.estimateTokens(cr.text()))
+                    .charCount(cr.text().length())
+                    .build();
+            parentEmbeddings.add(p);
+        }
+
+        if (!parentEmbeddings.isEmpty()) {
+            parentEmbeddings = embeddingRepository.saveAll(parentEmbeddings);
+        }
+
+        Map<Integer, Long> headingToDbId = new HashMap<>();
+        for (int j = 0; j < parentChunks.size(); j++) {
+            SemanticMarkdownChunker.ChunkResult cr = parentChunks.get(j);
+            Embedding pe = parentEmbeddings.get(j);
+            headingToDbId.put(cr.headingIdx(), pe.getId());
+        }
+
+        // 2. Save Child chunks in batches to DB and Vector Store
+        int batchSize = 30;
+        List<org.springframework.ai.document.Document> vBatch = new ArrayList<>(batchSize);
+        List<Embedding> eBatch = new ArrayList<>(batchSize);
+
+        for (int i = 0; i < childChunks.size(); i++) {
+            SemanticMarkdownChunker.ChunkResult cr = childChunks.get(i);
 
             // Prepend absolute context prefix to chunk text for RAG retrieval
             String chunkText = prefix + cr.text();
+
+            Long dbParentId = null;
+            if (cr.parentHeadingIdx() != null) {
+                dbParentId = headingToDbId.get(cr.parentHeadingIdx());
+            }
 
             Map<String, Object> meta = new HashMap<>();
             meta.put("documentId", document.getId().toString());
@@ -291,6 +339,9 @@ public class EmbeddingService {
             meta.put("chunkTitle", cr.title());
             meta.put("tokenCount", String.valueOf(semanticMarkdownChunker.estimateTokens(chunkText)));
             meta.put("charCount", String.valueOf(chunkText.length()));
+            if (dbParentId != null) {
+                meta.put("parentId", dbParentId.toString());
+            }
             
             if (document.getSecurityClassification() != null) {
                 meta.put("classification", document.getSecurityClassification().name());
@@ -304,13 +355,21 @@ public class EmbeddingService {
                 meta.put("folderPath", folderPath.strip());
             }
 
+            String contextHeader = cr.title() != null ? cr.title() : "";
+            meta.put("chunkType", ChunkType.TEXT.name());
+            meta.put("contextHeader", contextHeader);
+
             vBatch.add(new org.springframework.ai.document.Document(chunkText, meta));
             eBatch.add(Embedding.builder()
                     .documentId(document.getId())
                     .workspaceId(ScopeNormalizer.normalizeWorkspace(document.getWorkspaceId()))
+                    .parentId(dbParentId)
                     .chunkIndex(i)
                     .chunkText(chunkText)
                     .chunkTitle(cr.title())
+                    .chunkType(ChunkType.TEXT)
+                    .contextHeader(contextHeader)
+                    .sectionPath(contextHeader)
                     .tokenCount(semanticMarkdownChunker.estimateTokens(chunkText))
                     .charCount(chunkText.length())
                     .build());
@@ -327,7 +386,8 @@ public class EmbeddingService {
             embeddingRepository.saveAll(eBatch);
         }
 
-        log.info("[EmbeddingService] Successfully ingested {} chunks for document id={}", chunkResults.size(), document.getId());
+        log.info("[EmbeddingService] Successfully ingested {} chunks ({} parents, {} children) for document id={}",
+                chunkResults.size(), parentChunks.size(), childChunks.size(), document.getId());
         return chunkResults;
     }
 
@@ -436,6 +496,151 @@ public class EmbeddingService {
         } catch (Exception e) {
             log.warn("[EmbeddingService] Failed to check if vector_store table exists: {}", e.getMessage());
             return false;
+        }
+    }
+
+    /**
+     * Generate a concise summary of the document using LLM.
+     */
+    public String generateDocumentSummary(String markdownContent) {
+        if (markdownContent == null || markdownContent.isBlank()) {
+            return "";
+        }
+        try {
+            log.info("[EmbeddingService] Generating document summary");
+            String prompt = """
+                    Bạn là một AI chuyên tóm tắt tài liệu kỹ thuật.
+                    Hãy tóm tắt tài liệu sau đây thành một bản tóm tắt ngắn gọn, súc tích (khoảng 3-5 câu), tập trung vào các ý chính, mục tiêu và kết quả chính của tài liệu.
+                    Trả về trực tiếp văn bản tóm tắt, không có phần giải thích hay lời mở đầu/kết thúc.
+                    
+                    Tài liệu:
+                    %s
+                    """.formatted(markdownContent);
+            return chatModel.call(prompt);
+        } catch (Exception e) {
+            log.error("Error generating document summary: {}", e.getMessage());
+            return "";
+        }
+    }
+
+    /**
+     * Retrieve child embeddings from database for a specific document.
+     */
+    public List<Embedding> getChildEmbeddings(Long documentId) {
+        return embeddingRepository.findByDocumentIdOrderByChunkIndex(documentId).stream()
+                .filter(e -> e.getChunkIndex() != null && e.getChunkIndex() >= 0)
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * Generate 3-5 synthetic Q&A questions for each child embedding and index them in vectorStore.
+     * This is run in a background virtual thread pool.
+     */
+    public void generateAndIndexQuestions(com.security.security.entity.Document document, List<Embedding> childEmbeddings) {
+        if (childEmbeddings == null || childEmbeddings.isEmpty()) {
+            return;
+        }
+
+        Thread.startVirtualThread(() -> generateAndIndexQuestionsSync(document, childEmbeddings));
+    }
+
+    /**
+     * Synchronous variant — blocks until all Q&A generation and indexing is complete.
+     * Used by PostProcessingCoordinator to accurately track subtask completion.
+     */
+    public void generateAndIndexQuestionsSync(com.security.security.entity.Document document, List<Embedding> childEmbeddings) {
+        if (childEmbeddings == null || childEmbeddings.isEmpty()) {
+            return;
+        }
+
+        {
+            log.info("[EmbeddingService] Starting synthetic Q&A generation for documentId={} with {} child chunks", document.getId(), childEmbeddings.size());
+            try (var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+                List<java.util.concurrent.Future<List<org.springframework.ai.document.Document>>> futures = new ArrayList<>();
+
+                for (Embedding child : childEmbeddings) {
+                    futures.add(executor.submit(() -> {
+                        List<org.springframework.ai.document.Document> questions = new ArrayList<>();
+                        try {
+                            String chunkText = child.getChunkText();
+                            String prompt = """
+                                    Bạn là một AI chuyên tạo câu hỏi tự động từ văn bản để phục vụ hệ thống RAG (Retrieval-Augmented Generation).
+                                    Hãy đọc đoạn văn bản dưới đây và tạo ra từ 3 đến 5 câu hỏi thực tế mà người dùng có thể hỏi để tìm kiếm thông tin có trong đoạn văn bản này.
+                                    Các câu hỏi phải rõ ràng, cụ thể và có thể trả lời trực tiếp dựa trên thông tin trong đoạn văn bản.
+                                    
+                                    Quy tắc trả về:
+                                    - Mỗi câu hỏi nằm trên một dòng riêng biệt.
+                                    - Không thêm số thứ tự, không thêm dấu gạch đầu dòng, không có phần giới thiệu hay kết luận.
+                                    - Ví dụ:
+                                    Làm thế nào để cấu hình JWT?
+                                    Thời gian hết hạn mặc định của token là bao lâu?
+                                    
+                                    Đoạn văn bản:
+                                    %s
+                                    """.formatted(chunkText);
+
+                            String response = chatModel.call(prompt);
+                            if (response != null && !response.isBlank()) {
+                                String[] lines = response.split("\\n");
+                                for (String line : lines) {
+                                    String cleanedLine = line.trim();
+                                    cleanedLine = cleanedLine.replaceAll("^[\\-\\d\\.\\*\\s]+", "").trim();
+                                    if (!cleanedLine.isEmpty() && cleanedLine.endsWith("?")) {
+                                        Map<String, Object> meta = new HashMap<>();
+                                        meta.put("documentId", document.getId().toString());
+                                        meta.put("userId", document.getUserId());
+                                        meta.put("fileName", document.getFileName());
+                                        meta.put("chunkIndex", String.valueOf(child.getChunkIndex()));
+                                        meta.put("chunkTitle", child.getChunkTitle());
+                                        meta.put("isQuestion", "true");
+                                        meta.put("chunkType", ChunkType.FAQ.name());
+
+                                        // Set parentId to the parent's DB ID if present, otherwise to the child's DB ID itself
+                                        Long targetParentId = child.getParentId() != null ? child.getParentId() : child.getId();
+                                        meta.put("parentId", targetParentId.toString());
+
+                                        if (document.getSecurityClassification() != null) {
+                                            meta.put("classification", document.getSecurityClassification().name());
+                                            meta.put("securityClassification", document.getSecurityClassification().name());
+                                        }
+                                        meta.put("uploadedBy", document.getUserId());
+                                        meta.put("workspaceId", ScopeNormalizer.normalizeWorkspace(document.getWorkspaceId()));
+                                        meta.put("departmentId", ScopeNormalizer.normalizeDepartment(document.getDepartmentId()));
+                                        meta.put("allowedRoles", document.getAllowedRoles() != null ? document.getAllowedRoles() : "ALL");
+                                        if (document.getFolderPath() != null && !document.getFolderPath().isBlank()) {
+                                            meta.put("folderPath", document.getFolderPath().strip());
+                                        }
+
+                                        questions.add(new org.springframework.ai.document.Document(cleanedLine, meta));
+                                    }
+                                }
+                            }
+                        } catch (Exception e) {
+                            log.error("Failed to generate questions for chunk index {}: {}", child.getChunkIndex(), e.getMessage());
+                        }
+                        return questions;
+                    }));
+                }
+
+                List<org.springframework.ai.document.Document> allQuestions = new ArrayList<>();
+                for (var future : futures) {
+                    try {
+                        allQuestions.addAll(future.get());
+                    } catch (Exception e) {
+                        log.error("Failed to retrieve future result: {}", e.getMessage());
+                    }
+                }
+
+                if (!allQuestions.isEmpty()) {
+                    log.info("[EmbeddingService] Indexing {} synthetic Q&A documents for documentId={}", allQuestions.size(), document.getId());
+                    vectorStore.add(allQuestions);
+                    log.info("[EmbeddingService] Successfully indexed {} synthetic Q&A documents", allQuestions.size());
+                } else {
+                    log.warn("[EmbeddingService] No synthetic questions were generated for documentId={}", document.getId());
+                }
+            } catch (Exception e) {
+                log.error("[EmbeddingService] Failed in virtual thread execution for Q&A generation: {}", e.getMessage(), e);
+            }
         }
     }
 }

@@ -16,7 +16,6 @@ import org.apache.pdfbox.pdmodel.graphics.form.PDFormXObject;
 import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
 import org.apache.pdfbox.pdfparser.PDFStreamParser;
 import org.apache.pdfbox.contentstream.operator.Operator;
-import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -33,7 +32,6 @@ import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Semaphore;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
@@ -42,19 +40,14 @@ import java.util.zip.ZipInputStream;
 public class ImageProcessingService {
 
     private final SourceImageRepository sourceImageRepository;
-    private final ChatModel chatModel;
 
     @Value("${app.upload.dir:uploads}")
     private String uploadDir;
 
-    @Value("${gemini.modle.image:gemini-2.5-flash}")
-    private String geminiModel;
-
     private static final int MIN_IMAGE_BYTES = 2048;
 
-    public ImageProcessingService(SourceImageRepository sourceImageRepository, ChatModel chatModel) {
+    public ImageProcessingService(SourceImageRepository sourceImageRepository) {
         this.sourceImageRepository = sourceImageRepository;
-        this.chatModel = chatModel;
     }
 
     @Data
@@ -78,9 +71,6 @@ public class ImageProcessingService {
         private SourceImage sourceImage;
     }
 
-    /**
-     * Auto-detect file type and extract images.
-     */
     public List<ExtractedImage> extractImages(byte[] fileData, String fileName) {
         String lower = fileName.toLowerCase();
         try {
@@ -88,6 +78,32 @@ public class ImageProcessingService {
                 return extractImagesFromPdf(fileData);
             } else if (lower.endsWith(".docx")) {
                 return extractImagesFromDocx(fileData);
+            } else if (lower.endsWith(".png") || lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".gif") || lower.endsWith(".webp") || lower.endsWith(".bmp") || lower.endsWith(".tiff")) {
+                log.info("Extracting single standalone image: {}", fileName);
+                String ext = getFileExtension(fileName);
+                String contentType = mimeFromExt(ext);
+                int width = 0;
+                int height = 0;
+                try (ByteArrayInputStream bais = new ByteArrayInputStream(fileData)) {
+                    java.awt.image.BufferedImage bi = ImageIO.read(bais);
+                    if (bi != null) {
+                        width = bi.getWidth();
+                        height = bi.getHeight();
+                    }
+                } catch (Exception e) {
+                    log.warn("Failed to read standalone image dimensions: {}", e.getMessage());
+                }
+                List<ExtractedImage> list = new ArrayList<>();
+                list.add(new ExtractedImage(
+                        fileData,
+                        contentType,
+                        ext,
+                        1, // Page number 1
+                        0, // Image index 0
+                        width,
+                        height
+                ));
+                return list;
             } else {
                 log.debug("No image extraction supported for file type: {}", fileName);
             }
@@ -359,7 +375,8 @@ public class ImageProcessingService {
     }
 
     /**
-     * Process images for ingestion (asynchronous, thorough, Gemini captions, logo filtering).
+     * Process images for ingestion — extracts, filters header/footer images, and indexes into markdown.
+     * No AI caption generation; uses positional labels and fingerprint-based header/footer detection.
      */
     @Transactional
     public String processIngestImages(Document document, String markdown) {
@@ -373,13 +390,18 @@ public class ImageProcessingService {
             List<ExtractedImage> extractedImages = extractImages(fileBytes, document.getFileName());
 
             if (extractedImages == null || extractedImages.isEmpty()) {
-                return markdown;
+                // Still strip header/footer text from markdown even without images
+                return stripRepeatedHeaderFooterText(markdown);
             }
 
             Path imagesDir = Paths.get(uploadDir).resolve("images");
             if (!Files.exists(imagesDir)) {
                 Files.createDirectories(imagesDir);
             }
+
+            // ── Phase 1: Fingerprint images to detect repeated header/footer images ──
+            Set<String> headerFooterFingerprints = detectRepeatedImageFingerprints(extractedImages);
+            log.info("[ImageProcessingService] Detected {} repeated header/footer image fingerprints", headerFooterFingerprints.size());
 
             ProcessedImageResult[] resultsArray = new ProcessedImageResult[extractedImages.size()];
             for (int idx = 0; idx < extractedImages.size(); idx++) {
@@ -389,8 +411,8 @@ public class ImageProcessingService {
                 resultsArray[idx] = def;
             }
 
+            // ── Phase 2: Process each image with header/footer filtering ──
             List<CompletableFuture<Void>> futures = new ArrayList<>();
-            Semaphore captionSemaphore = new Semaphore(3); // Cap concurrency for caption calls
             ExecutorService imageExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
             for (int idx = 0; idx < extractedImages.size(); idx++) {
@@ -399,23 +421,32 @@ public class ImageProcessingService {
 
                 CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
                     try {
-                        boolean isLogoOrHeader = false;
-                        if (extImg.getWidth() > 0 && extImg.getHeight() > 0) {
-                            int w = extImg.getWidth();
-                            int h = extImg.getHeight();
-                            // Heuristic 1: Very small icon or logo (e.g. <= 80x80)
-                            if (w <= 80 && h <= 80) {
-                                isLogoOrHeader = true;
+                        int w = extImg.getWidth();
+                        int h = extImg.getHeight();
+
+                        // Filter 1: Dimension-based — icons, logos, banners, lines
+                        if (w > 0 && h > 0) {
+                            if (w <= 150 && h <= 150) {
+                                log.info("[ImageProcessingService] Skipping icon/logo index={} (w={}, h={})", index, w, h);
+                                return;
                             }
-                            // Heuristic 2: Long horizontal/vertical lines or banners (aspect ratio > 8.0 or < 0.125)
                             double aspect = (double) w / h;
-                            if (aspect > 8.0 || aspect < 0.125) {
-                                isLogoOrHeader = true;
+                            if (aspect > 4.0 || aspect < 0.25) {
+                                log.info("[ImageProcessingService] Skipping banner/line index={} (w={}, h={}, aspect={:.1f})", index, w, h, aspect);
+                                return;
                             }
                         }
 
-                        if (isLogoOrHeader) {
-                            log.info("[ImageProcessingService] Skipping logo/header image index={} due to heuristics (w={}, h={})", index, extImg.getWidth(), extImg.getHeight());
+                        // Filter 2: Fingerprint-based — repeated across ≥50% of pages = header/footer
+                        String fingerprint = computeImageFingerprint(extImg);
+                        if (headerFooterFingerprints.contains(fingerprint)) {
+                            log.info("[ImageProcessingService] Skipping repeated header/footer image index={} (fingerprint={})", index, fingerprint.substring(0, 8));
+                            return;
+                        }
+
+                        // Filter 3: Position-based — first or last image on a page with small height
+                        if (isPositionalHeaderFooter(extImg, extractedImages)) {
+                            log.info("[ImageProcessingService] Skipping positional header/footer image index={} (page={}, imgIdx={})", index, extImg.getPageNumber(), extImg.getImageIndex());
                             return;
                         }
 
@@ -423,70 +454,9 @@ public class ImageProcessingService {
                         String imgFilename = imgId.toString() + "." + extImg.getExtension();
                         Path targetPath = imagesDir.resolve(imgFilename);
 
-                        // Generate caption using Gemini (under concurrency control)
-                        captionSemaphore.acquire();
-                        String caption;
-                        try {
-                            caption = generateCaption(extImg.getBytes(), extImg.getContentType());
-                        } finally {
-                            captionSemaphore.release();
-                        }
+                        int pageNum = extImg.getPageNumber() > 0 ? extImg.getPageNumber() : 1;
+                        String caption = String.format("Image %d (page %d)", index + 1, pageNum);
 
-                        boolean isIgnoredText = false;
-                        if (caption != null) {
-                            String cleanCaption = caption.toLowerCase().trim();
-                            if (cleanCaption.replaceAll("[^a-zA-Z]", "").equalsIgnoreCase("IGNORE")
-                                    || cleanCaption.contains("logo")
-                                    || cleanCaption.contains("biểu tượng")
-                                    || cleanCaption.contains("bieu tuong")
-                                    || cleanCaption.contains("header")
-                                    || cleanCaption.contains("footer")
-                                    || cleanCaption.contains("icon")
-                                    || cleanCaption.contains("banner")
-                                    || cleanCaption.contains("ảnh bìa")
-                                    || cleanCaption.contains("anh bia")
-                                    || cleanCaption.contains("trang trí")
-                                    || cleanCaption.contains("trang tri")
-                                    || cleanCaption.contains("đầu trang")
-                                    || cleanCaption.contains("dau trang")
-                                    || cleanCaption.contains("chân trang")
-                                    || cleanCaption.contains("chan trang")
-                                    || cleanCaption.contains("đường kẻ")
-                                    || cleanCaption.contains("duong ke")
-                                    || cleanCaption.contains("ký hiệu")
-                                    || cleanCaption.contains("ky hieu")
-                                    || cleanCaption.contains("kí hiệu")
-                                    || cleanCaption.contains("ki hieu")
-                                    || cleanCaption.contains("chữ ký")
-                                    || cleanCaption.contains("chu ky")
-                                    || cleanCaption.contains("đường phân cách")
-                                    || cleanCaption.contains("duong phan cach")) {
-                                isIgnoredText = true;
-                            }
-                        }
-
-                        // Additional fallback heuristics if Gemini failed to generate a descriptive caption (e.g. default placeholder)
-                        if (!isIgnoredText && ("Extracted Image".equals(caption) || caption == null || caption.isBlank())) {
-                            int w = extImg.getWidth();
-                            int h = extImg.getHeight();
-                            if (w > 0 && h > 0) {
-                                double aspect = (double) w / h;
-                                if (w <= 150 && h <= 150) {
-                                    log.info("[ImageProcessingService] Skipping image index={} as potential logo due to default caption and small size (w={}, h={})", index, w, h);
-                                    isIgnoredText = true;
-                                } else if (aspect > 4.0 || aspect < 0.25) {
-                                    log.info("[ImageProcessingService] Skipping image index={} as potential banner/line due to default caption and aspect ratio (w={}, h={})", index, w, h);
-                                    isIgnoredText = true;
-                                }
-                            }
-                        }
-
-                        if (isIgnoredText) {
-                            log.info("[ImageProcessingService] Skipping logo/header image index={} based on Gemini keyword detection/fallback in caption: '{}'", index, caption);
-                            return;
-                        }
-
-                        // Write to disk only if NOT skipped
                         Files.write(targetPath, extImg.getBytes());
 
                         SourceImage sourceImg = SourceImage.builder()
@@ -506,7 +476,7 @@ public class ImageProcessingService {
                         result.setSourceImage(sourceImg);
                         resultsArray[index] = result;
                     } catch (Exception ex) {
-                        log.warn("[ImageProcessingService] Failed to process extracted image idx={} for docId={}: {}", index, document.getId(), ex.getMessage());
+                        log.warn("[ImageProcessingService] Failed to process image idx={} for docId={}: {}", index, document.getId(), ex.getMessage());
                     }
                 }, imageExecutor);
                 futures.add(future);
@@ -515,7 +485,6 @@ public class ImageProcessingService {
             CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
             imageExecutor.shutdown();
 
-            // Delete old source images first to prevent duplicates
             try {
                 sourceImageRepository.deleteBySourceId(document.getId());
             } catch (Exception e) {
@@ -524,7 +493,6 @@ public class ImageProcessingService {
 
             List<ProcessedImageResult> sortedResults = Arrays.asList(resultsArray);
 
-            // Save non-skipped SourceImage records to the database
             List<SourceImage> imagesToSave = sortedResults.stream()
                     .filter(r -> !r.isSkipped() && r.getSourceImage() != null)
                     .map(ProcessedImageResult::getSourceImage)
@@ -533,11 +501,149 @@ public class ImageProcessingService {
                 sourceImageRepository.saveAll(imagesToSave);
             }
 
-            return replaceMarkdownImages(markdown, sortedResults);
+            // ── Phase 3: Replace image tags in markdown, then strip repeated header/footer text ──
+            String replaced = replaceMarkdownImages(markdown, sortedResults);
+            return stripRepeatedHeaderFooterText(replaced);
         } catch (Exception e) {
             log.error("[ImageProcessingService] Failed to process ingest images for docId={}: {}", document.getId(), e.getMessage(), e);
         }
         return markdown;
+    }
+
+    /**
+     * Compute a lightweight fingerprint for an image (first 64 bytes hash + dimensions).
+     * Identical fingerprints across pages indicate the same header/footer image.
+     */
+    private String computeImageFingerprint(ExtractedImage img) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("MD5");
+            byte[] sample = img.getBytes();
+            int sampleLen = Math.min(sample.length, 256);
+            md.update(sample, 0, sampleLen);
+            md.update((byte) (img.getWidth() >> 8));
+            md.update((byte) img.getWidth());
+            md.update((byte) (img.getHeight() >> 8));
+            md.update((byte) img.getHeight());
+            byte[] digest = md.digest();
+            StringBuilder sb = new StringBuilder();
+            for (byte b : digest) sb.append(String.format("%02x", b));
+            return sb.toString();
+        } catch (Exception e) {
+            return "unknown-" + img.getImageIndex();
+        }
+    }
+
+    /**
+     * Detect images that appear on ≥50% of pages — these are almost certainly headers/footers.
+     * Groups by fingerprint, counts distinct pages, flags those appearing on majority of pages.
+     */
+    private Set<String> detectRepeatedImageFingerprints(List<ExtractedImage> images) {
+        if (images == null || images.size() < 3) return Set.of();
+
+        int totalPages = images.stream()
+                .mapToInt(i -> i.getPageNumber() != null ? i.getPageNumber() : 1)
+                .max().orElse(1);
+
+        if (totalPages < 2) return Set.of();
+
+        // fingerprint → set of page numbers
+        Map<String, Set<Integer>> fpToPages = new HashMap<>();
+        for (ExtractedImage img : images) {
+            String fp = computeImageFingerprint(img);
+            int page = img.getPageNumber() != null ? img.getPageNumber() : 1;
+            fpToPages.computeIfAbsent(fp, k -> new HashSet<>()).add(page);
+        }
+
+        double threshold = totalPages * 0.5;
+        Set<String> repeated = new HashSet<>();
+        for (Map.Entry<String, Set<Integer>> entry : fpToPages.entrySet()) {
+            if (entry.getValue().size() >= threshold) {
+                repeated.add(entry.getKey());
+            }
+        }
+        return repeated;
+    }
+
+    /**
+     * Position-based header/footer detection:
+     * If an image is the first or last on its page AND has a small height (≤ 120px),
+     * it's likely a header or footer element (letterhead, page number bar, etc).
+     */
+    private boolean isPositionalHeaderFooter(ExtractedImage img, List<ExtractedImage> allImages) {
+        int h = img.getHeight();
+        if (h <= 0 || h > 120) return false;
+
+        int page = img.getPageNumber() != null ? img.getPageNumber() : 1;
+        List<ExtractedImage> pageImages = allImages.stream()
+                .filter(i -> (i.getPageNumber() != null ? i.getPageNumber() : 1) == page)
+                .toList();
+
+        if (pageImages.size() <= 1) return false;
+
+        int imgIdx = img.getImageIndex();
+        int minIdx = pageImages.stream().mapToInt(ExtractedImage::getImageIndex).min().orElse(0);
+        int maxIdx = pageImages.stream().mapToInt(ExtractedImage::getImageIndex).max().orElse(0);
+
+        return imgIdx == minIdx || imgIdx == maxIdx;
+    }
+
+    /**
+     * Strip repeated header/footer TEXT from markdown pages.
+     * Detects lines that appear identically at the start or end of ≥50% of page blocks.
+     */
+    private String stripRepeatedHeaderFooterText(String markdown) {
+        if (markdown == null || markdown.isBlank()) return markdown;
+
+        java.util.regex.Pattern pagePattern = java.util.regex.Pattern.compile("<!-- PAGE_BREAK: \\d+ -->");
+        String[] pages = pagePattern.split(markdown);
+
+        if (pages.length < 3) return markdown;
+
+        // Collect first 3 lines and last 3 lines of each page
+        Map<String, Integer> headerLineCounts = new HashMap<>();
+        Map<String, Integer> footerLineCounts = new HashMap<>();
+
+        for (String page : pages) {
+            String trimmed = page.strip();
+            if (trimmed.isEmpty()) continue;
+            String[] lines = trimmed.split("\\n");
+
+            for (int i = 0; i < Math.min(3, lines.length); i++) {
+                String line = lines[i].strip();
+                if (!line.isEmpty() && line.length() < 200 && !line.startsWith("#")) {
+                    headerLineCounts.merge(line, 1, Integer::sum);
+                }
+            }
+
+            for (int i = Math.max(0, lines.length - 3); i < lines.length; i++) {
+                String line = lines[i].strip();
+                if (!line.isEmpty() && line.length() < 200 && !line.startsWith("#")) {
+                    footerLineCounts.merge(line, 1, Integer::sum);
+                }
+            }
+        }
+
+        double threshold = pages.length * 0.5;
+        Set<String> repeatedLines = new HashSet<>();
+
+        headerLineCounts.forEach((line, count) -> {
+            if (count >= threshold) repeatedLines.add(line);
+        });
+        footerLineCounts.forEach((line, count) -> {
+            if (count >= threshold) repeatedLines.add(line);
+        });
+
+        if (repeatedLines.isEmpty()) return markdown;
+
+        log.info("[ImageProcessingService] Stripping {} repeated header/footer text lines", repeatedLines.size());
+
+        StringBuilder result = new StringBuilder();
+        for (String line : markdown.split("\\n")) {
+            if (!repeatedLines.contains(line.strip())) {
+                result.append(line).append("\n");
+            }
+        }
+        return result.toString().strip();
     }
 
     /**
@@ -753,48 +859,6 @@ public class ImageProcessingService {
 
         int union = words1.size() + words2.size() - intersection;
         return (double) intersection / union;
-    }
-
-    private String generateCaption(byte[] imgBytes, String contentType) {
-        try {
-            if (chatModel == null) return "Extracted Image";
-
-            String mime = contentType.toLowerCase();
-            if (!mime.contains("png") && !mime.contains("jpeg") && !mime.contains("jpg") && !mime.contains("webp") && !mime.contains("heic") && !mime.contains("heif")) {
-                log.info("Skipping Gemini caption generation for unsupported image type: {}", contentType);
-                return "Extracted Image";
-            }
-
-            org.springframework.core.io.ByteArrayResource byteResource =
-                    new org.springframework.core.io.ByteArrayResource(imgBytes);
-            org.springframework.ai.content.Media media =
-                    new org.springframework.ai.content.Media(org.springframework.util.MimeTypeUtils.parseMimeType(contentType), byteResource);
-            org.springframework.ai.chat.client.ChatClient chatClient =
-                    org.springframework.ai.chat.client.ChatClient.builder(chatModel).build();
-
-            String systemPrompt = "Analyze the image. If the image is a corporate logo, brand icon, page header, page footer, or decorative banner/line, you MUST reply with exactly the word 'IGNORE'. Otherwise, write a brief, 1-sentence description (maximum 10 words) of this image in Vietnamese. Do NOT write any intro, notes, or explanations. Keep it as short as possible.";
-
-            org.springframework.ai.chat.model.ChatResponse response = chatClient.prompt()
-                    .options(org.springframework.ai.google.genai.GoogleGenAiChatOptions.builder()
-                            .model(geminiModel)
-                            .temperature(0.2)
-                            .maxOutputTokens(40)
-                            .build())
-                    .system(systemPrompt)
-                    .user(u -> u.text("Describe in max 10 words:").media(media))
-                    .call()
-                    .chatResponse();
-
-            if (response != null && response.getResult() != null && response.getResult().getOutput() != null) {
-                String text = response.getResult().getOutput().getText();
-                if (text != null) {
-                    return text.trim();
-                }
-            }
-        } catch (Exception e) {
-            log.warn("Failed to generate caption using Gemini: {}", e.getMessage());
-        }
-        return "Extracted Image";
     }
 
     private String sanitizeCaptionForAlt(String caption) {

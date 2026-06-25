@@ -35,6 +35,7 @@ import com.security.security.entity.WikiPage;
 import com.security.security.entity.WikiLink;
 import com.security.security.repository.WikiPageRepository;
 import com.security.security.repository.WikiLinkRepository;
+import com.security.security.repository.EmbeddingRepository;
 import com.security.security.entity.enumeration.WikiPageType;
 import com.security.security.entity.enumeration.SecurityClassification;
 
@@ -64,6 +65,8 @@ public class RAGService {
     private final ObjectMapper objectMapper;
     private final WikiPageRepository wikiPageRepository;
     private final WikiLinkRepository wikiLinkRepository;
+    private final EmbeddingRepository embeddingRepository;
+    private final KeywordSearchService keywordSearchService;
 
     @Value("${rag.top-k:5}")
     private int topK;
@@ -1005,7 +1008,39 @@ public class RAGService {
             docMap.put(id, doc);
         }
 
-        // Process Keyword results
+        // Process chunk-level keyword search results (tsvector on embeddings table)
+        try {
+            String kwWorkspaceId = permissions != null ? ScopeNormalizer.normalizeWorkspace(permissions.getWorkspaceId()) : "default-workspace";
+            List<com.security.security.entity.Embedding> chunkKeywordResults = keywordSearchService.search(query, kwWorkspaceId, maxResults);
+            for (int i = 0; i < chunkKeywordResults.size(); i++) {
+                com.security.security.entity.Embedding emb = chunkKeywordResults.get(i);
+                String id = "chunk-kw-" + emb.getDocumentId() + "-" + emb.getChunkIndex();
+                double score = 0.5 / (60.0 + (i + 1));
+                rrfScores.put(id, rrfScores.getOrDefault(id, 0.0) + score);
+                if (!docMap.containsKey(id)) {
+                    Map<String, Object> meta = new HashMap<>();
+                    meta.put("documentId", emb.getDocumentId().toString());
+                    meta.put("chunkIndex", String.valueOf(emb.getChunkIndex()));
+                    meta.put("chunkTitle", emb.getChunkTitle());
+                    meta.put("workspaceId", emb.getWorkspaceId());
+                    if (emb.getContextHeader() != null) {
+                        meta.put("contextHeader", emb.getContextHeader());
+                    }
+                    if (emb.getChunkType() != null) {
+                        meta.put("chunkType", emb.getChunkType().name());
+                    }
+                    if (emb.getParentId() != null) {
+                        meta.put("parentId", emb.getParentId().toString());
+                    }
+                    docMap.put(id, new org.springframework.ai.document.Document(emb.getChunkText(), meta));
+                }
+            }
+            log.info("[RAGService] Chunk keyword search returned {} results", chunkKeywordResults.size());
+        } catch (Exception e) {
+            log.warn("[RAGService] Chunk keyword search failed: {}", e.getMessage());
+        }
+
+        // Process WikiPage keyword results
         for (int i = 0; i < keywordPages.size(); i++) {
             WikiPage page = keywordPages.get(i);
             String id = "wiki-" + page.getId();
@@ -1046,7 +1081,39 @@ public class RAGService {
             blendedDocs.add(docMap.get(id));
         }
 
+        // Parent-Child Context Expansion
+        List<org.springframework.ai.document.Document> expandedParentChildDocs = expandParentChildContext(blendedDocs);
+
         // 4. Graph Context Expansion
-        return expandContextWithWikiGraph(blendedDocs, permissions, userId);
+        return expandContextWithWikiGraph(expandedParentChildDocs, permissions, userId);
+    }
+
+    private List<org.springframework.ai.document.Document> expandParentChildContext(List<org.springframework.ai.document.Document> docs) {
+        List<org.springframework.ai.document.Document> expanded = new ArrayList<>();
+        for (org.springframework.ai.document.Document doc : docs) {
+            Map<String, Object> meta = doc.getMetadata();
+            if (meta != null && meta.containsKey("parentId")) {
+                try {
+                    Long parentId = Long.parseLong(meta.get("parentId").toString());
+                    Optional<com.security.security.entity.Embedding> parentOpt = embeddingRepository.findById(parentId);
+                    if (parentOpt.isPresent()) {
+                        String parentText = parentOpt.get().getChunkText();
+                        // Copy metadata but use the parent's full text
+                        Map<String, Object> newMeta = new HashMap<>(meta);
+                        // Also update chunkTitle to parent's title if helpful
+                        if (parentOpt.get().getChunkTitle() != null) {
+                            newMeta.put("chunkTitle", parentOpt.get().getChunkTitle());
+                        }
+                        expanded.add(new org.springframework.ai.document.Document(parentText, newMeta));
+                        log.info("[RAGService] Expanded child chunk to parent chunk (id={}) text size={}", parentId, parentText.length());
+                        continue;
+                    }
+                } catch (Exception e) {
+                    log.warn("[RAGService] Failed to expand parent-child context for parentId={}: {}", meta.get("parentId"), e.getMessage());
+                }
+            }
+            expanded.add(doc);
+        }
+        return expanded;
     }
 }

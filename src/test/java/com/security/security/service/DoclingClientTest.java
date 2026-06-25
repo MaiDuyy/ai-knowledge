@@ -85,4 +85,46 @@ public class DoclingClientTest {
         
         verify(geminiMultimodalService, times(1)).parsePdf(any(byte[].class), eq(documentId));
     }
+
+    @Test
+    @DisplayName("Should parse CSV file locally and format as Markdown table")
+    void convertToMarkdown_CsvFile_ParsesLocally() throws Exception {
+        String csvData = "Name,Age,Role\nAlice,30,Developer\nBob,25,Designer";
+        Resource resource = mock(Resource.class);
+        InputStream inputStream = new ByteArrayInputStream(csvData.getBytes());
+        when(resource.getInputStream()).thenReturn(inputStream);
+
+        DoclingClient.DoclingResult result = doclingClient.convertToMarkdown(resource, "test.csv", "gemini", 100L);
+
+        assertThat(result.success()).isTrue();
+        assertThat(result.doclingStatus()).isEqualTo("LOCAL_PARSER_SUCCESS");
+        assertThat(result.markdown())
+                .contains("| Name | Age | Role |")
+                .contains("| Alice | 30 | Developer |")
+                .contains("| Bob | 25 | Designer |");
+        
+        // Ensure no Gemini or Tika service calls were made
+        verifyNoInteractions(geminiMultimodalService, tikaHtmlExtractor);
+    }
+
+    @Test
+    @DisplayName("Should parse small JSON file locally and return code block")
+    void convertToMarkdown_SmallJsonFile_ParsesLocally() throws Exception {
+        String jsonData = "{\"name\":\"system\",\"status\":\"ok\"}";
+        Resource resource = mock(Resource.class);
+        InputStream inputStream = new ByteArrayInputStream(jsonData.getBytes());
+        when(resource.getInputStream()).thenReturn(inputStream);
+
+        DoclingClient.DoclingResult result = doclingClient.convertToMarkdown(resource, "test.json", "gemini", 100L);
+
+        assertThat(result.success()).isTrue();
+        assertThat(result.doclingStatus()).isEqualTo("LOCAL_PARSER_SUCCESS");
+        assertThat(result.markdown())
+                .startsWith("```json")
+                .contains("\"name\" : \"system\"")
+                .contains("\"status\" : \"ok\"")
+                .endsWith("```");
+        
+        verifyNoInteractions(geminiMultimodalService, tikaHtmlExtractor);
+    }
 }

@@ -70,6 +70,7 @@ public class DocumentService {
     private final WikiPageDraftRepository wikiPageDraftRepository;
     private final WikiLinkRepository wikiLinkRepository;
     private final org.springframework.data.redis.core.StringRedisTemplate redisTemplate;
+    private final PostProcessingCoordinator postProcessingCoordinator;
 
     @Value("${app.upload.dir:uploads}")
     private String uploadDir;
@@ -113,7 +114,7 @@ public class DocumentService {
     // Cho phép các định dạng Docling hỗ trợ bao gồm PDF, DOCX, PPTX, XLSX, HTML, âm thanh, hình ảnh, LaTeX, Markdown, Text
     private static final List<String> ALLOWED_EXTENSIONS = Arrays.asList(
             ".pdf", ".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls",
-            ".html", ".htm", ".xhtml", ".wav", ".mp3", ".vtt",
+            ".html", ".htm", ".xhtml", ".wav", ".mp3", ".m4a", ".vtt",
             ".png", ".jpg", ".jpeg", ".tiff", ".tif", ".gif", ".bmp", ".webp",
             ".tex", ".latex", ".txt", ".md"
     );
@@ -712,7 +713,7 @@ public class DocumentService {
         if (e.equals(".xlsx") || e.equals(".xls")) return DocType.xlsx;
         if (e.equals(".html") || e.equals(".htm") || e.equals(".xhtml")) return DocType.html;
         if (e.equals(".wav")) return DocType.wav;
-        if (e.equals(".mp3")) return DocType.mp3;
+        if (e.equals(".mp3") || e.equals(".m4a")) return DocType.mp3;
         if (e.equals(".vtt")) return DocType.vtt;
         if (e.equals(".png")) return DocType.png;
         if (e.equals(".tiff") || e.equals(".tif")) return DocType.tiff;
@@ -900,7 +901,6 @@ public class DocumentService {
             // Profiling stats (docling-style)
             DocumentProfiler.ProfileResult profile = documentProfiler.profile(markdownContent, chunkResults);
 
-            document.setStatus(DocStatus.COMPLETED);
             document.setChunkCount(chunkResults.size());
             document.setNumHeadings(profile.numHeadings());
             document.setNumTables(profile.numTables());
@@ -909,14 +909,10 @@ public class DocumentService {
             document.setAvgTokensPerChunk(profile.avgTokensPerChunk());
             document.setErrorMessage(null);
             documentRepository.save(document);
-            natsEventPublisher.publishDocumentStatus(document.getId(), document.getUserId(), document.getWorkspaceId(), "COMPLETED");
 
-            // Trigger automatic compilation of Wiki pages
-            try {
-                mrpPipelineService.initiateCompile(document.getId(), document.getWorkspaceId(), userId, true);
-            } catch (Exception e) {
-                log.error("Failed to trigger wiki compilation for doc={}: {}", documentId, e.getMessage());
-            }
+            // Async post-processing: summary, Q&A, wiki compilation
+            // Document transitions to COMPLETED only when all subtasks finish
+            postProcessingCoordinator.startPostProcessing(document, markdownContent, chunkResults);
 
         } catch (Exception e) {
             log.error("Failed to ingest document {}: {}", documentId, e.getMessage(), e);

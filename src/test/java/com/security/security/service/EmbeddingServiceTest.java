@@ -25,6 +25,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.*;
 
+import org.springframework.ai.chat.model.ChatModel;
+
 @ExtendWith(MockitoExtension.class)
 @DisplayName("EmbeddingService Scoped RAG Prefix Tests")
 class EmbeddingServiceTest {
@@ -36,6 +38,7 @@ class EmbeddingServiceTest {
     @Mock private WorkspaceServiceClient workspaceServiceClient;
     @Mock private javax.sql.DataSource dataSource;
     @Mock private com.fasterxml.jackson.databind.ObjectMapper objectMapper;
+    @Mock private ChatModel chatModel;
 
     private EmbeddingService embeddingService;
 
@@ -48,7 +51,8 @@ class EmbeddingServiceTest {
                 semanticMarkdownChunker,
                 workspaceServiceClient,
                 dataSource,
-                objectMapper
+                objectMapper,
+                chatModel
         );
     }
 
@@ -188,5 +192,67 @@ class EmbeddingServiceTest {
         assertThat(doc.getMetadata().get("allowedRoles")).isEqualTo("HEAD");
         assertThat(doc.getMetadata().get("classification")).isEqualTo("PUBLIC");
         assertThat(doc.getMetadata().get("securityClassification")).isEqualTo("PUBLIC");
+    }
+
+    @Test
+    @DisplayName("Should generate document summary using ChatModel")
+    void generateDocumentSummary_WithValidContent_ReturnsSummary() {
+        String markdown = "# Title\nSome content";
+        when(chatModel.call(anyString())).thenReturn("This is a summary of the document.");
+
+        String summary = embeddingService.generateDocumentSummary(markdown);
+
+        assertThat(summary).isEqualTo("This is a summary of the document.");
+        verify(chatModel, times(1)).call(anyString());
+    }
+
+    @Test
+    @DisplayName("Should generate synthetic Q&A and index them in VectorStore")
+    void generateAndIndexQuestions_WithChildEmbeddings_IndexesQuestions() throws InterruptedException {
+        Document doc = Document.builder()
+                .id(1L)
+                .userId("user-1")
+                .fileName("policy.pdf")
+                .securityClassification(SecurityClassification.INTERNAL)
+                .workspaceId("ws-1")
+                .departmentId("dept-1")
+                .folderPath("/policies/hr")
+                .build();
+
+        Embedding child = Embedding.builder()
+                .id(100L)
+                .documentId(1L)
+                .chunkIndex(0)
+                .chunkText("Child text content about JWT configurations.")
+                .chunkTitle("JWT Config")
+                .parentId(50L) // points to parent embedding
+                .build();
+
+        when(chatModel.call(anyString())).thenReturn("- Làm thế nào để cấu hình JWT?\n- Thời gian hết hạn mặc định là bao lâu?");
+
+        // Run the Q&A generation method
+        embeddingService.generateAndIndexQuestions(doc, List.of(child));
+
+        // Since it runs inside a Virtual Thread, we wait briefly for the thread to execute
+        Thread.sleep(500);
+
+        ArgumentCaptor<List<org.springframework.ai.document.Document>> vectorCaptor = ArgumentCaptor.forClass(List.class);
+        verify(vectorStore).add(vectorCaptor.capture());
+
+        List<org.springframework.ai.document.Document> addedDocs = vectorCaptor.getValue();
+        // The mock returned 2 valid questions (ending with '?')
+        assertThat(addedDocs).hasSize(2);
+
+        org.springframework.ai.document.Document q1 = addedDocs.get(0);
+        assertThat(q1.getText()).isEqualTo("Làm thế nào để cấu hình JWT?");
+        assertThat(q1.getMetadata().get("isQuestion")).isEqualTo("true");
+        assertThat(q1.getMetadata().get("parentId")).isEqualTo("50"); // should point to child's parentId (50L)
+        assertThat(q1.getMetadata().get("documentId")).isEqualTo("1");
+        assertThat(q1.getMetadata().get("userId")).isEqualTo("user-1");
+
+        org.springframework.ai.document.Document q2 = addedDocs.get(1);
+        assertThat(q2.getText()).isEqualTo("Thời gian hết hạn mặc định là bao lâu?");
+        assertThat(q2.getMetadata().get("isQuestion")).isEqualTo("true");
+        assertThat(q2.getMetadata().get("parentId")).isEqualTo("50");
     }
 }

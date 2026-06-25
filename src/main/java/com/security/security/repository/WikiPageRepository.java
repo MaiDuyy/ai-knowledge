@@ -24,6 +24,7 @@ public interface WikiPageRepository extends JpaRepository<WikiPage, Long> {
 
     List<WikiPage> findByWorkspaceId(String workspaceId);
     Page<WikiPage> findByWorkspaceId(String workspaceId, Pageable pageable);
+    long countByWorkspaceId(String workspaceId);
 
     @Query("SELECT w FROM WikiPage w WHERE w.slug = :slug AND ("
          + "(:workspaceId = 'ALL' AND (w.workspaceId = 'ALL' OR w.workspaceId = 'GLOBAL' OR w.workspaceId = '' OR w.workspaceId IS NULL OR w.workspaceId = 'default-workspace' OR w.workspaceId = 'workspace-default') AND (w.departmentId = 'ALL' OR w.departmentId = 'GLOBAL' OR w.departmentId IS NULL OR w.departmentId = ''))"

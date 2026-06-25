@@ -4,9 +4,11 @@ import com.security.security.entity.Document;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 import java.util.Optional;
@@ -67,6 +69,11 @@ public interface DocumentRepository extends JpaRepository<Document, Long> {
     Page<Document> findCompletedByWorkspaceIdOrderByCreatedAtDesc(String workspaceId, Pageable pageable);
 
     List<Document> findByFileHashAndStatus(String fileHash, com.security.security.entity.enumeration.DocStatus status);
+
+    @Modifying
+    @Transactional
+    @Query("UPDATE Document d SET d.pendingSubtasks = CASE WHEN d.pendingSubtasks > 0 THEN d.pendingSubtasks - 1 ELSE 0 END WHERE d.id = :id")
+    int decrementPendingSubtasks(@Param("id") Long id);
 
     @Query("SELECT d FROM Document d WHERE (" +
            "  :isAdmin = true OR " +

@@ -1,6 +1,7 @@
 package com.security.security.repository;
 
 import com.security.security.entity.Embedding;
+import com.security.security.entity.enumeration.ChunkType;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
@@ -21,6 +22,39 @@ public interface EmbeddingRepository extends JpaRepository<Embedding, Long> {
     void deleteByDocumentId(Long documentId);
 
     List<Embedding> findByDocumentId(Long documentId);
+
+    List<Embedding> findByDocumentIdAndChunkType(Long documentId, ChunkType chunkType);
+
+    @Query("SELECT e FROM Embedding e WHERE e.documentId = :documentId AND e.chunkType IN :types ORDER BY e.chunkIndex")
+    List<Embedding> findByDocumentIdAndChunkTypeIn(@Param("documentId") Long documentId, @Param("types") List<ChunkType> types);
+
+    @Query(value = """
+        SELECT * FROM embeddings
+        WHERE workspace_id = :workspaceId
+          AND chunk_type = 'TEXT'
+          AND to_tsvector('simple', chunk_text) @@ plainto_tsquery('simple', :query)
+        ORDER BY ts_rank(to_tsvector('simple', chunk_text), plainto_tsquery('simple', :query)) DESC
+        LIMIT :limit
+        """, nativeQuery = true)
+    List<Embedding> keywordSearch(
+        @Param("query") String query,
+        @Param("workspaceId") String workspaceId,
+        @Param("limit") int limit
+    );
+
+    @Query(value = """
+        SELECT * FROM embeddings
+        WHERE document_id = :documentId
+          AND chunk_type = 'TEXT'
+          AND to_tsvector('simple', chunk_text) @@ plainto_tsquery('simple', :query)
+        ORDER BY ts_rank(to_tsvector('simple', chunk_text), plainto_tsquery('simple', :query)) DESC
+        LIMIT :limit
+        """, nativeQuery = true)
+    List<Embedding> keywordSearchInDocument(
+        @Param("query") String query,
+        @Param("documentId") Long documentId,
+        @Param("limit") int limit
+    );
 
     @Modifying
     @Transactional

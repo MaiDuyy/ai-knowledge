@@ -17,6 +17,8 @@ public interface WikiPageDraftRepository extends JpaRepository<WikiPageDraft, Lo
     List<WikiPageDraft> findByStatus(WikiPageDraftStatus status);
     Page<WikiPageDraft> findByStatus(WikiPageDraftStatus status, Pageable pageable);
     List<WikiPageDraft> findByWorkspaceId(String workspaceId);
+    long countByWorkspaceIdAndStatus(String workspaceId, WikiPageDraftStatus status);
+    List<WikiPageDraft> findByWorkspaceIdOrderByUpdatedAtDesc(String workspaceId);
     List<WikiPageDraft> findByWikiPageId(Long wikiPageId);
 
     @org.springframework.data.jpa.repository.Modifying

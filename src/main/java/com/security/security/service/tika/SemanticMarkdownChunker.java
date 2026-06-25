@@ -96,10 +96,14 @@ public class SemanticMarkdownChunker {
     private record HeadingResult(String title, int level) {}
 
     /** RawChunk: chunk before contextualization, with heading metadata. */
-    private record RawChunk(String text, List<String> headings, ItemType itemType) {}
+    private record RawChunk(String text, List<String> headings, ItemType itemType, Integer parentHeadingIdx) {}
 
     /** ChunkResult: final public output — contextualized text + display title. */
-    public record ChunkResult(String text, String title) {}
+    public record ChunkResult(String text, String title, Integer parentHeadingIdx, Boolean isParent, Integer headingIdx) {
+        public ChunkResult(String text, String title) {
+            this(text, title, null, false, null);
+        }
+    }
 
     // =========================================================================
     //  PUBLIC API
@@ -128,7 +132,7 @@ public class SemanticMarkdownChunker {
                         ? tableSplit(rc.text())
                         : plainTextSplit(rc.text());
                 for (String piece : pieces) {
-                    splitChunks.add(new RawChunk(piece, rc.headings(), rc.itemType()));
+                    splitChunks.add(new RawChunk(piece, rc.headings(), rc.itemType(), rc.parentHeadingIdx()));
                 }
             } else {
                 splitChunks.add(rc);
@@ -140,17 +144,84 @@ public class SemanticMarkdownChunker {
         List<RawChunk> merged = mergePeers(splitChunks);
         log.debug("[Chunk] Phase4 after merge={}", merged.size());
 
-        // Phase 5: Contextualize + filter + build results
-        List<ChunkResult> result = new ArrayList<>();
+        // Phase 5: Contextualize + filter + build results (children and parent sections)
+        List<ChunkResult> children = new ArrayList<>();
+        Set<Integer> activeParentIndices = new HashSet<>();
         for (RawChunk rc : merged) {
             if (estimateTokens(rc.text()) < MIN_TOKENS) continue; // drop tiny fragments
-            result.add(new ChunkResult(
+            children.add(new ChunkResult(
                     contextualize(rc),
-                    detectChunkTitle(rc)
+                    detectChunkTitle(rc),
+                    rc.parentHeadingIdx(),
+                    false,
+                    null
+            ));
+            activeParentIndices.add(rc.parentHeadingIdx());
+        }
+
+        List<ChunkResult> parents = new ArrayList<>();
+        for (Integer parentIdx : activeParentIndices) {
+            String parentText = buildParentSectionText(items, parentIdx);
+            String parentTitle = buildParentSectionTitle(items, parentIdx);
+            parents.add(new ChunkResult(
+                    parentText,
+                    parentTitle,
+                    null,
+                    true,
+                    parentIdx
             ));
         }
-        log.debug("[Chunk] Phase5 final={}", result.size());
+
+        List<ChunkResult> result = new ArrayList<>();
+        result.addAll(parents);
+        result.addAll(children);
+        log.debug("[Chunk] Phase5 final parents={}, children={}", parents.size(), children.size());
         return result;
+    }
+
+    private String buildParentSectionText(List<DocItem> items, Integer headingIdx) {
+        StringBuilder sb = new StringBuilder();
+        int startIdx;
+        int endIdx = items.size();
+
+        if (headingIdx == -1) {
+            // Root Section: all items up to the first heading
+            startIdx = 0;
+            for (int i = 0; i < items.size(); i++) {
+                if (items.get(i).type() == ItemType.HEADING) {
+                    endIdx = i;
+                    break;
+                }
+            }
+        } else {
+            // Section starting at headingIdx
+            startIdx = headingIdx;
+            int level = items.get(headingIdx).headingLevel();
+            for (int i = headingIdx + 1; i < items.size(); i++) {
+                if (items.get(i).type() == ItemType.HEADING && items.get(i).headingLevel() <= level) {
+                    endIdx = i;
+                    break;
+                }
+            }
+        }
+
+        for (int i = startIdx; i < endIdx; i++) {
+            DocItem item = items.get(i);
+            if (item.type() == ItemType.HEADING) {
+                String prefix = "#".repeat(Math.min(item.headingLevel(), 6));
+                sb.append(prefix).append(" ").append(item.text()).append("\n\n");
+            } else {
+                sb.append(item.text()).append("\n\n");
+            }
+        }
+        return sb.toString().trim();
+    }
+
+    private String buildParentSectionTitle(List<DocItem> items, Integer headingIdx) {
+        if (headingIdx == -1) {
+            return "Document Overview";
+        }
+        return items.get(headingIdx).text();
     }
 
     /** Public token estimator (used by DocumentProcessingListener for metadata). */
@@ -319,13 +390,17 @@ public class SemanticMarkdownChunker {
     private List<RawChunk> hierarchicalChunk(List<DocItem> items) {
         List<RawChunk>          chunks       = new ArrayList<>();
         TreeMap<Integer, String> headingByLevel = new TreeMap<>();
+        TreeMap<Integer, Integer> headingIdxByLevel = new TreeMap<>();
 
-        for (DocItem item : items) {
+        for (int i = 0; i < items.size(); i++) {
+            DocItem item = items.get(i);
             if (item.type() == ItemType.HEADING) {
                 int level = item.headingLevel();
                 // Shadow: remove current level AND all deeper levels (docling's keys_to_del)
                 headingByLevel.tailMap(level).clear();
+                headingIdxByLevel.tailMap(level).clear();
                 headingByLevel.put(level, item.text());
+                headingIdxByLevel.put(level, i);
                 continue;
             }
 
@@ -334,9 +409,13 @@ public class SemanticMarkdownChunker {
                     ? List.of()
                     : new ArrayList<>(headingByLevel.values());  // level-ordered
 
+            Integer parentHeadingIdx = headingIdxByLevel.isEmpty()
+                    ? -1
+                    : headingIdxByLevel.lastEntry().getValue();
+
             String text = item.text().trim();
             if (!text.isBlank()) {
-                chunks.add(new RawChunk(text, headings, item.type()));
+                chunks.add(new RawChunk(text, headings, item.type(), parentHeadingIdx));
             }
         }
 
@@ -486,7 +565,7 @@ public class SemanticMarkdownChunker {
                 j++;
             }
 
-            output.add(new RawChunk(mergedText.toString().trim(), curHeadings, current.itemType()));
+            output.add(new RawChunk(mergedText.toString().trim(), curHeadings, current.itemType(), current.parentHeadingIdx()));
             i = j; // advance past all merged chunks
         }
 

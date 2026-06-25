@@ -113,6 +113,17 @@ public class Document {
     @Column(name = "error_message", columnDefinition = "TEXT")
     private String errorMessage;
 
+    @Column(name = "summary", columnDefinition = "TEXT")
+    private String summary;
+
+    @Column(name = "pending_subtasks")
+    @Builder.Default
+    private Integer pendingSubtasks = 0;
+
+    @Column(name = "processing_stage", length = 50)
+    @Builder.Default
+    private String processingStage = "IDLE";
+
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt;

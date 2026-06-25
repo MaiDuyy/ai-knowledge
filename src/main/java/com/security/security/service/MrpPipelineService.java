@@ -108,6 +108,10 @@ public class MrpPipelineService {
               "action": { "type": "string" },
               "wikiPageId": { "type": "integer", "nullable": true },
               "pageType": { "type": "string" },
+              "tags": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
               "reason": { "type": "string" },
               "keyClaims": {
                 "type": "array",
@@ -122,7 +126,7 @@ public class MrpPipelineService {
                 "items": { "type": "string" }
               }
             },
-            "required": ["title", "slug", "action", "pageType", "reason", "keyClaims"]
+            "required": ["title", "slug", "action", "pageType", "tags", "reason", "keyClaims"]
           }
         }
         """;
@@ -454,6 +458,29 @@ public class MrpPipelineService {
             uniqueSubjects.addAll(entityDescriptions.keySet());
             uniqueSubjects.addAll(conceptDescriptions.keySet());
 
+            List<WikiPage> existingPages = new ArrayList<>();
+            existingPages.addAll(wikiPageRepository.findByWorkspaceId(finalWorkspaceId));
+            if (!"ALL".equals(finalWorkspaceId) && !"GLOBAL".equals(finalWorkspaceId)) {
+                existingPages.addAll(wikiPageRepository.findByWorkspaceId("ALL"));
+                existingPages.addAll(wikiPageRepository.findByWorkspaceId("GLOBAL"));
+            }
+
+            StringBuilder existingPagesContext = new StringBuilder();
+            Set<String> existingFolders = new HashSet<>();
+            for (WikiPage page : existingPages) {
+                existingPagesContext.append(String.format("- ID: %d | [[%s]] = %s (Type: %s, Current Tags: %s)\n", 
+                    page.getId(), page.getSlug(), page.getTitle(), page.getPageType() != null ? page.getPageType().getValue() : "unknown", 
+                    page.getTags() != null ? page.getTags() : "None"));
+                if (page.getTags() != null && !page.getTags().trim().isEmpty()) {
+                    for (String tag : page.getTags().split(",")) {
+                        if (!tag.trim().isEmpty()) {
+                            existingFolders.add(tag.trim());
+                        }
+                    }
+                }
+            }
+            String existingFoldersContext = existingFolders.isEmpty() ? "None" : String.join(", ", existingFolders);
+
             for (String subject : uniqueSubjects) {
                 String slug = slugify(subject);
                 Optional<WikiPage> existingPage = wikiPageRepository.fetchBySlugAndWorkspaceId(slug, finalWorkspaceId);
@@ -547,18 +574,30 @@ public class MrpPipelineService {
                     log.warn("[MRP Pipeline] Error serializing contradictions/recommendations: {}", e.getMessage());
                 }
 
-                String planSystemPrompt = """
+                String planSystemPrompt = String.format("""
                     You are a Senior Technical Knowledge Architect.
-                    You are given a rough list of topics (entities/concepts) and their associated claims/facts.
+                    You are given:
+                    1. A list of existing wiki pages in the workspace (title, slug, type, current tags/folders, and database ID).
+                    2. A list of existing folders (categories) in the workspace.
+                    3. A rough list of newly extracted topics (entities/concepts) and their associated claims/facts.
+
                     Your job is to structure this into a professional, cohesive Wiki compilation plan.
 
-                    You must classify each page into one of the following exact types:
-                    - "entity": Specific names of organizations, technologies, tools, platforms, systems, devices, products, or individuals.
-                    - "concept": Abstract paradigms, theoretical models, frameworks, architectural designs, algorithms, rules, policies, or procedures.
-                    - "topic": Broad subjects, themes, categories, or high-level tag-like grouping pages that aggregate other elements.
-                    - "source": Reference documents, articles, books, news, reports, files, or original records from which facts are derived.
+                    CRITICAL DEDUPLICATION DIRECTIVES:
+                    - Compare the newly extracted topics in the input list with the existing pages in the <existing_pages> block.
+                    - If a newly extracted topic is semantically the same as (or highly related/synonymous with) an existing page (e.g. "JWT" vs "JSON Web Token", or "Docker Containers" vs "Docker"), you MUST deduplicate them:
+                      * Reuse the existing page's title and slug.
+                      * Set "action" to "UPDATE".
+                      * Set "wikiPageId" to the database ID of the existing page (which you can find by checking the existing page's list in <existing_pages>).
+                    - If the newly extracted topic is NOT in the existing pages, set "action" to "CREATE" and "wikiPageId" to null.
 
-                    You must:
+                    CRITICAL TAXONOMY PLANNING DIRECTIVES:
+                    - Assign folder categories ("tags") to each plan item so the pages are organized into a navigation directory.
+                    - Try to REUSE the existing folder labels from <existing_folders> character-for-character if they fit.
+                    - If no existing folder fits, you can CREATE new, broad, durable folders (e.g. "Security", "Configuration", "Infrastructure", "General"). Group items of the same kind under the same folder.
+                    - Each plan item can have 1 to 3 tags (hierarchical categories from broad to narrow, e.g. "Security" or "Security, Authentication").
+
+                    Other guidelines:
                     1. Consolidate topics that are highly related to avoid a cluttered Wiki.
                     2. Verify names and write precise slugs.
                     3. Ensure that keyClaims are prioritized and concise.
@@ -566,6 +605,14 @@ public class MrpPipelineService {
                     5. Crucial: Do NOT introduce, expand, or add any new entities, concepts, facts, or details that are not explicitly present in the input list. You must only organize and structure what is provided.
                     6. For each plan item, suggest "crossReferences" — an array of slugs of OTHER plan items that are closely related and should be [[wikilinked]] together.
                     7. If contradictions were found during extraction, include them in "reviewItems" for the relevant plan item so human reviewers can resolve them.
+
+                    <existing_folders>
+                    %s
+                    </existing_folders>
+
+                    <existing_pages>
+                    %s
+                    </existing_pages>
 
                     You MUST return a valid JSON array of Plan Items matching this schema exactly.
                     [
@@ -575,13 +622,14 @@ public class MrpPipelineService {
                         "action": "CREATE" or "UPDATE",
                         "wikiPageId": 123 (if UPDATE, otherwise null),
                         "pageType": "entity" or "concept" or "topic" or "source",
+                        "tags": ["Category 1", "Category 2"],
                         "reason": "Why this page needs creation or update",
                         "keyClaims": ["Detailed claim 1 [Source Context: ...]", "Detailed claim 2 [Source Context: ...]"],
                         "crossReferences": ["related-slug-1", "related-slug-2"],
                         "reviewItems": ["Contradiction: ..."]
                       }
                     ]
-                    """;
+                    """, existingFoldersContext, existingPagesContext.toString());
 
                 String reduceInput = rawItemsJson;
                 if (!contradictionsJson.isEmpty() || !recommendationsJson.isEmpty()) {
@@ -710,6 +758,18 @@ public class MrpPipelineService {
                 }
                 Long wikiPageId = wikiPageIdNum != null ? wikiPageIdNum.longValue() : null;
 
+                List<String> tagsList = (List<String>) item.get("tags");
+                if (tagsList == null) {
+                    tagsList = (List<String>) item.get("categoryPath");
+                }
+                String tagsString = null;
+                if (tagsList != null && !tagsList.isEmpty()) {
+                    tagsString = tagsList.stream()
+                        .filter(t -> t != null && !t.trim().isEmpty())
+                        .map(String::trim)
+                        .collect(Collectors.joining(", "));
+                }
+
                 String claimsText = keyClaims != null 
                     ? keyClaims.stream().map(c -> "- " + c).collect(Collectors.joining("\n"))
                     : "";
@@ -732,7 +792,29 @@ public class MrpPipelineService {
                     }
                 }
 
-                if ("UPDATE".equals(action) && wikiPageId != null) {
+                // ── DIRECTION 3: SOURCE page = full document markdown + injected wiki links ──
+                if ("source".equals(normalizedPageType)) {
+                    String rawMarkdown = (doc != null && doc.getMarkdownContent() != null)
+                            ? doc.getMarkdownContent() : "";
+                    if (rawMarkdown.isBlank()) {
+                        rawMarkdown = keyClaims != null
+                                ? keyClaims.stream().map(c -> "- " + c).collect(Collectors.joining("\n"))
+                                : "";
+                    }
+                    // Add document title heading if the markdown doesn't already start with #
+                    String docTitle = title;
+                    String finalMarkdown = rawMarkdown.stripLeading().startsWith("#")
+                            ? rawMarkdown
+                            : "# " + docTitle + "\n\n" + rawMarkdown;
+                    generatedContent = injectWikilinks(finalMarkdown, allAvailableTitles);
+                    log.info("[MRP Pipeline] [Refine Phase] SOURCE page '{}': using full document markdown ({} chars)", title, generatedContent.length());
+
+                    if ("UPDATE".equals(action) && wikiPageId != null) {
+                        WikiPage page = wikiPageRepository.findById(wikiPageId).orElse(null);
+                        if (page != null) baseVersion = page.getVersion();
+                    }
+
+                } else if ("UPDATE".equals(action) && wikiPageId != null) {
                     WikiPage page = wikiPageRepository.findById(wikiPageId)
                             .orElseThrow(() -> new IllegalArgumentException("Target WikiPage not found ID: " + wikiPageId));
                     
@@ -740,13 +822,21 @@ public class MrpPipelineService {
 
                     // --- PROMPT MERGE ---
                     String mergeSystemPrompt = String.format("""
-                        You are an expert technical wiki editor. Your task is to merge new facts/content into an existing wiki page.
+                        You are an expert technical wiki compiler. Your task is to merge new facts/content into an existing wiki page.
                         
-                        CRITICAL GROUNDEDNESS DIRECTIVES:
+                        CRITICAL GROUNDEDNESS & CITATION DIRECTIVES:
                         - You are strictly prohibited from generating any information, claims, assertions, details, metrics, or instructions that are not explicitly present in the "NEW CLAIMS TO MERGE" (check the "[Source Context: ...]" sections).
                         - Do NOT add external assumptions, background knowledge, or explanations outside what is explicitly provided.
-                        - If there is no new source information for a section, do not modify or expand it using your own assumptions.
+                        - **Preserve Citations**: When merging new information with existing content, you MUST strictly preserve all existing inline chunk citations (e.g., [c003] or [Source Context: ...]).
+                        - **Mandatory Tracing**: Any newly added factual claim, entity, or numerical data MUST be followed by its inline citation to the appropriate source chunk (e.g., [Source Context: ...]).
+                        - **Close to Source Wording**: Stay close to the source wording. Reuse the source's own sentences; you may lightly reorder, deduplicate, and join related sentences, but do NOT rephrase for style, do NOT expand short statements into longer ones, and do NOT invent transitional sentences.
+                        - **Do NOT Over-Structure**: Only introduce a section heading (##, ###) if the source itself uses that heading OR the page already has one from existing content. Avoid inventing a hierarchy of empty subsections.
+                        - **Do NOT add rhetorical filler**: Phrases like "nhằm mục đích...", "cam kết mang lại...", "có ý nghĩa quan trọng", "nhằm giúp...", "designed to...", "aims to provide..." MUST NOT appear unless they are literally present in the source chunks.
                         
+                        CONTRADICTIONS DIRECTIVES:
+                        - If a new claim directly contradicts existing content, check if the newer info clearly supersedes it. If so, update the text to reflect the newer cited information AND add a brief "Contradictions / Updates" section at the bottom summarizing the change with citations.
+                        - If the conflict is ambiguous or unresolved, do not overwrite the existing content; instead, add a "Contradictions / Updates" section describing the conflict with citations.
+
                         WIKILINK DIRECTIVES (CRITICAL FOR KNOWLEDGE GRAPH):
                         - You must scan the generated text to identify all mentions of the topics in this list: [%s].
                         - When you mention any topic listed, you MUST wrap it in double brackets like [[Topic Title]] on its first significant mention in the text.
@@ -759,10 +849,9 @@ public class MrpPipelineService {
                         
                         You MUST:
                         1. Carefully integrate all new claims/facts into the appropriate sections of the existing page content.
-                        2. If a new claim contradicts existing content, prioritize the new facts, but preserve all other existing non-contradictory historical details.
-                        3. Maintain the structured, professional markdown style (titles, tables, bold text).
-                        4. DO NOT delete, truncate, or lose any valuable context or sections from the original article.
-                        5. Output ONLY the completed, fully updated markdown content.
+                        2. Maintain the structured, professional markdown style (titles, tables, bold text).
+                        3. DO NOT delete, truncate, or lose any valuable context or sections from the original article.
+                        4. Output ONLY the completed, fully updated markdown content.
                         """, availableTitlesList, availableTitlesList);
 
                     String imageSection = "";
@@ -807,11 +896,14 @@ public class MrpPipelineService {
                     String createSystemPrompt = String.format("""
                         You are an expert enterprise wiki compiler. Your job is to draft a comprehensive and structured markdown wiki page based STRICTLY on the provided key claims.
                         
-                        CRITICAL GROUNDEDNESS DIRECTIVES:
+                        CRITICAL GROUNDEDNESS & CITATION DIRECTIVES:
                         - You are strictly prohibited from generating, expanding, or assuming any information, claims, assertions, metrics, details, or instructions that are not explicitly mentioned in the "Key Claims" (check the "[Source Context: ...]" sections).
                         - Every single fact, number, and name MUST be directly grounded in the source context provided.
                         - Do NOT extrapolate. If the context is very brief, write a very short, concise, but accurate wiki entry rather than adding hallucinated details or external knowledge.
-                        - Do NOT introduce external or background knowledge under any circumstances.
+                        - **Mandatory Tracing**: Any factual claim, entity, or numerical data MUST be followed by its inline citation to the appropriate source chunk (e.g. [Source Context: ...]).
+                        - **Close to Source Wording**: Stay close to the source wording. Reuse the source's own sentences; you may lightly reorder, deduplicate, and join related sentences, but do NOT rephrase for style, do NOT expand short statements into longer ones, and do NOT invent transitional sentences.
+                        - **Do NOT Over-Structure**: Only introduce a section heading (##, ###) if the source itself uses that heading. For flat source text, a single "# {Topic}" heading plus 1-2 short paragraphs and a flat list of facts is preferred over inventing a hierarchy of empty subsections.
+                        - **Do NOT add rhetorical filler**: Phrases like "nhằm mục đích...", "cam kết mang lại...", "có ý nghĩa quan trọng", "nhằm giúp...", "designed to...", "aims to provide..." MUST NOT appear unless they are literally present in the source chunks.
                         
                         WIKILINK DIRECTIVES (CRITICAL FOR KNOWLEDGE GRAPH):
                         - You must scan the generated text to identify all mentions of the topics in this list: [%s].
@@ -870,6 +962,7 @@ public class MrpPipelineService {
                         .authorId(userId)
                         .status(WikiPageDraftStatus.PENDING)
                         .baseVersion(baseVersion)
+                        .tags(tagsString)
                         .note("Automatically compiled from MRP pipeline.")
                         .build();
 
@@ -957,6 +1050,76 @@ public class MrpPipelineService {
         } catch (java.security.NoSuchAlgorithmException e) {
             throw new RuntimeException("SHA-256 not available", e);
         }
+    }
+
+    /**
+     * Injects [[wiki links]] into markdown content for each matching topic title.
+     * - Skips code fences (``` blocks) and existing [[...]] spans and image tags.
+     * - Sorts titles longest-first to prevent partial overlaps (e.g. "BFI" clobbering "Baseflow Index (BFI)").
+     * - Links each title at most once per document (first occurrence).
+     */
+    private String injectWikilinks(String markdown, Set<String> titles) {
+        if (markdown == null || markdown.isBlank() || titles == null || titles.isEmpty()) {
+            return markdown == null ? "" : markdown;
+        }
+
+        // Split markdown into segments: code-fence zones (protected) vs linkable zones
+        // Pattern: ``` ... ``` blocks — we do NOT touch their contents
+        java.util.regex.Pattern codeFencePattern = java.util.regex.Pattern.compile("(?s)(```.*?```)");
+        java.util.regex.Matcher fenceMatcher = codeFencePattern.matcher(markdown);
+
+        List<String> segments = new ArrayList<>();
+        List<Boolean> isCode = new ArrayList<>();
+        int lastEnd = 0;
+        while (fenceMatcher.find()) {
+            if (fenceMatcher.start() > lastEnd) {
+                segments.add(markdown.substring(lastEnd, fenceMatcher.start()));
+                isCode.add(false);
+            }
+            segments.add(fenceMatcher.group(1));
+            isCode.add(true);
+            lastEnd = fenceMatcher.end();
+        }
+        if (lastEnd < markdown.length()) {
+            segments.add(markdown.substring(lastEnd));
+            isCode.add(false);
+        }
+
+        // Sort titles by length descending — prevents shorter names from matching inside longer ones
+        List<String> sortedTitles = new ArrayList<>(titles);
+        sortedTitles.sort((a, b) -> b.length() - a.length());
+
+        // Track which titles have been linked (link each at most once total)
+        Set<String> linked = new HashSet<>();
+
+        // Process each non-code segment
+        for (int si = 0; si < segments.size(); si++) {
+            if (Boolean.TRUE.equals(isCode.get(si))) continue;
+
+            String seg = segments.get(si);
+            for (String title : sortedTitles) {
+                if (linked.contains(title) || title.isBlank() || title.length() < 3) continue;
+
+                // Escape special regex chars in title for pattern matching
+                String escaped = java.util.regex.Pattern.quote(title);
+                // Match the title only when it is NOT already inside [[...]]
+                // Negative lookbehind: not preceded by [[
+                // Negative lookahead: not followed by ]]
+                java.util.regex.Pattern titlePattern = java.util.regex.Pattern.compile(
+                    "(?<!\\[\\[)(?<!\\[)" + escaped + "(?!\\]\\])(?!\\])",
+                    java.util.regex.Pattern.CASE_INSENSITIVE
+                );
+                java.util.regex.Matcher m = titlePattern.matcher(seg);
+                if (m.find()) {
+                    // Replace only the FIRST occurrence in the entire document
+                    seg = m.replaceFirst("[[" + title + "]]");
+                    linked.add(title);
+                }
+            }
+            segments.set(si, seg);
+        }
+
+        return String.join("", segments);
     }
 
     private String slugify(String title) {
