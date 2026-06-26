@@ -16,6 +16,11 @@ public class RAGResponseDTO {
     private String answer;
     private List<SourceDTO> sources;
     private Map<String, Object> metadata;
+    /** Confidence level: HIGH | MEDIUM | LOW | NONE */
+    private String confidence;
+    private Double confidenceScore;
+    /** 2-3 follow-up questions suggested by the LLM based on context */
+    private List<String> suggestedFollowUps;
 
     @Data
     @Builder

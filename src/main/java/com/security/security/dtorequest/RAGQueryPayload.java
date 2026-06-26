@@ -18,6 +18,7 @@ public class RAGQueryPayload implements Serializable {
 
     private String query;
     private String userId;
+    private Long conversationId;
 
     @JsonAlias({"userContext", "userPermissions"})
     private UserPermissionContext userPermissions;

@@ -48,13 +48,22 @@ public class RAGService {
             {
               "type": "object",
               "properties": {
-                "summary": { "type": "string" },
-                "details": { "type": "array", "items": { "type": "string" } },
-                "sources": { "type": "array", "items": { "type": "string" } }
+                "summary":            { "type": "string" },
+                "details":            { "type": "array", "items": { "type": "string" } },
+                "sources":            { "type": "array", "items": { "type": "string" } },
+                "confidence":         { "type": "string", "enum": ["HIGH","MEDIUM","LOW","NONE"] },
+                "confidenceScore":    { "type": "number" },
+                "suggestedFollowUps": { "type": "array", "items": { "type": "string" }, "maxItems": 3 }
               },
-              "required": ["summary", "details", "sources"]
+              "required": ["summary", "details", "sources", "confidence", "confidenceScore", "suggestedFollowUps"]
             }
             """;
+
+    // Similarity score thresholds for confidence classification
+    private static final double CONFIDENCE_HIGH   = 0.65;
+    private static final double CONFIDENCE_MEDIUM = 0.40;
+    // Below LOW_GUARD → skip LLM, return "I don't know" immediately
+    private static final double CONFIDENCE_LOW_GUARD = 0.25;
 
     private final ChatClient chatClient;
     private final VectorStore vectorStore;
@@ -80,12 +89,15 @@ public class RAGService {
     public RAGResponseDTO performRAGQuery(RAGQueryPayload payload) {
         log.info("Performing permission-aware RAG query for user: {}", payload.getUserId());
 
+        // Rewrite follow-up questions into standalone queries using conversation history
+        String effectiveQuery = rewriteQueryWithContext(payload.getQuery(), payload.getConversationId());
+
         int maxResults = payload.getOptions() != null ? payload.getOptions().getMaxResults() : topK;
         double minScore = payload.getOptions() != null ? payload.getOptions().getMinScore() : similarityThreshold;
         String pageType = payload.getOptions() != null ? payload.getOptions().getPageType() : null;
 
         List<org.springframework.ai.document.Document> relevantDocs = executeHybridSearchAndExpansion(
-                payload.getQuery(),
+                effectiveQuery,
                 payload.getUserPermissions(),
                 payload.getUserId(),
                 maxResults,
@@ -97,21 +109,19 @@ public class RAGService {
         boolean[] partialResults = new boolean[]{false};
         buildFilterExpression(payload.getUserPermissions(), payload.getUserId(), partialResults);
 
-        if (relevantDocs.isEmpty()) {
-            Map<String, Object> metadata = new HashMap<>();
-            if (partialResults[0]) {
-                metadata.put("partial_results", true);
-            }
-            return RAGResponseDTO.builder()
-                    .answer("I couldn't find any relevant information in the internal documents I have access to.")
-                    .sources(Collections.emptyList())
-                    .metadata(metadata)
-                    .build();
+        // ── "I don't know" guard ──────────────────────────────────────────────
+        ConfidenceResult conf = computeConfidence(relevantDocs);
+        log.info("[RAG] confidence={} score={} docs={}", conf.level(), conf.score(), relevantDocs.size());
+
+        if (conf.level().equals("NONE") || conf.score() < CONFIDENCE_LOW_GUARD) {
+            log.info("[RAG] Guard triggered — skipping LLM, returning no-context response");
+            return iDontKnowResponse(partialResults[0]);
         }
+        // ─────────────────────────────────────────────────────────────────────
 
         String context = formatContext(relevantDocs);
-        String systemPrompt = buildSystemPrompt();
-        String userPrompt = buildUserPrompt(payload.getQuery(), context);
+        String systemPrompt = buildSystemPrompt(conf.level(), conf.score());
+        String userPrompt = buildUserPrompt(effectiveQuery, context);
 
         ChatResponse response = chatClient.prompt()
                 .system(systemPrompt)
@@ -124,8 +134,10 @@ public class RAGService {
                 .call()
                 .chatResponse();
 
-        String answer = cleanResponse(
-                response.getResult().getOutput().getText());
+        String rawAnswer = cleanResponse(response.getResult().getOutput().getText());
+
+        // Parse suggestedFollowUps from the LLM JSON response
+        List<String> followUps = extractFollowUps(rawAnswer);
 
         List<RAGResponseDTO.SourceDTO> sources = relevantDocs.stream()
                 .map(doc -> {
@@ -148,14 +160,17 @@ public class RAGService {
                 .collect(Collectors.toList());
 
         Map<String, Object> metadata = new HashMap<>();
-        if (partialResults[0]) {
-            metadata.put("partial_results", true);
-        }
+        if (partialResults[0]) metadata.put("partial_results", true);
+        metadata.put("confidence", conf.level());
+        metadata.put("confidenceScore", conf.score());
 
         return RAGResponseDTO.builder()
-                .answer(answer)
+                .answer(rawAnswer)
                 .sources(sources)
                 .metadata(metadata)
+                .confidence(conf.level())
+                .confidenceScore(conf.score())
+                .suggestedFollowUps(followUps)
                 .build();
     }
 
@@ -173,9 +188,13 @@ public class RAGService {
                 return Flux.just("Hệ thống chưa có tài liệu nội bộ nào được upload.");
             }
 
-            // 2. Hybrid Search & Graph Context Expansion
+            // 2. Rewrite follow-up questions into standalone queries using conversation history
+            // effectiveQuestion is used for search + LLM; original question is saved to DB
+            String effectiveQuestion = rewriteQueryWithContext(question, conversationId);
+
+            // 3. Hybrid Search & Graph Context Expansion
             List<org.springframework.ai.document.Document> relevantDocs = executeHybridSearchAndExpansion(
-                    question,
+                    effectiveQuestion,
                     permissions,
                     userId,
                     topK,
@@ -185,21 +204,25 @@ public class RAGService {
             boolean[] partialResults = new boolean[]{false};
             buildFilterExpression(permissions, userId, partialResults);
 
-            if (relevantDocs.isEmpty()) {
-                if (partialResults[0]) {
-                    return Flux.just("Không tìm thấy thông tin liên quan.\n\n*Chú ý: Hệ thống quản lý phòng ban hiện đang bảo trì. Kết quả tìm kiếm chỉ truy xuất dữ liệu trong Workspace này.*");
-                }
-                return Flux.just("Không tìm thấy thông tin liên quan.");
-            }
+            // ── "I don't know" guard ──────────────────────────────────────────
+            ConfidenceResult conf = computeConfidence(relevantDocs);
+            log.info("[RAG stream] confidence={} score={} docs={}", conf.level(), conf.score(), relevantDocs.size());
 
-            // 3. Build context
+            if (conf.level().equals("NONE") || conf.score() < CONFIDENCE_LOW_GUARD) {
+                log.info("[RAG stream] Guard triggered — returning no-context JSON");
+                String fallback = iDontKnowResponse(partialResults[0]).getAnswer();
+                return Flux.just(fallback);
+            }
+            // ─────────────────────────────────────────────────────────────────
+
+            // 4. Build context
             String context = formatContext(relevantDocs);
 
-            // 4. Prompt
-            String systemPrompt = buildSystemPrompt();
-            String userPrompt = buildUserPrompt(question, context);
+            // 5. Prompt (use effectiveQuestion + computed confidence)
+            String systemPrompt = buildSystemPrompt(conf.level(), conf.score());
+            String userPrompt = buildUserPrompt(effectiveQuestion, context);
 
-            // 5. Save user message (DB)
+            // 6. Save original user question to DB (not the rewritten one — user sees what they typed)
             conversationService.saveMessage(conversationId, "user", question, null, null);
 
             StringBuilder fullResponse = new StringBuilder();
@@ -238,7 +261,7 @@ public class RAGService {
                 answerStream = answerStream.concatWith(Flux.just("\n\n*Chú ý: Hệ thống quản lý phòng ban hiện đang bảo trì. Kết quả tìm kiếm chỉ truy xuất dữ liệu trong Workspace này.*"));
             }
 
-            // 6. CALL LLM WITH MEMORY
+            // 7. CALL LLM WITH MEMORY
             return answerStream
                     .doOnNext(token -> fullResponse.append(token))
                     .doOnError(e -> log.error("RAG stream error: {}", e.getMessage()))
@@ -318,24 +341,66 @@ public class RAGService {
     }
 
     /**
-     * Build system prompt
+     * Extract suggestedFollowUps array from the LLM's JSON response string.
+     * Returns empty list on any parse failure — never throws.
      */
-    private String buildSystemPrompt() {
+    @SuppressWarnings("unchecked")
+    private List<String> extractFollowUps(String jsonAnswer) {
+        if (jsonAnswer == null || jsonAnswer.isBlank()) return Collections.emptyList();
+        try {
+            JsonNode root = objectMapper.readTree(jsonAnswer);
+            JsonNode node = root.path("suggestedFollowUps");
+            if (node.isArray()) {
+                List<String> result = new ArrayList<>();
+                node.forEach(el -> {
+                    String text = el.asText("").strip();
+                    if (!text.isBlank()) result.add(text);
+                });
+                return result;
+            }
+        } catch (Exception e) {
+            log.debug("[RAG] Could not parse suggestedFollowUps from response: {}", e.getMessage());
+        }
+        return Collections.emptyList();
+    }
+
+    /**
+     * Build system prompt, injecting retrieval confidence so the LLM echoes it in the JSON output.
+     * The LLM does not compute confidence — it just copies the pre-computed values into the schema.
+     */
+    private String buildSystemPrompt(String confidenceLevel, double confidenceScore) {
         return """
                 Bạn là AI trợ lý trả lời dựa trên tài liệu nội bộ.
-                
+
                 ## NGUYÊN TẮC TỐI THƯỢNG:
                 - CHỈ TRẢ VỀ JSON. Bắt đầu bằng '{' và kết thúc bằng '}'.
                 - TUYỆT ĐỐI KHÔNG giải thích, KHÔNG reasoning, KHÔNG nói gì ngoài JSON.
-                - Nếu không tìm thấy thông tin phù hợp, hãy trả về JSON "Không tìm thấy".
-                
-                ## ĐỊNH DẠNG JSON:
+                - Chỉ trả lời dựa trên thông tin ngữ cảnh được cung cấp. Không tự suy diễn.
+
+                ## ĐỘ TIN CẬY TRUY XUẤT:
+                Hệ thống đã tính sẵn: confidence="%s", confidenceScore=%.3f.
+                Đặt ĐÚNG hai giá trị này vào JSON output — không được thay đổi.
+
+                ## CÂU HỎI GỢI Ý (suggestedFollowUps):
+                Dựa trên ngữ cảnh tài liệu và câu hỏi vừa trả lời, hãy sinh 2-3 câu hỏi tiếp theo
+                mà người dùng có thể muốn hỏi. Câu hỏi phải ngắn gọn, cụ thể, và liên quan trực tiếp
+                đến chủ đề vừa thảo luận. Không lặp lại câu hỏi gốc.
+
+                ## ĐỊNH DẠNG JSON BẮT BUỘC:
                 {
                   "summary": "Tóm tắt câu trả lời (tiếng Việt)",
-                  "details": ["Chi tiết 1", "Chi tiết 2", "..."],
-                  "sources": ["Tên tài liệu"]
+                  "details": ["Chi tiết 1", "Chi tiết 2"],
+                  "sources": ["Tên tài liệu"],
+                  "confidence": "%s",
+                  "confidenceScore": %.3f,
+                  "suggestedFollowUps": ["Câu hỏi gợi ý 1?", "Câu hỏi gợi ý 2?", "Câu hỏi gợi ý 3?"]
                 }
-                """;
+                """.formatted(confidenceLevel, confidenceScore, confidenceLevel, confidenceScore);
+    }
+
+    // Keep zero-arg overload for callers that don't have confidence yet (unused paths)
+    private String buildSystemPrompt() {
+        return buildSystemPrompt("MEDIUM", 0.5);
     }
 
     /**
@@ -345,12 +410,131 @@ public class RAGService {
         return """
                 Thông tin:
                 %s
-                
+
                 Câu hỏi:
                 %s
-                
+
                 Trả về JSON duy nhất.
                 """.formatted(context, question);
+    }
+
+    // ── Confidence helpers ────────────────────────────────────────────────────
+
+    private record ConfidenceResult(String level, double score) {}
+
+    /**
+     * Compute retrieval confidence from similarity scores of retrieved documents.
+     * Uses max score as primary signal and doc count as secondary signal.
+     */
+    private ConfidenceResult computeConfidence(List<org.springframework.ai.document.Document> docs) {
+        if (docs.isEmpty()) return new ConfidenceResult("NONE", 0.0);
+
+        double maxScore = docs.stream()
+                .mapToDouble(d -> d.getScore() != null ? d.getScore() : 0.0)
+                .max().orElse(0.0);
+        double avgScore = docs.stream()
+                .mapToDouble(d -> d.getScore() != null ? d.getScore() : 0.0)
+                .average().orElse(0.0);
+
+        // Blend max (70%) + avg (30%) to reduce outlier bias
+        double blended = maxScore * 0.7 + avgScore * 0.3;
+        double rounded = Math.round(blended * 1000.0) / 1000.0;
+
+        String level;
+        if (blended >= CONFIDENCE_HIGH && docs.size() >= 2) level = "HIGH";
+        else if (blended >= CONFIDENCE_MEDIUM)              level = "MEDIUM";
+        else                                                level = "LOW";
+
+        return new ConfidenceResult(level, rounded);
+    }
+
+    /**
+     * Build a structured "I don't know" RAGResponseDTO (no LLM call).
+     */
+    private RAGResponseDTO iDontKnowResponse(boolean partialResults) {
+        Map<String, Object> meta = new HashMap<>();
+        if (partialResults) meta.put("partial_results", true);
+        meta.put("guard", "no_relevant_context");
+
+        String answer = """
+                {"summary":"Không tìm thấy thông tin liên quan trong tài liệu nội bộ.",\
+                "details":["Câu hỏi của bạn không khớp với nội dung nào trong kho tài liệu hiện có.",\
+                "Hãy thử đặt câu hỏi theo cách khác hoặc kiểm tra lại từ khoá."],\
+                "sources":[],"confidence":"NONE","confidenceScore":0.0,\
+                "suggestedFollowUps":[]}""";
+
+        return RAGResponseDTO.builder()
+                .answer(answer)
+                .sources(Collections.emptyList())
+                .metadata(meta)
+                .confidence("NONE")
+                .confidenceScore(0.0)
+                .suggestedFollowUps(Collections.emptyList())
+                .build();
+    }
+
+    // ── Query rewriting ───────────────────────────────────────────────────────
+
+    /**
+     * Rewrite a follow-up question into a standalone query using recent conversation history.
+     * Returns the original question unchanged if there is no history or rewriting fails.
+     */
+    private String rewriteQueryWithContext(String originalQuery, Long conversationId) {
+        if (conversationId == null) return originalQuery;
+
+        List<com.security.security.entity.Message> history =
+                conversationService.getRecentMessages(conversationId, 6);
+        // Need at least one prior exchange (user + assistant) before rewriting makes sense
+        if (history.size() < 2) return originalQuery;
+
+        StringBuilder historyStr = new StringBuilder();
+        for (com.security.security.entity.Message msg : history) {
+            String role = "user".equals(msg.getRole()) ? "User" : "Assistant";
+            String content = msg.getContent();
+            // Assistant messages are JSON — extract only the "summary" field for concise context
+            if ("assistant".equals(msg.getRole())) {
+                try {
+                    JsonNode node = objectMapper.readTree(content);
+                    String summary = node.path("summary").asText("");
+                    content = summary.isBlank()
+                            ? (content.length() > 250 ? content.substring(0, 250) + "..." : content)
+                            : summary;
+                } catch (Exception ignored) {
+                    if (content.length() > 250) content = content.substring(0, 250) + "...";
+                }
+            }
+            historyStr.append(role).append(": ").append(content).append("\n");
+        }
+
+        String prompt = """
+                Given the conversation history below, rewrite the follow-up question as a complete, \
+                standalone question that captures the full intent without needing the history context.
+                If the question is already self-contained, return it unchanged.
+                Return ONLY the rewritten question — no explanation, no quotes.
+
+                Conversation history:
+                %s
+                Follow-up question: %s
+                Standalone question:""".formatted(historyStr, originalQuery);
+
+        try {
+            String rewritten = chatClient.prompt()
+                    .user(prompt)
+                    .options(GoogleGenAiChatOptions.builder().temperature(0.0).build())
+                    .call()
+                    .content();
+
+            if (rewritten == null || rewritten.isBlank()) return originalQuery;
+
+            String cleaned = rewritten.strip().replaceAll("^[\"']|[\"']$", "").strip();
+            if (!cleaned.isEmpty() && !cleaned.equals(originalQuery)) {
+                log.info("[QueryRewrite] '{}' → '{}'", originalQuery, cleaned);
+            }
+            return cleaned.isEmpty() ? originalQuery : cleaned;
+        } catch (Exception e) {
+            log.warn("[QueryRewrite] Failed, using original query. Error: {}", e.getMessage());
+            return originalQuery;
+        }
     }
 
     private String formatFilter(org.springframework.ai.vectorstore.filter.FilterExpressionBuilder.Op op) {
