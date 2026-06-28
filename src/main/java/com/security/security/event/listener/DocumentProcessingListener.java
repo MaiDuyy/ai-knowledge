@@ -13,6 +13,7 @@ import com.security.security.service.tika.DocumentProfiler;
 import com.security.security.service.tika.SemanticMarkdownChunker;
 import com.security.security.service.MrpPipelineService;
 import com.security.security.service.PostProcessingCoordinator;
+import com.security.security.service.GeminiMultimodalService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
@@ -44,6 +45,7 @@ public class DocumentProcessingListener {
     private final SourceImageRepository   sourceImageRepository;
     private final org.springframework.data.redis.core.StringRedisTemplate redisTemplate;
     private final ChatModel               chatModel;
+    private final GeminiMultimodalService geminiMultimodalService;
 
     @org.springframework.context.event.EventListener
     public void processDocument(Long docId) {
@@ -133,26 +135,11 @@ public class DocumentProcessingListener {
                         mimeType = "audio/x-m4a";
                     }
 
-                    Media media = new Media(MimeTypeUtils.parseMimeType(mimeType), resource);
-                    ChatClient chatClient = ChatClient.builder(chatModel).build();
-                    ChatResponse response = chatClient.prompt()
-                            .options(GoogleGenAiChatOptions.builder()
-                                    .model("gemini-2.5-flash")
-                                    .temperature(0.0)
-                                    .build())
-                            .system("Bạn là một hệ thống tự động ghi âm và chuyển đổi âm thanh sang văn bản. Nhiệm vụ của bạn là nghe file âm thanh được cung cấp và chuyển toàn bộ nội dung lời nói sang văn bản Markdown chính xác. Trả về trực tiếp văn bản Markdown sạch, không có phần giải thích hay thẻ ```markdown xung quanh.")
-                            .user(u -> u.text("Hãy chuyển đổi file âm thanh này sang văn bản Markdown:").media(media))
-                            .call()
-                            .chatResponse();
-
-                    if (response != null && response.getResult() != null && response.getResult().getOutput() != null) {
-                        markdown = response.getResult().getOutput().getText();
-                        if (markdown != null) {
-                            markdown = cleanMarkdown(markdown);
-                        }
-                    } else {
-                        throw new IllegalStateException("Gemini ASR returned empty response");
+                    byte[] fileBytes;
+                    try (var in = resource.getInputStream()) {
+                        fileBytes = in.readAllBytes();
                     }
+                    markdown = geminiMultimodalService.parseAudio(fileBytes, mimeType, docId);
                     log.info("[ETL] Audio transcription completed successfully. Length: {}", markdown != null ? markdown.length() : 0);
                 } else {
                     // ── G1: Ingestion / Markdown conversion ─────────────────────────

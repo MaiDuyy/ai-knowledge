@@ -4,6 +4,7 @@ import com.security.security.entity.SourceCompilationPlan;
 import com.security.security.entity.WikiPage;
 import com.security.security.entity.WikiPageDraft;
 import com.security.security.entity.enumeration.SecurityClassification;
+import com.security.security.entity.enumeration.SourceCompilationStatus;
 import com.security.security.entity.enumeration.WikiPageDraftStatus;
 import com.security.security.repository.WikiPageRepository;
 import com.security.security.repository.WikiPageDraftRepository;
@@ -176,6 +177,39 @@ public class MrpController {
         return ResponseEntity.ok(Map.of("message", "Compilation plan approved and executed. Drafts are generated."));
     }
 
+    /**
+     * Từ chối Kế hoạch biên soạn (Admin only).
+     * POST /api/mrp/plan/{planId}/reject?workspaceId=...
+     */
+    @PostMapping("/plan/{planId}/reject")
+    public ResponseEntity<SourceCompilationPlan> rejectPlan(
+            @PathVariable Long planId,
+            @RequestParam(defaultValue = "default-workspace") String workspaceId,
+            @RequestBody Map<String, String> payload,
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-roles", required = false) String userRoles,
+            @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
+
+        String reviewNote = payload.getOrDefault("note", "Rejected by reviewer.");
+        log.info("[MrpController] Rejecting plan ID: {}, user: {}, reason: {}", planId, userId, reviewNote);
+
+        UserPermissionContext perm = PermissionUtils.parse(userRoles, userDepartmentsHeader, objectMapper);
+        if (!perm.isAdmin()) {
+            throw new org.springframework.security.access.AccessDeniedException("Only administrators can reject compilation plans.");
+        }
+
+        SourceCompilationPlan plan = sourceCompilationPlanRepository.findById(planId)
+                .orElseThrow(() -> new IllegalArgumentException("Plan not found with ID: " + planId));
+
+        plan.setStatus(SourceCompilationStatus.REJECTED);
+        plan.setReviewNote(reviewNote);
+        plan.setReviewedBy(userId);
+        plan.setReviewedAt(java.time.LocalDateTime.now());
+        SourceCompilationPlan saved = sourceCompilationPlanRepository.save(plan);
+        populateDocumentName(saved);
+        return ResponseEntity.ok(saved);
+    }
+
     // ==================== DRAFT & REVIEW ENDPOINTS ====================
 
     /**
@@ -242,6 +276,59 @@ public class MrpController {
         List<WikiPageDraft> drafts = wikiPageDraftRepository.findAccessibleDrafts(
             normalizedWorkspaceId, perm.isAdmin(), perm.hasHeadRole(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
         return ResponseEntity.ok(drafts);
+    }
+
+    /**
+     * Lấy chi tiết một Bản thảo theo ID (Admin/Reviewer).
+     * GET /api/mrp/drafts/{draftId}
+     */
+    @GetMapping("/drafts/{draftId}")
+    public ResponseEntity<WikiPageDraft> getDraftById(
+            @PathVariable Long draftId,
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
+            @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
+
+        WikiPageDraft draft = wikiPageDraftRepository.findById(draftId)
+                .orElseThrow(() -> new IllegalArgumentException("Draft not found with ID: " + draftId));
+
+        UserPermissionContext perm = PermissionUtils.parse(userRolesHeader, userDepartmentsHeader, objectMapper);
+        if (!perm.isAdmin()) {
+            validateWorkspaceAccess(userId, draft.getWorkspaceId());
+        }
+        return ResponseEntity.ok(draft);
+    }
+
+    /**
+     * Chỉnh sửa trực tiếp nội dung Bản thảo (Admin only).
+     * PATCH /api/mrp/drafts/{draftId}
+     */
+    @PatchMapping("/drafts/{draftId}")
+    public ResponseEntity<WikiPageDraft> updateDraft(
+            @PathVariable Long draftId,
+            @RequestBody Map<String, String> payload,
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
+            @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
+
+        log.info("[MrpController] Admin directly editing draft ID: {} by user: {}", draftId, userId);
+
+        WikiPageDraft draft = wikiPageDraftRepository.findById(draftId)
+                .orElseThrow(() -> new IllegalArgumentException("Draft not found with ID: " + draftId));
+
+        UserPermissionContext perm = PermissionUtils.parse(userRolesHeader, userDepartmentsHeader, objectMapper);
+        if (!perm.isAdmin()) {
+            throw new org.springframework.security.access.AccessDeniedException("Only administrators can directly edit draft content.");
+        }
+
+        if (payload.containsKey("content") && payload.get("content") != null) draft.setContent(payload.get("content"));
+        if (payload.containsKey("title") && payload.get("title") != null) draft.setTitle(payload.get("title"));
+        if (payload.containsKey("summary") && payload.get("summary") != null) draft.setSummary(payload.get("summary"));
+        if (payload.containsKey("tags") && payload.get("tags") != null) draft.setTags(payload.get("tags"));
+        if (payload.containsKey("note") && payload.get("note") != null) draft.setNote(payload.get("note"));
+
+        WikiPageDraft saved = wikiPageDraftRepository.save(draft);
+        return ResponseEntity.ok(saved);
     }
 
     /**
@@ -927,6 +1014,23 @@ public class MrpController {
         WikiPage page = pageOpt.orElseThrow(() -> new IllegalArgumentException("Wiki page not found with slug: " + slug));
 
         return ResponseEntity.ok(page);
+    }
+
+    /**
+     * Admin-only: Tái tạo toàn bộ wiki graph links và index page cho một workspace.
+     * POST /api/mrp/admin/wiki/rebuild-links?workspaceId=...&departmentId=...
+     */
+    @org.springframework.web.bind.annotation.PostMapping("/admin/wiki/rebuild-links")
+    @org.springframework.security.access.prepost.PreAuthorize("hasAnyRole('ADMIN', 'SUPER_ADMIN')")
+    public ResponseEntity<Map<String, Object>> rebuildWikiLinks(
+            @RequestParam(required = false) String workspaceId,
+            @RequestParam(required = false) String departmentId,
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId) {
+        log.info("[MrpController] ADMIN rebuild wiki links for workspace: {} by user: {}", workspaceId, userId);
+        String resolvedWsId = (workspaceId == null || workspaceId.isBlank() || "all".equalsIgnoreCase(workspaceId))
+                ? "default-workspace" : workspaceId;
+        Map<String, Object> result = wikiDraftService.rebuildAllLinksAndIndex(resolvedWsId, departmentId);
+        return ResponseEntity.ok(result);
     }
 
     /**

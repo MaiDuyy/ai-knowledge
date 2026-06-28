@@ -256,11 +256,12 @@ public class AgentToolConfig {
                     ? input.workspaceId()
                     : (this.workspaceId != null && !this.workspaceId.isBlank() ? this.workspaceId : "default-workspace");
 
-            // Generate a slug from title (simple ASCII-safe slugify)
+            // Generate a slug from title (Unicode-aware slugify)
             String slug = input.title().toLowerCase()
-                    .replaceAll("[^a-z0-9\\s-]", "")
-                    .replaceAll("\\s+", "-")
+                    .replaceAll("[^\\p{L}\\p{N}\\s-/]", "")
+                    .replaceAll("[\\s_]+", "-")
                     .replaceAll("-+", "-")
+                    .replaceAll("^-|-$", "")
                     .trim();
 
             // Create a draft (PENDING) — never publish directly

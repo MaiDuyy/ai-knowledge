@@ -4,16 +4,16 @@ import com.security.security.entity.OcrResult;
 import com.security.security.entity.enumeration.OcrStatus;
 import com.security.security.repository.OcrResultRepository;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.pdfbox.cos.COSName;
 import org.apache.pdfbox.pdmodel.PDDocument;
-import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.rendering.ImageType;
 import org.apache.pdfbox.rendering.PDFRenderer;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.content.Media;
+import org.springframework.ai.google.genai.GoogleGenAiChatModel;
 import org.springframework.ai.google.genai.GoogleGenAiChatOptions;
+import com.google.genai.Client;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ByteArrayResource;
@@ -47,6 +47,10 @@ public class GeminiMultimodalService {
     private final OcrResultRepository ocrResultRepository;
     private final StringRedisTemplate redisTemplate;
     private final ExecutorService executorService;
+    private final AppConfigService configService;
+
+    @Value("${spring.ai.google.genai.api-key:}")
+    private String defaultApiKey;
 
     @Value("${gemini.modle:gemini-2.5-flash}")
     private String geminiModel;
@@ -66,7 +70,7 @@ public class GeminiMultimodalService {
             3. Do NOT wrap the Markdown in backticks like ```markdown ... ```.
             4. Keep the exact text and reading order of the document. Do not summarize or rewrite.
             5. Reconstruct headings (#, ##, ###, ####), bullet lists, and tables precisely. Use hierarchical heading levels: H1 (#) for main titles/chapters/major parts, H2 (##) for sections (e.g. "1. Introduction"), H3 (###) for subsections (e.g. "1.1"), and H4 (####) for deep subsections (e.g. "1.1.1"). Use standard Markdown table syntax for tables.
-            6. Represent any images, diagrams, or illustrations using standard Markdown image tags, e.g., ![diagram description](image_placeholder). Do NOT include raw image bytes.
+            6. For each visible image, diagram, figure, chart, or illustration in the document, place a Markdown image tag at the EXACT reading position where it appears. Use the format: ![description](image://0) for the first image, ![description](image://1) for the second, etc. Increment the counter sequentially starting from 0 (per page). Do NOT include raw bytes or base64. Do NOT use any URL format other than image://N (N is a 0-based integer).
             7. Keep bold, italic, and underline stylings.
             8. Use standard LaTeX for mathematical equations if any.
             """;
@@ -85,15 +89,48 @@ public class GeminiMultimodalService {
             7. Keep bold, italic, and underline stylings.
             """;
 
+    private static final String SYSTEM_PROMPT_ASR = """
+            Bạn là một hệ thống tự động ghi âm và chuyển đổi âm thanh sang văn bản.
+            Nhiệm vụ của bạn là nghe file âm thanh được cung cấp và chuyển toàn bộ nội dung lời nói sang văn bản Markdown chính xác.
+            Trả về trực tiếp văn bản Markdown sạch, không có phần giải thích hay thẻ ```markdown xung quanh.
+            """;
+
     public GeminiMultimodalService(
             ChatModel chatModel,
             OcrResultRepository ocrResultRepository,
             Optional<StringRedisTemplate> redisTemplate,
-            @Qualifier("mrpVirtualThreadExecutor") ExecutorService executorService) {
+            @Qualifier("mrpVirtualThreadExecutor") ExecutorService executorService,
+            AppConfigService configService) {
         this.chatModel = chatModel;
         this.ocrResultRepository = ocrResultRepository;
         this.redisTemplate = redisTemplate.orElse(null);
         this.executorService = executorService;
+        this.configService = configService;
+    }
+
+    private ChatModel getEffectiveChatModel() {
+        String dbKey = configService.getOrNull(AppConfigService.LLM_API_KEY_KEY);
+        boolean useDbKey = dbKey != null && !dbKey.isBlank() && !dbKey.equals(defaultApiKey);
+
+        if (useDbKey) {
+            log.debug("[GeminiMultimodalService] Using DB api-key override");
+
+            Client genAiClient = Client.builder()
+                    .apiKey(dbKey)
+                    .build();
+
+            GoogleGenAiChatOptions options = GoogleGenAiChatOptions.builder()
+                    .model(geminiModel)
+                    .temperature(0.0)
+                    .build();
+
+            return GoogleGenAiChatModel.builder()
+                    .genAiClient(genAiClient)
+                    .defaultOptions(options)
+                    .build();
+        }
+
+        return chatModel;
     }
 
     @PostConstruct
@@ -118,7 +155,7 @@ public class GeminiMultimodalService {
     public String parse(File file) throws IOException {
         String fileName = file.getName();
         byte[] fileBytes = Files.readAllBytes(file.toPath());
-        
+
         if (fileName.toLowerCase().endsWith(".pdf")) {
             return parsePdf(fileBytes);
         } else {
@@ -128,172 +165,43 @@ public class GeminiMultimodalService {
     }
 
     /**
-     * Render a page of a PDF to PNG format.
+     * Render a single PDF page to PNG at low DPI for Gemini OCR.
+     */
+    private byte[] renderPageToPng(PDFRenderer renderer, int pageIndex) throws IOException {
+        BufferedImage bim = renderer.renderImageWithDPI(pageIndex, 96, ImageType.GRAY);
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try {
+            ImageIO.write(bim, "png", baos);
+        } finally {
+            bim.flush();
+        }
+        return baos.toByteArray();
+    }
+
+    /**
+     * Render a page of a PDF to PNG format (external callers).
      */
     public byte[] renderPdfPageToPng(byte[] pdfBytes, int pageIndex) throws IOException {
         try (PDDocument document = PDDocument.load(pdfBytes)) {
-            PDFRenderer pdfRenderer = new PDFRenderer(document);
-            BufferedImage bim = pdfRenderer.renderImageWithDPI(pageIndex, 150, ImageType.RGB);
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            ImageIO.write(bim, "png", baos);
-            return baos.toByteArray();
+            return renderPageToPng(new PDFRenderer(document), pageIndex);
         }
     }
 
     /**
-     * Perform OCR on all pages of a PDF and return concatenated Markdown (orchestrated via virtual threads & semaphore).
+     * Perform OCR on all pages of a PDF and return concatenated Markdown.
      */
     public String parsePdf(byte[] pdfBytes) throws IOException {
         return parsePdf(pdfBytes, null);
     }
 
     /**
-     * Perform OCR on all pages of a PDF and return concatenated Markdown (orchestrated via virtual threads & semaphore).
-     * Optionally ties page OCR results to a database documentId.
+     * Perform OCR on all pages of a PDF and return concatenated Markdown.
+     *
+     * Directly sends the PDF bytes to Gemini for native document conversion and extraction.
      */
     public String parsePdf(byte[] pdfBytes, Long documentId) throws IOException {
-        log.info("[GeminiMultimodalService] Splitting PDF into individual pages");
-        List<byte[]> pagePdfBytesList = new ArrayList<>();
-        try (PDDocument pdDocument = PDDocument.load(pdfBytes)) {
-            int pageCount = pdDocument.getNumberOfPages();
-            for (int i = 0; i < pageCount; i++) {
-                try (PDDocument singlePageDoc = new PDDocument()) {
-                    singlePageDoc.addPage(pdDocument.getPage(i));
-                    ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                    singlePageDoc.save(baos);
-                    pagePdfBytesList.add(baos.toByteArray());
-                }
-            }
-        }
-
-        int totalPages = pagePdfBytesList.size();
-        log.info("[GeminiMultimodalService] Running hybrid extraction on {} pages", totalPages);
-        String[] pageMarkdowns = new String[totalPages];
-        List<CompletableFuture<Void>> futures = new ArrayList<>();
-
-        try (PDDocument fullDoc = PDDocument.load(pdfBytes)) {
-            for (int i = 0; i < totalPages; i++) {
-                final int pageIndex = i;
-                final int pageNumber = i + 1;
-                final byte[] pagePdfBytes = pagePdfBytesList.get(i);
-                
-                // Determine page complexity
-                final boolean isComplex = isPageComplexOrScanned(fullDoc, pageIndex);
-
-                CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
-                    try {
-                        String pageMarkdown;
-                        if (isComplex) {
-                            log.info("[GeminiMultimodalService] Page {} is complex/scanned. Using Gemini PNG OCR.", pageNumber);
-                            byte[] imgBytes = null;
-                            try {
-                                imgBytes = renderPdfPageToPng(pdfBytes, pageIndex);
-                            } catch (Exception e) {
-                                log.warn("[GeminiMultimodalService] Failed to render PDF page {} to PNG, falling back to raw PDF bytes: {}", pageNumber, e.getMessage());
-                            }
-
-                            if (imgBytes != null) {
-                                pageMarkdown = parseImage(imgBytes, "image/png", documentId, pageNumber);
-                            } else {
-                                pageMarkdown = parseImage(pagePdfBytes, "application/pdf", documentId, pageNumber);
-                            }
-                        } else {
-                            log.info("[GeminiMultimodalService] Page {} is pure text. Using fast offline extraction.", pageNumber);
-                            // Offline direct extraction for pure text page
-                            pageMarkdown = extractTextOffline(fullDoc, pageIndex);
-                            // Save completed page to cache
-                            String hash = calculateSha256(pagePdfBytes);
-                            saveToCache(hash, pageMarkdown, documentId, pageNumber, 0L, null);
-                        }
-                        pageMarkdowns[pageIndex] = pageMarkdown;
-                    } catch (Exception e) {
-                        log.error("[GeminiMultimodalService] Failed to parse page {} of documentId {}: {}", pageNumber, documentId, e.getMessage(), e);
-                        pageMarkdowns[pageIndex] = "\n\n<!-- PAGE_ERROR: " + pageNumber + " - " + e.getMessage() + " -->\n\n";
-                    }
-                }, executorService);
-
-                futures.add(future);
-            }
-
-            // Wait for all pages to finish
-            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
-        }
-
-        // Assemble all page markdowns
-        StringBuilder finalMarkdown = new StringBuilder();
-        for (int i = 0; i < totalPages; i++) {
-            if (i > 0) {
-                finalMarkdown.append("\n\n<!-- PAGE_BREAK: ").append(i + 1).append(" -->\n\n");
-            }
-            finalMarkdown.append(pageMarkdowns[i] != null ? pageMarkdowns[i] : "");
-        }
-
-        return finalMarkdown.toString();
-    }
-
-    private boolean isPageComplexOrScanned(PDDocument document, int pageIndex) {
-        PDPage page = document.getPage(pageIndex);
-        
-        // 1. Check if it contains image resources
-        try {
-            Iterable<COSName> xNames = page.getResources().getXObjectNames();
-            for (COSName name : xNames) {
-                if (page.getResources().isImageXObject(name)) {
-                    return true; // Contains images
-                }
-            }
-        } catch (Exception e) {
-            // ignore
-        }
-        
-        // 2. Extract text and check length and layout
-        try {
-            org.apache.pdfbox.text.PDFTextStripper stripper = new org.apache.pdfbox.text.PDFTextStripper();
-            stripper.setStartPage(pageIndex + 1);
-            stripper.setEndPage(pageIndex + 1);
-            String text = stripper.getText(document);
-            
-            if (text == null || text.trim().length() < 50) {
-                return true; // Scanned or empty
-            }
-            
-            // Check for table indicators (e.g. table keywords, or multiple numbers on the same line)
-            String lower = text.toLowerCase();
-            if (lower.contains("bảng") || lower.contains("table") || lower.contains("sơ đồ") || lower.contains("figure")) {
-                return true;
-            }
-            
-            // Check if lines look like tables or columns (e.g. contains rows with multiple separated columns/numbers)
-            String[] lines = text.split("\n");
-            int multiColumnLines = 0;
-            for (String line : lines) {
-                line = line.trim();
-                // If a line has multiple parts separated by 3 or more spaces
-                if (line.split("\\s{3,}").length >= 3) {
-                    multiColumnLines++;
-                }
-            }
-            if (multiColumnLines > 2) {
-                return true; // Likely a table or multi-column layout
-            }
-        } catch (Exception e) {
-            return true;
-        }
-        
-        return false; // Pure text
-    }
-
-    private String extractTextOffline(PDDocument document, int pageIndex) {
-        try {
-            org.apache.pdfbox.text.PDFTextStripper stripper = new org.apache.pdfbox.text.PDFTextStripper();
-            stripper.setStartPage(pageIndex + 1);
-            stripper.setEndPage(pageIndex + 1);
-            String text = stripper.getText(document);
-            return text != null ? text.trim() : "";
-        } catch (Exception e) {
-            log.error("Failed to extract text offline for page {}", pageIndex + 1, e);
-            return "";
-        }
+        log.info("[GeminiMultimodalService] Sending entire PDF directly to Gemini for extraction, docId={}", documentId);
+        return parseImage(pdfBytes, "application/pdf", documentId, 1);
     }
 
     /**
@@ -343,7 +251,8 @@ public class GeminiMultimodalService {
             ByteArrayResource byteResource = new ByteArrayResource(imageBytes) {
                 @Override
                 public String getFilename() {
-                    return "ocr_image_" + (pageNumber != null ? pageNumber : "temp") + ".png";
+                    String ext = "application/pdf".equals(mimeType) ? ".pdf" : ".png";
+                    return "ocr_doc_" + (pageNumber != null ? pageNumber : "temp") + ext;
                 }
             };
             Media media = new Media(MimeTypeUtils.parseMimeType(mimeType), byteResource);
@@ -356,7 +265,7 @@ public class GeminiMultimodalService {
                         log.info("[GeminiMultimodalService] Retrying image OCR (attempt {}) after {}ms delay", retryCount + 1, sleepMs);
                     }
 
-                    ChatClient chatClient = ChatClient.builder(chatModel).build();
+                    ChatClient chatClient = ChatClient.builder(getEffectiveChatModel()).build();
                     ChatResponse response = chatClient.prompt()
                             .options(GoogleGenAiChatOptions.builder()
                                     .model(geminiModel)
@@ -454,7 +363,7 @@ public class GeminiMultimodalService {
                         log.info("[GeminiMultimodalService] Retrying HTML conversion (attempt {}) after {}ms delay", retryCount + 1, sleepMs);
                     }
 
-                    ChatClient chatClient = ChatClient.builder(chatModel).build();
+                    ChatClient chatClient = ChatClient.builder(getEffectiveChatModel()).build();
                     ChatResponse response = chatClient.prompt()
                             .options(GoogleGenAiChatOptions.builder()
                                     .model(geminiModel)
@@ -495,6 +404,113 @@ public class GeminiMultimodalService {
                 saveDbRecord(dbRecord);
             }
             throw new RuntimeException("Failed Gemini HTML conversion", e);
+        } finally {
+            semaphore.release();
+        }
+    }
+
+    /**
+     * Perform ASR on an audio file and return Markdown.
+     */
+    public String parseAudio(byte[] audioBytes, String mimeType) {
+        return parseAudio(audioBytes, mimeType, null);
+    }
+
+    /**
+     * Perform ASR on an audio file and return Markdown.
+     * Optionally caches the result linked to a specific documentId.
+     */
+    public String parseAudio(byte[] audioBytes, String mimeType, Long documentId) {
+        String hash = calculateSha256(audioBytes);
+        Integer pageNumber = 1; // Default to 1 for audio files
+        
+        // 1. Check Cache first
+        String cached = getFromCache(hash, documentId, pageNumber);
+        if (cached != null) {
+            log.info("[GeminiMultimodalService] Cache hit for audio hash: {}", hash);
+            return cached;
+        }
+
+        long start = System.currentTimeMillis();
+        log.info("[GeminiMultimodalService] Running ASR on audio, hash={}, mime={}", hash, mimeType);
+
+        // Pre-save state as PROCESSING in DB if document info is available
+        OcrResult dbRecord = getOrCreateDbRecord(hash, documentId, pageNumber);
+        if (dbRecord != null) {
+            dbRecord.setStatus(OcrStatus.PROCESSING);
+            saveDbRecord(dbRecord);
+        }
+
+        try {
+            semaphore.acquire();
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Audio ASR execution interrupted", ie);
+        }
+
+        String markdown = null;
+        try {
+            int maxRetries = 3;
+            int retryCount = 0;
+            Exception lastException = null;
+
+            ByteArrayResource byteResource = new ByteArrayResource(audioBytes) {
+                @Override
+                public String getFilename() {
+                    return "asr_audio_" + (documentId != null ? documentId : "temp") + ".mp3";
+                }
+            };
+            Media media = new Media(MimeTypeUtils.parseMimeType(mimeType), byteResource);
+
+            while (retryCount < maxRetries && markdown == null) {
+                try {
+                    if (retryCount > 0) {
+                        long sleepMs = (long) Math.pow(2, retryCount) * 1000L;
+                        Thread.sleep(sleepMs);
+                        log.info("[GeminiMultimodalService] Retrying audio ASR (attempt {}) after {}ms delay", retryCount + 1, sleepMs);
+                    }
+
+                    ChatClient chatClient = ChatClient.builder(getEffectiveChatModel()).build();
+                    ChatResponse response = chatClient.prompt()
+                            .options(GoogleGenAiChatOptions.builder()
+                                    .model(geminiModel)
+                                    .temperature(0.0)
+                                    .build())
+                            .system(SYSTEM_PROMPT_ASR)
+                            .user(u -> u.text("Hãy chuyển đổi file âm thanh này sang văn bản Markdown:").media(media))
+                            .call()
+                            .chatResponse();
+
+                    if (response != null && response.getResult() != null && response.getResult().getOutput() != null) {
+                        String text = response.getResult().getOutput().getText();
+                        if (text != null && !text.isBlank()) {
+                            markdown = cleanMarkdown(text);
+                        }
+                    }
+                } catch (Exception e) {
+                    lastException = e;
+                    retryCount++;
+                }
+            }
+
+            if (markdown == null) {
+                throw new RuntimeException("Failed to ASR audio after " + maxRetries + " attempts. Last error: " + (lastException != null ? lastException.getMessage() : "Unknown"));
+            }
+
+            long elapsed = System.currentTimeMillis() - start;
+            
+            // 3. Save to Caches
+            saveToCache(hash, markdown, documentId, pageNumber, elapsed, dbRecord);
+            return markdown;
+
+        } catch (Exception e) {
+            log.error("[GeminiMultimodalService] Failed audio ASR: {}", e.getMessage(), e);
+            if (dbRecord != null) {
+                dbRecord.setStatus(OcrStatus.FAILED);
+                dbRecord.setErrorMessage(e.getMessage());
+                saveDbRecord(dbRecord);
+            }
+            throw new RuntimeException("Failed Gemini ASR extraction", e);
         } finally {
             semaphore.release();
         }

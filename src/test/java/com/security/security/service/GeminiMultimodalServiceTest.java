@@ -46,6 +46,9 @@ class GeminiMultimodalServiceTest {
     @Mock
     private ValueOperations<String, String> valueOperations;
 
+    @Mock
+    private AppConfigService appConfigService;
+
     private ExecutorService executorService;
     private GeminiMultimodalService geminiMultimodalService;
 
@@ -56,7 +59,8 @@ class GeminiMultimodalServiceTest {
                 chatModel,
                 ocrResultRepository,
                 Optional.of(redisTemplate),
-                executorService
+                executorService,
+                appConfigService
         );
         org.springframework.test.util.ReflectionTestUtils.setField(geminiMultimodalService, "geminiModel", "gemini-2.5-flash");
         org.springframework.test.util.ReflectionTestUtils.setField(geminiMultimodalService, "concurrencyLimit", 5);

@@ -20,7 +20,7 @@ public class SourceImage {
     private UUID id;
 
     @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "source_id", nullable = false)
+    @JoinColumn(name = "source_id", nullable = true)
     private Document source;
 
     @Column(name = "minio_key", nullable = false, columnDefinition = "TEXT")

@@ -15,7 +15,9 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
@@ -43,6 +45,79 @@ public class WikiImageController {
     public static class ResolveResponse {
         private Map<String, String> resolved;
         private List<String> denied;
+    }
+
+    private static final Set<String> ALLOWED_IMAGE_TYPES = Set.of(
+            "image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml"
+    );
+
+    /**
+     * POST /api/wiki/images/upload
+     * Upload a standalone wiki image (not from a compiled document).
+     * Returns the image UUID and serving URL for use as image://UUID in markdown.
+     */
+    @PostMapping("/upload")
+    public ResponseEntity<?> uploadWikiImage(
+            @RequestParam("file") MultipartFile file,
+            @RequestHeader(value = "x-user-id", defaultValue = "anonymous") String userId) {
+
+        if (file == null || file.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "File is required"));
+        }
+
+        String contentType = file.getContentType();
+        if (contentType == null || !ALLOWED_IMAGE_TYPES.contains(contentType.toLowerCase())) {
+            return ResponseEntity.badRequest().body(Map.of("error", "Only image files are allowed (png, jpg, gif, webp, svg)"));
+        }
+
+        long maxBytes = 10L * 1024 * 1024; // 10 MB
+        if (file.getSize() > maxBytes) {
+            return ResponseEntity.badRequest().body(Map.of("error", "File too large. Maximum 10 MB"));
+        }
+
+        try {
+            String ext = switch (contentType.toLowerCase()) {
+                case "image/png"     -> "png";
+                case "image/jpeg"    -> "jpg";
+                case "image/gif"     -> "gif";
+                case "image/webp"    -> "webp";
+                case "image/svg+xml" -> "svg";
+                default              -> "bin";
+            };
+
+            UUID imgId = UUID.randomUUID();
+            String imgFilename = imgId + "." + ext;
+            Path imagesDir = Paths.get(uploadDir).resolve("images");
+            if (!Files.exists(imagesDir)) {
+                Files.createDirectories(imagesDir);
+            }
+            Path targetPath = imagesDir.resolve(imgFilename);
+            Files.write(targetPath, file.getBytes());
+
+            SourceImage sourceImg = SourceImage.builder()
+                    .id(imgId)
+                    .source(null)                   // standalone — not from a document
+                    .minioKey("images/" + imgFilename)
+                    .pageNumber(null)
+                    .imageIndex(0)
+                    .caption(file.getOriginalFilename())
+                    .contentType(contentType)
+                    .sizeBytes((int) file.getSize())
+                    .build();
+
+            sourceImageRepository.save(sourceImg);
+
+            log.info("[WikiImageController] Uploaded standalone wiki image: {} by user {}", imgId, userId);
+            return ResponseEntity.ok(Map.of(
+                    "id",  imgId.toString(),
+                    "url", "/api/wiki/images/raw/" + imgId
+            ));
+
+        } catch (Exception e) {
+            log.error("[WikiImageController] Failed to upload wiki image: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("error", "Upload failed: " + e.getMessage()));
+        }
     }
 
     /**

@@ -138,6 +138,13 @@ public class DoclingClient {
                         fileBytes = in.readAllBytes();
                     }
                     markdown = geminiMultimodalService.parsePdf(fileBytes, documentId);
+                } else if (mimeType.startsWith("audio/")) {
+                    log.info("[DocumentConverter] Audio detected. Running Gemini ASR parsing.");
+                    byte[] fileBytes;
+                    try (var in = resource.getInputStream()) {
+                        fileBytes = in.readAllBytes();
+                    }
+                    markdown = geminiMultimodalService.parseAudio(fileBytes, mimeType, documentId);
                 } else if (isMultimodalSupported(mimeType)) {
                     log.info("[DocumentConverter] Method A1 (Non-PDF): Sending '{}' directly to Gemini", filename);
                     byte[] fileBytes;
@@ -202,6 +209,7 @@ public class DoclingClient {
     private boolean isMultimodalSupported(String mimeType) {
         return mimeType.equals("application/pdf")
                 || mimeType.startsWith("image/")
+                || mimeType.startsWith("audio/")
                 || mimeType.equals("text/plain")
                 || mimeType.equals("text/csv")
                 || mimeType.equals("text/html");
@@ -221,6 +229,9 @@ public class DoclingClient {
         if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
         if (lower.endsWith(".gif")) return "image/gif";
         if (lower.endsWith(".webp")) return "image/webp";
+        if (lower.endsWith(".mp3")) return "audio/mp3";
+        if (lower.endsWith(".wav")) return "audio/wav";
+        if (lower.endsWith(".m4a")) return "audio/x-m4a";
         if (lower.endsWith(".txt")) return "text/plain";
         if (lower.endsWith(".csv")) return "text/csv";
         if (lower.endsWith(".json")) return "application/json";

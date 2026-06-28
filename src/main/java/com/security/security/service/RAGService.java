@@ -76,6 +76,7 @@ public class RAGService {
     private final WikiLinkRepository wikiLinkRepository;
     private final EmbeddingRepository embeddingRepository;
     private final KeywordSearchService keywordSearchService;
+    private final RerankService rerankService;
 
     @Value("${rag.top-k:5}")
     private int topK;
@@ -1269,7 +1270,10 @@ public class RAGService {
         List<org.springframework.ai.document.Document> expandedParentChildDocs = expandParentChildContext(blendedDocs);
 
         // 4. Graph Context Expansion
-        return expandContextWithWikiGraph(expandedParentChildDocs, permissions, userId);
+        List<org.springframework.ai.document.Document> graphExpandedDocs = expandContextWithWikiGraph(expandedParentChildDocs, permissions, userId);
+
+        // 6. LLM Reranking — score and select top-N most relevant documents
+        return rerankService.rerank(query, graphExpandedDocs);
     }
 
     private List<org.springframework.ai.document.Document> expandParentChildContext(List<org.springframework.ai.document.Document> docs) {

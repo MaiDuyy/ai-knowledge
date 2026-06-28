@@ -37,6 +37,11 @@ public class WikiDraftService {
     private final com.security.security.repository.WikiLinkRepository wikiLinkRepository;
     private final NatsEventPublisher natsEventPublisher;
     private final ChatClient chatClient;
+    private final WikiIssueService wikiIssueService;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    @org.springframework.context.annotation.Lazy
+    private WikiDraftService self;
 
     /**
      * Propose a new draft for a Wiki page
@@ -69,7 +74,11 @@ public class WikiDraftService {
      */
     @Transactional
     public WikiPageDraft approveDraft(Long draftId, String reviewerId) {
-        log.info("[WikiDraftService] Approving draft ID: {} by {}", draftId, reviewerId);
+        return approveDraft(draftId, reviewerId, false);
+    }
+
+    public WikiPageDraft approveDraft(Long draftId, String reviewerId, boolean skipIssueDetection) {
+        log.info("[WikiDraftService] Approving draft ID: {} by {} (skipIssueDetection={})", draftId, reviewerId, skipIssueDetection);
         
         WikiPageDraft draft = wikiPageDraftRepository.findById(draftId)
                 .orElseThrow(() -> new IllegalArgumentException("Draft not found with ID: " + draftId));
@@ -173,6 +182,20 @@ public class WikiDraftService {
 
         // Vectorize the newly saved WikiPage asynchronously (tách biệt transaction)
         revectorizeWikiPage(targetPage, isUpdate);
+
+        // Auto-detect quality issues in the newly saved WikiPage asynchronously.
+        // Skipped during MRP pipeline batch runs to avoid exhausting the Gemini rate limit.
+        if (!skipIssueDetection) {
+            final WikiPage pageForIssueDetection = targetPage;
+            CompletableFuture.runAsync(() -> {
+                try {
+                    wikiIssueService.detectIssuesForPage(pageForIssueDetection);
+                } catch (Exception e) {
+                    log.warn("[WikiDraftService] Issue detection failed asynchronously for page '{}': {}",
+                            pageForIssueDetection.getSlug(), e.getMessage());
+                }
+            });
+        }
 
         // Refresh knowledge graph wiki links
         refreshLinks(targetPage.getId(), targetPage.getSlug(), targetPage.getContent(), targetPage.getWorkspaceId());
@@ -282,30 +305,10 @@ public class WikiDraftService {
                         log.warn("[WikiDraftService] Could not delete old embedding for page ID {}: {}", p.getId(), ex.getMessage());
                     }
                 }
-
-                Map<String, Object> metadata = new HashMap<>();
-                metadata.put("wikiPageId", p.getId().toString());
-                metadata.put("workspaceId", ScopeNormalizer.normalizeWorkspace(p.getWorkspaceId()));
-                metadata.put("departmentId", ScopeNormalizer.normalizeDepartment(p.getDepartmentId()));
-                metadata.put("allowedRoles", p.getAllowedRoles() != null ? p.getAllowedRoles() : "ALL");
-                metadata.put("classification", p.getSecurityClassification() != null ? p.getSecurityClassification().name() : "INTERNAL");
-                metadata.put("securityClassification", p.getSecurityClassification() != null ? p.getSecurityClassification().name() : "INTERNAL");
-                metadata.put("type", "wiki");
-                metadata.put("pageType", p.getPageType() != null ? p.getPageType().getValue() : "");
-                metadata.put("slug", p.getSlug() != null ? p.getSlug() : "");
-                metadata.put("sourceDocumentId", p.getSourceDocumentId() != null ? p.getSourceDocumentId().toString() : "");
-                metadata.put("fileName", p.getTitle() != null ? p.getTitle() : "");
-
-                Document vectorDoc = new Document(
-                        "Tiêu đề: " + p.getTitle() + "\n\n" + p.getContent(),
-                        metadata
-                );
-                String docId = java.util.UUID.nameUUIDFromBytes(
-                        ("wiki-" + p.getId()).getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString();
-                Document vectorDocWithId = new Document(docId, vectorDoc.getText(), vectorDoc.getMetadata());
-                vectorStore.add(List.of(vectorDocWithId));
-                log.info("[WikiDraftService] Vectorized WikiPage ID: {} (pageType={}, slug={}) successfully",
-                        p.getId(), p.getPageType(), p.getSlug());
+                List<Document> documents = buildWikiDocuments(p);
+                vectorStore.add(documents);
+                log.info("[WikiDraftService] Vectorized WikiPage ID: {} in {} chunks (pageType={}, slug={}) successfully",
+                        p.getId(), documents.size(), p.getPageType(), p.getSlug());
             } catch (Exception e) {
                 log.error("[WikiDraftService] Error syncing WikiPage ID {} to VectorStore: {}", p.getId(), e.getMessage(), e);
             }
@@ -325,31 +328,144 @@ public class WikiDraftService {
                     log.warn("[WikiDraftService] Could not delete old embedding for page ID {}: {}", page.getId(), ex.getMessage());
                 }
             }
-
-            Map<String, Object> metadata = new HashMap<>();
-            metadata.put("wikiPageId", page.getId().toString());
-            metadata.put("workspaceId", ScopeNormalizer.normalizeWorkspace(page.getWorkspaceId()));
-            metadata.put("departmentId", ScopeNormalizer.normalizeDepartment(page.getDepartmentId()));
-            metadata.put("allowedRoles", page.getAllowedRoles() != null ? page.getAllowedRoles() : "ALL");
-            metadata.put("classification", page.getSecurityClassification() != null ? page.getSecurityClassification().name() : "INTERNAL");
-            metadata.put("securityClassification", page.getSecurityClassification() != null ? page.getSecurityClassification().name() : "INTERNAL");
-            metadata.put("type", "wiki");
-            metadata.put("pageType", page.getPageType() != null ? page.getPageType().getValue() : "");
-            metadata.put("slug", page.getSlug() != null ? page.getSlug() : "");
-            metadata.put("sourceDocumentId", page.getSourceDocumentId() != null ? page.getSourceDocumentId().toString() : "");
-            metadata.put("fileName", page.getTitle() != null ? page.getTitle() : "");
-
-            Document vectorDoc = new Document(
-                    "Tiêu đề: " + page.getTitle() + "\n\n" + page.getContent(),
-                    metadata
-            );
-            String docId = java.util.UUID.nameUUIDFromBytes(
-                    ("wiki-" + page.getId()).getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString();
-            Document vectorDocWithId = new Document(docId, vectorDoc.getText(), vectorDoc.getMetadata());
-            vectorStore.add(List.of(vectorDocWithId));
-            log.info("[WikiDraftService] Sync vectorized WikiPage ID: {} successfully", page.getId());
+            List<Document> documents = buildWikiDocuments(page);
+            vectorStore.add(documents);
+            log.info("[WikiDraftService] Sync vectorized WikiPage ID: {} in {} chunks successfully", page.getId(), documents.size());
         } catch (Exception e) {
             log.error("[WikiDraftService] Error syncing WikiPage ID {}: {}", page.getId(), e.getMessage(), e);
+        }
+    }
+
+    // gemini-embedding-001 limit: 8192 tokens. At worst-case 2 chars/token (Vietnamese),
+    // 8000 chars ≈ 4000 tokens — safely below the limit even with the title prefix.
+    private static final int EMBED_CHUNK_CHARS = 8000;
+
+    /**
+     * Splits wiki page content into embedding-safe Document objects.
+     * Handles oversized paragraphs and long continuous text that lacks paragraph breaks.
+     */
+    private List<Document> buildWikiDocuments(WikiPage page) {
+        Map<String, Object> metadata = new HashMap<>();
+        metadata.put("wikiPageId", page.getId().toString());
+        metadata.put("workspaceId", ScopeNormalizer.normalizeWorkspace(page.getWorkspaceId()));
+        metadata.put("departmentId", ScopeNormalizer.normalizeDepartment(page.getDepartmentId()));
+        metadata.put("allowedRoles", page.getAllowedRoles() != null ? page.getAllowedRoles() : "ALL");
+        metadata.put("classification", page.getSecurityClassification() != null ? page.getSecurityClassification().name() : "INTERNAL");
+        metadata.put("securityClassification", page.getSecurityClassification() != null ? page.getSecurityClassification().name() : "INTERNAL");
+        metadata.put("type", "wiki");
+        metadata.put("pageType", page.getPageType() != null ? page.getPageType().getValue() : "");
+        metadata.put("slug", page.getSlug() != null ? page.getSlug() : "");
+        metadata.put("sourceDocumentId", page.getSourceDocumentId() != null ? page.getSourceDocumentId().toString() : "");
+        metadata.put("fileName", page.getTitle() != null ? page.getTitle() : "");
+
+        List<String> chunks = splitContentIntoChunks(
+                page.getContent() != null ? page.getContent() : "");
+
+        String titlePrefix = page.getTitle() != null ? page.getTitle() : "";
+        List<Document> documents = new java.util.ArrayList<>();
+        for (int i = 0; i < chunks.size(); i++) {
+            String prefix = (i == 0 ? "Tiêu đề: " : "Tiêu đề (Tiếp theo): ") + titlePrefix + "\n\n";
+            String chunkContent = prefix + chunks.get(i);
+
+            Map<String, Object> chunkMetadata = new HashMap<>(metadata);
+            chunkMetadata.put("chunkIndex", String.valueOf(i));
+            chunkMetadata.put("totalChunks", String.valueOf(chunks.size()));
+
+            String docId = java.util.UUID.nameUUIDFromBytes(
+                    ("wiki-" + page.getId() + "-" + i).getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString();
+            documents.add(new Document(docId, chunkContent, chunkMetadata));
+        }
+        return documents;
+    }
+
+    /**
+     * Splits content into chunks that fit within EMBED_CHUNK_CHARS.
+     *
+     * Strategy (in order):
+     *   1. Split by PAGE_BREAK markers (multi-page documents)
+     *   2. Split each part by double-newline (paragraphs)
+     *   3. If a single paragraph still exceeds the limit, split by sentence boundaries
+     *   4. If a single sentence still exceeds the limit, hard-cut at word boundaries
+     */
+    private List<String> splitContentIntoChunks(String content) {
+        List<String> chunks = new java.util.ArrayList<>();
+        if (content.isBlank()) {
+            chunks.add("");
+            return chunks;
+        }
+
+        String[] pageParts = content.split("\\s*<!--\\s*PAGE_BREAK:\\s*\\d+\\s*-->\\s*");
+        for (String part : pageParts) {
+            String trimmed = part.trim();
+            if (trimmed.isEmpty()) continue;
+            if (trimmed.length() <= EMBED_CHUNK_CHARS) {
+                chunks.add(trimmed);
+                continue;
+            }
+            // Split by paragraph (double newline)
+            String[] paragraphs = trimmed.split("\\r?\\n\\r?\\n");
+            StringBuilder current = new StringBuilder();
+            for (String para : paragraphs) {
+                if (para.isBlank()) continue;
+                // Each paragraph that fits in the remaining space goes into the current chunk
+                if (current.length() > 0 && current.length() + 2 + para.length() > EMBED_CHUNK_CHARS) {
+                    chunks.add(current.toString().trim());
+                    current.setLength(0);
+                }
+                if (para.length() <= EMBED_CHUNK_CHARS) {
+                    if (current.length() > 0) current.append("\n\n");
+                    current.append(para);
+                } else {
+                    // Paragraph itself too large → flush current first, then split paragraph
+                    if (current.length() > 0) {
+                        chunks.add(current.toString().trim());
+                        current.setLength(0);
+                    }
+                    splitLargeParagraph(para, chunks);
+                }
+            }
+            if (current.length() > 0) chunks.add(current.toString().trim());
+        }
+        if (chunks.isEmpty()) chunks.add("");
+        return chunks;
+    }
+
+    /** Split a paragraph that individually exceeds EMBED_CHUNK_CHARS by sentences, then by words. */
+    private void splitLargeParagraph(String para, List<String> out) {
+        // Try sentence boundaries: ". ", ".\n", "! ", "? ", "。"
+        String[] sentences = para.split("(?<=[.!?。])[\\s]+");
+        StringBuilder cur = new StringBuilder();
+        for (String sentence : sentences) {
+            if (sentence.isBlank()) continue;
+            if (cur.length() > 0 && cur.length() + 1 + sentence.length() > EMBED_CHUNK_CHARS) {
+                out.add(cur.toString().trim());
+                cur.setLength(0);
+            }
+            if (sentence.length() > EMBED_CHUNK_CHARS) {
+                // Single sentence still too long → hard-cut at word boundaries
+                if (cur.length() > 0) { out.add(cur.toString().trim()); cur.setLength(0); }
+                hardCutAtWords(sentence, out);
+            } else {
+                if (cur.length() > 0) cur.append(" ");
+                cur.append(sentence);
+            }
+        }
+        if (cur.length() > 0) out.add(cur.toString().trim());
+    }
+
+    /** Last-resort: split at word boundaries every EMBED_CHUNK_CHARS characters. */
+    private void hardCutAtWords(String text, List<String> out) {
+        int start = 0;
+        while (start < text.length()) {
+            int end = Math.min(start + EMBED_CHUNK_CHARS, text.length());
+            if (end < text.length()) {
+                // Step back to nearest space to avoid cutting mid-word
+                int space = text.lastIndexOf(' ', end);
+                if (space > start) end = space;
+            }
+            out.add(text.substring(start, end).trim());
+            start = end;
+            while (start < text.length() && text.charAt(start) == ' ') start++;
         }
     }
 
@@ -391,13 +507,15 @@ public class WikiDraftService {
         return result;
     }
 
-    private void refreshLinks(Long fromPageId, String fromSlug, String contentMd, String workspaceId) {
+    @Transactional
+    public void refreshLinks(Long fromPageId, String fromSlug, String contentMd, String workspaceId) {
         try {
             wikiLinkRepository.deleteByFromPageId(fromPageId);
+            wikiLinkRepository.flush(); // Force database deletion immediately to avoid unique key conflicts during re-insert
+
+            if (contentMd == null || contentMd.isBlank()) return;
+
             List<String> targets = com.security.security.dto.WikiPageMetadataDto.extractLinks(contentMd);
-            if (targets == null || targets.isEmpty()) {
-                return;
-            }
 
             String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
             List<WikiPage> allPages = new java.util.ArrayList<>();
@@ -407,56 +525,150 @@ public class WikiDraftService {
                 allPages.addAll(wikiPageRepository.findByWorkspaceId("GLOBAL"));
             }
             
+            // Build lookup indexes for O(1) resolution
+            java.util.Map<String, String> slugToSlug = new java.util.HashMap<>();
+            java.util.Map<String, String> titleToSlug = new java.util.HashMap<>();
+            for (WikiPage p : allPages) {
+                if (p.getSlug() != null) slugToSlug.put(p.getSlug().toLowerCase(), p.getSlug());
+                if (p.getTitle() != null) titleToSlug.put(p.getTitle().toLowerCase(), p.getSlug());
+            }
+
             java.util.Set<String> uniqueSlugs = new java.util.HashSet<>();
+
+            // Pass 1: explicit [[wikilink]] / [[wikilink|display]] syntax
             for (String target : targets) {
                 String trimmedTarget = target.trim();
-                String targetSlug = slugify(trimmedTarget);
-                
-                // Resolve actual page slug
-                String resolvedSlug = null;
-                for (WikiPage p : allPages) {
-                    if (p.getTitle().equalsIgnoreCase(trimmedTarget)) {
-                        resolvedSlug = p.getSlug();
-                        break;
-                    }
-                    if (p.getSlug().equalsIgnoreCase(targetSlug)) {
-                        resolvedSlug = p.getSlug();
-                        break;
-                    }
-                    if (p.getSlug().equalsIgnoreCase("source/" + targetSlug)) {
-                        resolvedSlug = p.getSlug();
-                        break;
-                    }
+                if (trimmedTarget.isEmpty()) continue;
+                String resolved = resolveWikiTarget(trimmedTarget, slugToSlug, titleToSlug);
+                if (resolved != null && !resolved.isEmpty() && !resolved.equals(fromSlug)) {
+                    uniqueSlugs.add(resolved);
                 }
-                
-                if (resolvedSlug == null) {
-                    resolvedSlug = targetSlug; // fallback
-                }
-                
-                if (!resolvedSlug.isEmpty() && !resolvedSlug.equals(fromSlug)) {
-                    uniqueSlugs.add(resolvedSlug);
+            }
+
+            // Pass 2: implicit title-mention links — catches pages compiled without [[...]] syntax
+            // Strips markdown formatting chars first, then does case-insensitive substring match.
+            String contentForMention = contentMd.toLowerCase()
+                    .replaceAll("[*_`#>\\[\\]|]", " ")
+                    .replaceAll("\\s+", " ");
+            for (java.util.Map.Entry<String, String> entry : titleToSlug.entrySet()) {
+                String titleKey = entry.getKey();   // already lowercase
+                String targetSlug = entry.getValue();
+                // Skip very short titles (high false-positive rate) and self-references
+                if (titleKey.length() < 5 || targetSlug.equals(fromSlug)) continue;
+                if (contentForMention.contains(titleKey)) {
+                    uniqueSlugs.add(targetSlug);
                 }
             }
             
+            List<com.security.security.entity.WikiLink> linksToSave = new java.util.ArrayList<>();
             for (String tSlug : uniqueSlugs) {
-                wikiLinkRepository.save(com.security.security.entity.WikiLink.builder()
+                linksToSave.add(com.security.security.entity.WikiLink.builder()
                         .fromPageId(fromPageId)
                         .toSlug(tSlug)
                         .build());
             }
+            
+            if (!linksToSave.isEmpty()) {
+                wikiLinkRepository.saveAll(linksToSave);
+                wikiLinkRepository.flush(); // Flush saves immediately to keep the persistence context clean
+            }
             log.info("[WikiDraftService] Refreshed {} graph links for page ID {}", uniqueSlugs.size(), fromPageId);
         } catch (Exception e) {
             log.error("[WikiDraftService] Error refreshing graph links for page ID {}: {}", fromPageId, e.getMessage(), e);
+            throw e;
         }
     }
 
-    private String slugify(String title) {
+    /**
+     * Rebuild wiki graph links for ALL approved pages in a workspace, then refresh the index page.
+     * Call this after MRP pipeline completes or via admin "Rebuild Index" button.
+     */
+    public Map<String, Object> rebuildAllLinksAndIndex(String workspaceId, String departmentId) {
+        String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
+        String normalizedDeptId = ScopeNormalizer.normalizeDepartment(departmentId);
+        log.info("[WikiDraftService] Rebuilding all wiki links for workspace: {}", normalizedWorkspaceId);
+
+        List<WikiPage> pages = wikiPageRepository.findAccessiblePages(
+            normalizedWorkspaceId, normalizedDeptId, true, true, List.of(), List.of());
+
+        int refreshed = 0;
+        int errors = 0;
+        WikiDraftService rebuilder = (self != null) ? self : this;
+        for (WikiPage page : pages) {
+            try {
+                if (page.getContent() != null && !page.getContent().isBlank()) {
+                    rebuilder.refreshLinks(page.getId(), page.getSlug(), page.getContent(), page.getWorkspaceId());
+                    refreshed++;
+                }
+            } catch (Exception e) {
+                errors++;
+                log.error("[WikiDraftService] refreshLinks failed for page {}: {}", page.getSlug(), e.getMessage());
+            }
+        }
+
+        log.info("[WikiDraftService] Refreshed links for {}/{} pages ({} errors). Now rebuilding index page.", refreshed, pages.size(), errors);
+        rebuildIndexPage(normalizedWorkspaceId, normalizedDeptId);
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("pagesRefreshed", refreshed);
+        result.put("pagesTotal", pages.size());
+        result.put("errors", errors);
+        result.put("workspaceId", normalizedWorkspaceId);
+        return result;
+    }
+
+    /**
+     * Resolve a wikilink target to an actual page slug.
+     * Target may be: a full slug ("concept/jwt-auth"), a title ("JWT Authentication"),
+     * or a slugified title ("jwt-authentication").
+     * Resolution order: direct slug → title → slugified title → type-prefixed slug → original.
+     */
+    private String resolveWikiTarget(
+            String target,
+            java.util.Map<String, String> slugToSlug,
+            java.util.Map<String, String> titleToSlug) {
+        // 1. Direct slug match — handles [[concept/jwt-auth]] inserted by MarkdownEditor
+        String bySlug = slugToSlug.get(target.toLowerCase());
+        if (bySlug != null) return bySlug;
+
+        // 2. Title match — handles [[JWT Authentication]] generated by LLM
+        String byTitle = titleToSlug.get(target.toLowerCase());
+        if (byTitle != null) return byTitle;
+
+        // 3. Slugified title match — handles [[jwt authentication]] or [[jwt-authentication]]
+        String slugified = slugifyTitle(target);
+        String bySlugified = slugToSlug.get(slugified);
+        if (bySlugified != null) return bySlugified;
+
+        // 4. Type-prefixed slug match — handles bare slug "jwt-auth" when page is "concept/jwt-auth"
+        for (String prefix : List.of("concept/", "entity/", "topic/", "source/")) {
+            String prefixed = slugToSlug.get(prefix + slugified);
+            if (prefixed != null) return prefixed;
+        }
+
+        // 5. If target already looks like a valid slug path, keep it as-is (dangling link to future page)
+        if (target.contains("/") && target.matches("[a-z0-9][a-z0-9/_-]*")) {
+            return target.toLowerCase();
+        }
+
+        // 6. Last resort: return slugified form only if non-empty
+        return slugified.isEmpty() ? null : slugified;
+    }
+
+    /** Slugify a plain text title — strips special chars except hyphens. Does NOT strip path separators. */
+    private String slugifyTitle(String title) {
         if (title == null) return "";
         return title.toLowerCase()
-                .replaceAll("[^a-z0-9\\s-]", "")
-                .replaceAll("\\s+", "-")
+                .replaceAll("[^\\p{L}\\p{N}\\s-/]", "")
+                .replaceAll("[\\s_]+", "-")
                 .replaceAll("-+", "-")
+                .replaceAll("^-|-$", "")
                 .trim();
+    }
+
+    /** @deprecated use resolveWikiTarget() + slugifyTitle() instead */
+    private String slugify(String title) {
+        return slugifyTitle(title);
     }
 
     /**

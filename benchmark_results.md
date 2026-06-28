@@ -2,7 +2,7 @@
 
 Tài liệu này tổng hợp kết quả chạy thử nghiệm Benchmark tự động cho dịch vụ **ai-knowledge**, bao gồm kiểm thử bảo mật phân quyền RAG, độ phủ tìm kiếm mở rộng đồ thị (Graph Hop Recall), hiệu năng luồng ảo Java 21 (Virtual Threads), và độ chính xác của đường ống biên dịch tri thức (ETL & Wiki Graph Accuracy).
 
-Chạy kiểm thử ngày: Thu Jun 25 17:01:01 ICT 2026
+Chạy kiểm thử ngày: Sun Jun 28 13:00:12 ICT 2026
 
 ---
 
@@ -40,8 +40,8 @@ So sánh thông lượng, độ trễ và dung lượng bộ nhớ tiêu thụ g
 
 | Chỉ số đo lường (Metric) | Platform Threads (Pool=50) | Virtual Threads (Java 21) | Tỷ lệ cải thiện |
 | :--- | :---: | :---: | :---: |
-| Tổng thời gian xử lý | 0.7584 s | 1.3599 s | **Giảm -79.31%** |
-| Thông lượng trung bình (Throughput) | 659.28 RPS | 367.69 RPS | **Tăng -44.23%** |
+| Tổng thời gian xử lý | 1.5497 s | 9.1216 s | **Giảm -488.60%** |
+| Thông lượng trung bình (Throughput) | 322.64 RPS | 54.81 RPS | **Tăng -83.01%** |
 | Platform Threads khởi tạo | 50 threads | 1 threads | **Giảm 98.00%** |
 | Ước tính bộ nhớ tiêu thụ (RAM) | 50.00 MB | 1.98 MB | **Giảm 96.05%** |
 
@@ -49,8 +49,8 @@ So sánh thông lượng, độ trễ và dung lượng bộ nhớ tiêu thụ g
 
 **1. Throughput (Requests Per Second - RPS - Càng cao càng tốt):**
 ```
-Platform Threads: [████████████████████████████████████████] 659.28 RPS
-Virtual Threads : [██████████████████████                  ] 367.69 RPS (+-44.23%)
+Platform Threads: [████████████████████████████████████████] 322.64 RPS
+Virtual Threads : [███████                                 ] 54.81 RPS (+-83.01%)
 ```
 
 **2. Memory Consumption (MB - Càng thấp càng tốt):**

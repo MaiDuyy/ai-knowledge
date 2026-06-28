@@ -23,7 +23,7 @@ import java.util.Map;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -48,6 +48,8 @@ class RAGServiceTest {
     private WikiPageRepository wikiPageRepository;
     @Mock
     private WikiLinkRepository wikiLinkRepository;
+    @Mock
+    private RerankService rerankService;
 
     @InjectMocks
     private RAGService ragService;
@@ -59,6 +61,9 @@ class RAGServiceTest {
         buildFilterMethod = RAGService.class.getDeclaredMethod("buildFilterExpression", 
                 RAGQueryPayload.UserPermissionContext.class, String.class, boolean[].class);
         buildFilterMethod.setAccessible(true);
+        // Configure lenient mock for rerank to bypass null issues and pass-through docs
+        Mockito.lenient().when(rerankService.rerank(anyString(), anyList()))
+                .thenAnswer(invocation -> invocation.getArgument(1));
     }
 
     private String invokeBuildFilter(RAGQueryPayload.UserPermissionContext context, String userId, boolean[] partialResults) throws Exception {

@@ -972,7 +972,9 @@ public class MrpPipelineService {
 
                 if (runAutoApproveDrafts) {
                     try {
-                        wikiDraftService.approveDraft(draft.getId(), "SYSTEM");
+                        // skipIssueDetection=true: avoid flooding Gemini with per-page LLM calls
+                        // during batch pipeline runs (issue detection can be triggered manually later)
+                        wikiDraftService.approveDraft(draft.getId(), "SYSTEM", true);
                         log.info("[MRP Pipeline] [Refine Phase] Auto-approved Draft ID: {}", draft.getId());
                     } catch (Exception e) {
                         log.error("[MRP Pipeline] [Refine Phase] Lỗi tự động duyệt Draft ID {}: {}", draft.getId(), e.getMessage());
@@ -987,6 +989,16 @@ public class MrpPipelineService {
             plan.setReviewNote("Plan executed successfully.");
             sourceCompilationPlanRepository.save(plan);
             natsEventPublisher.publishCompilationPlanUpdated(plan.getId(), plan.getSourceDocumentId(), finalWorkspaceId, "DONE", userId);
+
+            // After auto-approve, rebuild all wiki links and index page so graph and index stay current
+            if (runAutoApproveDrafts) {
+                try {
+                    wikiDraftService.rebuildAllLinksAndIndex(finalWorkspaceId, plan.getDepartmentId());
+                    log.info("[MRP Pipeline] Rebuilt wiki links + index for workspace: {}", finalWorkspaceId);
+                } catch (Exception e) {
+                    log.warn("[MRP Pipeline] rebuildAllLinksAndIndex failed (non-fatal): {}", e.getMessage());
+                }
+            }
 
             log.info("[MRP Pipeline] Hoàn tất thực thi Kế hoạch Biên soạn ID: {}", planId);
 
@@ -1125,9 +1137,10 @@ public class MrpPipelineService {
     private String slugify(String title) {
         if (title == null) return "";
         return title.toLowerCase()
-                .replaceAll("[^a-z0-9\\s-]", "")
-                .replaceAll("\\s+", "-")
+                .replaceAll("[^\\p{L}\\p{N}\\s-/]", "")
+                .replaceAll("[\\s_]+", "-")
                 .replaceAll("-+", "-")
+                .replaceAll("^-|-$", "")
                 .trim();
     }
 

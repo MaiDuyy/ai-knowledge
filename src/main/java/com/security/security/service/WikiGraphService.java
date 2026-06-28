@@ -27,7 +27,11 @@ public class WikiGraphService {
     private final WikiLinkRepository wikiLinkRepository;
 
     public WikiGraphCommunityDto detectCommunities(String workspaceId) {
-        List<WikiPage> pages = wikiPageRepository.findByWorkspaceId(workspaceId);
+        List<WikiPage> pages = new ArrayList<>(wikiPageRepository.findByWorkspaceId(workspaceId));
+        if (!"ALL".equals(workspaceId) && !"GLOBAL".equals(workspaceId)) {
+            pages.addAll(wikiPageRepository.findByWorkspaceId("ALL"));
+            pages.addAll(wikiPageRepository.findByWorkspaceId("GLOBAL"));
+        }
         if (pages.isEmpty()) {
             return WikiGraphCommunityDto.builder()
                     .communities(Collections.emptyList())

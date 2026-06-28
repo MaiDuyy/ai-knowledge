@@ -676,6 +676,12 @@ public class ImageProcessingService {
         }
         blocks.add(markdown.substring(lastIdx));
 
+        // If no PAGE_BREAK markers are found (e.g. parsed in one shot), match all images globally
+        if (blocks.size() <= 1) {
+            log.info("[ImageProcessingService] No PAGE_BREAK markers found. Matching all {} images globally.", results.size());
+            return replaceBlockImages(markdown, results);
+        }
+
         StringBuilder finalMarkdown = new StringBuilder();
         for (int i = 0; i < blocks.size(); i++) {
             if (i > 0) {
@@ -734,7 +740,30 @@ public class ImageProcessingService {
         boolean[] resMatched = new boolean[pageResults.size()];
         Map<Integer, ProcessedImageResult> tagToResult = new HashMap<>();
 
-        // Stage 1: Caption/AltText Match
+        // Stage 0: Direct index mapping for structured image://N format (Gemini OCR output)
+        // Sort non-skipped results by imageIndex to get page-local sequential order
+        List<ProcessedImageResult> indexedResults = pageResults.stream()
+                .filter(r -> !r.isSkipped() && r.getSourceImage() != null)
+                .sorted(java.util.Comparator.comparing(r -> r.getSourceImage().getImageIndex()))
+                .collect(java.util.stream.Collectors.toList());
+
+        java.util.regex.Pattern indexedUrlPattern = java.util.regex.Pattern.compile("^image://(\\d+)$");
+        for (int tIdx = 0; tIdx < tags.size(); tIdx++) {
+            MarkdownImageTag tag = tags.get(tIdx);
+            java.util.regex.Matcher im = indexedUrlPattern.matcher(tag.url != null ? tag.url.trim() : "");
+            if (im.matches()) {
+                int localIdx = Integer.parseInt(im.group(1));
+                if (localIdx < indexedResults.size()) {
+                    ProcessedImageResult target = indexedResults.get(localIdx);
+                    tagToResult.put(tIdx, target);
+                    tagMatched[tIdx] = true;
+                    int srcIdx = pageResults.indexOf(target);
+                    if (srcIdx >= 0) resMatched[srcIdx] = true;
+                }
+            }
+        }
+
+        // Stage 1: Caption/AltText Match (for old-format tags without image://N)
         for (int tIdx = 0; tIdx < tags.size(); tIdx++) {
             MarkdownImageTag tag = tags.get(tIdx);
             String alt = tag.altText;
