@@ -217,41 +217,53 @@ public class MrpController {
      * GET /api/mrp/drafts?page=0&size=10
      */
     @GetMapping("/drafts")
-    public ResponseEntity<?> getPendingDrafts(
+    public ResponseEntity<?> getDrafts(
             @RequestParam(defaultValue = "default-workspace") String workspaceId,
+            @RequestParam(required = false) String status,
             @RequestParam(required = false) Integer page,
             @RequestParam(required = false) Integer size,
             @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
             @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
             @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
         String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
-        log.info("[MrpController] Fetching pending drafts. page: {}, size: {}, user: {}", page, size, userId);
-        
+        log.info("[MrpController] Fetching drafts. status: {}, page: {}, size: {}, user: {}", status, page, size, userId);
+
         UserPermissionContext perm = PermissionUtils.parse(userRolesHeader, userDepartmentsHeader, objectMapper);
         if (!perm.isAdmin()) {
             validateWorkspaceAccess(userId, normalizedWorkspaceId);
         }
 
-        // Admins and SuperAdmins can view all pending drafts across all workspaces
+        // Parse requested status — default to PENDING for backward compatibility
+        WikiPageDraftStatus draftStatus;
+        if (status != null && !status.isBlank()) {
+            try {
+                draftStatus = WikiPageDraftStatus.valueOf(status.toUpperCase());
+            } catch (IllegalArgumentException e) {
+                return ResponseEntity.badRequest().body(Map.of("error", "Unknown status: " + status));
+            }
+        } else {
+            draftStatus = WikiPageDraftStatus.PENDING;
+        }
+
         if (perm.isAdmin()) {
             if (page != null && size != null) {
                 Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt"));
-                Page<WikiPageDraft> pagedDrafts = wikiPageDraftRepository.findByStatus(WikiPageDraftStatus.PENDING, pageable);
+                Page<WikiPageDraft> pagedDrafts = wikiPageDraftRepository.findByStatus(draftStatus, pageable);
                 return ResponseEntity.ok(pagedDrafts);
             }
-            List<WikiPageDraft> drafts = wikiPageDraftRepository.findByStatus(WikiPageDraftStatus.PENDING);
+            List<WikiPageDraft> drafts = wikiPageDraftRepository.findByStatus(draftStatus);
             return ResponseEntity.ok(drafts);
         }
 
         if (page != null && size != null) {
             Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt"));
             Page<WikiPageDraft> pagedDrafts = wikiPageDraftRepository.findAccessibleDraftsByStatus(
-                normalizedWorkspaceId, WikiPageDraftStatus.PENDING, perm.isAdmin(), perm.hasHeadRole(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember(), pageable);
+                normalizedWorkspaceId, draftStatus, perm.isAdmin(), perm.hasHeadRole(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember(), pageable);
             return ResponseEntity.ok(pagedDrafts);
         }
-        
+
         List<WikiPageDraft> drafts = wikiPageDraftRepository.findAccessibleDraftsByStatus(
-            normalizedWorkspaceId, WikiPageDraftStatus.PENDING, perm.isAdmin(), perm.hasHeadRole(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
+            normalizedWorkspaceId, draftStatus, perm.isAdmin(), perm.hasHeadRole(), perm.getDeptIdsWhereHead(), perm.getDeptIdsWhereMember());
         return ResponseEntity.ok(drafts);
     }
 
@@ -441,6 +453,60 @@ public class MrpController {
 
         WikiPageDraft revisedDraft = wikiDraftService.requestChanges(draftId, userId, reviewerNote);
         return ResponseEntity.ok(revisedDraft);
+    }
+
+    /**
+     * Tác giả gửi lại bản thảo đã sửa từ trạng thái NEEDS_REVISION về PENDING.
+     * POST /api/mrp/drafts/{draftId}/submit-revision
+     */
+    @PostMapping("/drafts/{draftId}/submit-revision")
+    public ResponseEntity<WikiPageDraft> submitRevision(
+            @PathVariable Long draftId,
+            @RequestBody(required = false) Map<String, String> payload,
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
+            @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
+
+        Map<String, String> body = payload != null ? payload : Map.of();
+        String newContent = body.get("content");
+        String revisionNote = body.getOrDefault("note", "");
+        log.info("[MrpController] Submitting revision for draft ID: {} by user: {}", draftId, userId);
+
+        WikiPageDraft draft = wikiPageDraftRepository.findById(draftId)
+                .orElseThrow(() -> new IllegalArgumentException("Draft not found with ID: " + draftId));
+
+        UserPermissionContext perm = PermissionUtils.parse(userRolesHeader, userDepartmentsHeader, objectMapper);
+        if (!perm.isAdmin()) {
+            validateWorkspaceAccess(userId, draft.getWorkspaceId());
+        }
+
+        WikiPageDraft revised = wikiDraftService.submitRevision(draftId, userId, newContent, revisionNote);
+        return ResponseEntity.ok(revised);
+    }
+
+    /**
+     * Tác giả rút lại bản thảo (WITHDRAWN).
+     * POST /api/mrp/drafts/{draftId}/withdraw
+     */
+    @PostMapping("/drafts/{draftId}/withdraw")
+    public ResponseEntity<WikiPageDraft> withdrawDraft(
+            @PathVariable Long draftId,
+            @RequestHeader(value = "x-user-id", defaultValue = "system-user") String userId,
+            @RequestHeader(value = "x-user-roles", required = false) String userRolesHeader,
+            @RequestHeader(value = "x-user-departments", required = false) String userDepartmentsHeader) {
+
+        log.info("[MrpController] Withdrawing draft ID: {} by user: {}", draftId, userId);
+
+        WikiPageDraft draft = wikiPageDraftRepository.findById(draftId)
+                .orElseThrow(() -> new IllegalArgumentException("Draft not found with ID: " + draftId));
+
+        UserPermissionContext perm = PermissionUtils.parse(userRolesHeader, userDepartmentsHeader, objectMapper);
+        if (!perm.isAdmin()) {
+            validateWorkspaceAccess(userId, draft.getWorkspaceId());
+        }
+
+        WikiPageDraft withdrawn = wikiDraftService.withdrawDraft(draftId, userId);
+        return ResponseEntity.ok(withdrawn);
     }
 
     /**

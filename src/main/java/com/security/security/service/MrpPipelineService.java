@@ -724,7 +724,9 @@ public class MrpPipelineService {
             }
 
             log.info("[MRP Pipeline] [Refine Phase] Workspace được xác định để tạo Draft: {}", finalWorkspaceId);
-            
+
+            List<WikiPageDraft> createdDrafts = new ArrayList<>();
+
             // Build the list of available titles for wikilinks
             List<WikiPage> existingPages = wikiPageRepository.findByWorkspaceId(finalWorkspaceId);
             Set<String> allAvailableTitles = new HashSet<>();
@@ -966,18 +968,23 @@ public class MrpPipelineService {
                         .note("Automatically compiled from MRP pipeline.")
                         .build();
 
-                wikiPageDraftRepository.save(draft);
-                natsEventPublisher.publishWikiDraftUpdated(draft.getId(), draft.getTitle(), draft.getSlug(), draft.getWorkspaceId(), draft.getStatus().name(), userId);
-                log.info("[MRP Pipeline] [Refine Phase] Đã tạo Draft nháp ID: {} cho trang '{}'", draft.getId(), title);
+                WikiPageDraft savedDraft = wikiPageDraftRepository.save(draft);
+                createdDrafts.add(savedDraft);
+                natsEventPublisher.publishWikiDraftUpdated(savedDraft.getId(), savedDraft.getTitle(), savedDraft.getSlug(), savedDraft.getWorkspaceId(), savedDraft.getStatus().name(), userId);
+                log.info("[MRP Pipeline] [Refine Phase] Đã tạo Draft nháp ID: {} cho trang '{}'", savedDraft.getId(), title);
+            }
 
-                if (runAutoApproveDrafts) {
+            // VERIFY PHASE: runs after all drafts created, before auto-approve,
+            // so coverage gaps and conflict callouts are baked into content before commit.
+            runVerifyPhase(plan, planItems, createdDrafts);
+
+            if (runAutoApproveDrafts) {
+                for (WikiPageDraft d : createdDrafts) {
                     try {
-                        // skipIssueDetection=true: avoid flooding Gemini with per-page LLM calls
-                        // during batch pipeline runs (issue detection can be triggered manually later)
-                        wikiDraftService.approveDraft(draft.getId(), "SYSTEM", true);
-                        log.info("[MRP Pipeline] [Refine Phase] Auto-approved Draft ID: {}", draft.getId());
+                        wikiDraftService.approveDraft(d.getId(), "SYSTEM", true);
+                        log.info("[MRP Pipeline] [Refine Phase] Auto-approved Draft ID: {}", d.getId());
                     } catch (Exception e) {
-                        log.error("[MRP Pipeline] [Refine Phase] Lỗi tự động duyệt Draft ID {}: {}", draft.getId(), e.getMessage());
+                        log.error("[MRP Pipeline] [Refine Phase] Lỗi tự động duyệt Draft ID {}: {}", d.getId(), e.getMessage());
                     }
                 }
             }
@@ -1006,6 +1013,136 @@ public class MrpPipelineService {
             log.error("[MRP Pipeline] Gặp lỗi khi thực thi Kế hoạch Biên soạn: {}", e.getMessage(), e);
             throw new RuntimeException("Plan execution failed: " + e.getMessage(), e);
         }
+    }
+
+    // --- VERIFY PHASE ---
+
+    /**
+     * Phase VERIFY — runs after all drafts are created, before auto-approve.
+     * Three non-blocking checks:
+     *   1. Coverage: topics mentioned ≥3× in extracts but absent from plan → warn on plan.reviewNote
+     *   2. Conflict callouts: plan items with reviewItems → prepend callout block to draft content
+     *   3. Lifecycle status: seed/developing/mature/evergreen → appended to draft.note
+     */
+    private void runVerifyPhase(SourceCompilationPlan plan, List<Map<String, Object>> planItems, List<WikiPageDraft> drafts) {
+        log.info("[MRP Verify] Bắt đầu kiểm tra chất lượng cho {} drafts...", drafts.size());
+        try {
+            runCoverageCheck(plan, planItems);
+        } catch (Exception e) {
+            log.warn("[MRP Verify] Coverage check failed (non-fatal): {}", e.getMessage());
+        }
+        try {
+            runConflictCallouts(planItems, drafts);
+        } catch (Exception e) {
+            log.warn("[MRP Verify] Conflict callout phase failed (non-fatal): {}", e.getMessage());
+        }
+        try {
+            runLifecycleAssessment(drafts);
+        } catch (Exception e) {
+            log.warn("[MRP Verify] Lifecycle assessment failed (non-fatal): {}", e.getMessage());
+        }
+        log.info("[MRP Verify] Hoàn tất kiểm tra chất lượng.");
+    }
+
+    /**
+     * Coverage check: entities/concepts mentioned ≥3× in MAP extracts but not covered
+     * by any plan item title. Appends a warning to plan.reviewNote (non-blocking).
+     */
+    @SuppressWarnings("unchecked")
+    private void runCoverageCheck(SourceCompilationPlan plan, List<Map<String, Object>> planItems) {
+        List<SourceChunkExtract> chunks = sourceChunkExtractRepository
+                .findBySourceDocumentIdAndStatus(plan.getSourceDocumentId(), com.security.security.entity.enumeration.SourceChunkStatus.DONE);
+        if (chunks.isEmpty()) return;
+
+        Map<String, Integer> mentionCounts = new java.util.LinkedHashMap<>();
+        for (SourceChunkExtract chunk : chunks) {
+            if (chunk.getExtractJson() == null) continue;
+            try {
+                Map<String, Object> data = objectMapper.readValue(chunk.getExtractJson(), new TypeReference<Map<String, Object>>() {});
+                for (String field : List.of("entities", "concepts")) {
+                    for (Map<String, Object> item : (List<Map<String, Object>>) data.getOrDefault(field, List.of())) {
+                        String name = ((String) item.getOrDefault("name", "")).trim().toLowerCase();
+                        if (name.length() >= 3) mentionCounts.merge(name, 1, Integer::sum);
+                    }
+                }
+            } catch (Exception ex) {
+                log.warn("[MRP Verify] Cannot parse chunk {}: {}", chunk.getChunkIndex(), ex.getMessage());
+            }
+        }
+
+        Set<String> coveredTitles = planItems.stream()
+                .map(item -> ((String) item.getOrDefault("title", "")).trim().toLowerCase())
+                .collect(Collectors.toSet());
+
+        List<String> uncovered = mentionCounts.entrySet().stream()
+                .filter(e -> e.getValue() >= 3 && !coveredTitles.contains(e.getKey()))
+                .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
+                .limit(15)
+                .map(Map.Entry::getKey)
+                .collect(Collectors.toList());
+
+        if (!uncovered.isEmpty()) {
+            String warning = "⚠️ Coverage gaps (mentioned ≥3× but no wiki page planned): "
+                    + String.join(", ", uncovered);
+            log.warn("[MRP Verify] {}", warning);
+            String existing = plan.getReviewNote() != null ? plan.getReviewNote() + "\n\n" : "";
+            plan.setReviewNote(existing + warning);
+            sourceCompilationPlanRepository.save(plan);
+        }
+    }
+
+    /**
+     * Conflict callouts: for each plan item that carries reviewItems (contradictions flagged
+     * in Reduce phase), prepend an Obsidian-style warning callout block to the draft content.
+     */
+    @SuppressWarnings("unchecked")
+    private void runConflictCallouts(List<Map<String, Object>> planItems, List<WikiPageDraft> drafts) {
+        Map<String, WikiPageDraft> draftBySlug = drafts.stream()
+                .collect(Collectors.toMap(WikiPageDraft::getSlug, d -> d, (a, b) -> a));
+
+        for (Map<String, Object> item : planItems) {
+            List<String> reviewItems = (List<String>) item.getOrDefault("reviewItems", List.of());
+            if (reviewItems == null || reviewItems.isEmpty()) continue;
+
+            String slug = (String) item.get("slug");
+            WikiPageDraft draft = draftBySlug.get(slug);
+            if (draft == null || draft.getContent() == null) continue;
+
+            String callout = reviewItems.stream()
+                    .map(ri -> "> [!warning] **Cần review — Mâu thuẫn phát hiện bởi MRP:**\n> " + ri)
+                    .collect(Collectors.joining("\n\n"));
+
+            draft.setContent(callout + "\n\n" + draft.getContent());
+            wikiPageDraftRepository.save(draft);
+            log.info("[MRP Verify] Prepended {} conflict callout(s) to draft '{}'", reviewItems.size(), slug);
+        }
+    }
+
+    /**
+     * Lifecycle assessment: programmatically classify each draft as
+     * seed / developing / mature / evergreen based on content length and wikilink count.
+     * Result is appended to draft.note so reviewers can filter by maturity.
+     */
+    private void runLifecycleAssessment(List<WikiPageDraft> drafts) {
+        for (WikiPageDraft draft : drafts) {
+            String status = assessLifecycleStatus(draft.getContent());
+            String note = draft.getNote() != null ? draft.getNote() : "";
+            draft.setNote(note + " [lifecycle:" + status + "]");
+            wikiPageDraftRepository.save(draft);
+        }
+        log.info("[MRP Verify] Lifecycle assessment complete for {} drafts.", drafts.size());
+    }
+
+    private String assessLifecycleStatus(String content) {
+        if (content == null || content.isBlank()) return "seed";
+        int length = content.length();
+        int wikilinks = 0;
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\[\\[[^\\]]+\\]\\]").matcher(content);
+        while (m.find()) wikilinks++;
+        if (length < 600 || wikilinks < 1) return "seed";
+        if (length < 2000 || wikilinks < 3) return "developing";
+        if (length < 4000 || wikilinks < 5) return "mature";
+        return "evergreen";
     }
 
     // --- UTILITIES ---

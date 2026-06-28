@@ -704,6 +704,51 @@ public class WikiDraftService {
     }
 
     /**
+     * Author resubmits a NEEDS_REVISION draft back to PENDING for another review cycle
+     */
+    @Transactional
+    public WikiPageDraft submitRevision(Long draftId, String authorId, String newContent, String revisionNote) {
+        log.info("[WikiDraftService] Submitting revision for draft ID: {} by {}", draftId, authorId);
+        WikiPageDraft draft = wikiPageDraftRepository.findById(draftId)
+                .orElseThrow(() -> new IllegalArgumentException("Draft not found with ID: " + draftId));
+
+        if (draft.getStatus() != WikiPageDraftStatus.NEEDS_REVISION) {
+            throw new IllegalStateException("Only NEEDS_REVISION drafts can be resubmitted. Current status: " + draft.getStatus());
+        }
+
+        if (newContent != null && !newContent.isBlank()) {
+            draft.setContent(newContent);
+        }
+        draft.setStatus(WikiPageDraftStatus.PENDING);
+        draft.setReviewerNote(null);
+        String existingNote = draft.getNote() != null ? draft.getNote() : "";
+        if (revisionNote != null && !revisionNote.isBlank()) {
+            draft.setNote(existingNote.isBlank() ? revisionNote : existingNote + " | " + revisionNote);
+        }
+
+        WikiPageDraft saved = wikiPageDraftRepository.save(draft);
+        natsEventPublisher.publishWikiDraftUpdated(saved.getId(), saved.getTitle(), saved.getSlug(),
+                saved.getWorkspaceId(), "PENDING", authorId);
+        return saved;
+    }
+
+    /**
+     * Author withdraws a draft (sets to WITHDRAWN, preventing further review)
+     */
+    @Transactional
+    public WikiPageDraft withdrawDraft(Long draftId, String authorId) {
+        log.info("[WikiDraftService] Withdrawing draft ID: {} by {}", draftId, authorId);
+        WikiPageDraft draft = wikiPageDraftRepository.findById(draftId)
+                .orElseThrow(() -> new IllegalArgumentException("Draft not found with ID: " + draftId));
+
+        draft.setStatus(WikiPageDraftStatus.WITHDRAWN);
+        WikiPageDraft saved = wikiPageDraftRepository.save(draft);
+        natsEventPublisher.publishWikiDraftUpdated(saved.getId(), saved.getTitle(), saved.getSlug(),
+                saved.getWorkspaceId(), "WITHDRAWN", authorId);
+        return saved;
+    }
+
+    /**
      * Retrieve all pending drafts
      */
     public List<WikiPageDraft> getPendingDrafts() {
