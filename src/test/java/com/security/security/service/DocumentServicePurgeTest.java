@@ -34,6 +34,7 @@ class DocumentServicePurgeTest {
     @Mock private DocumentProfiler documentProfiler;
     @Mock private DoclingClient doclingClient;
     @Mock private MrpPipelineService mrpPipelineService;
+    @Mock private PostProcessingCoordinator postProcessingCoordinator;
     @Mock private com.security.security.event.NatsEventPublisher natsEventPublisher;
     @Mock private WikiPageRepository wikiPageRepository;
     @Mock private WikiPageDraftRepository wikiPageDraftRepository;

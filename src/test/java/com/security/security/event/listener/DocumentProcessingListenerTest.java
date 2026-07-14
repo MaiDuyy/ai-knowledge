@@ -11,6 +11,7 @@ import com.security.security.service.EmbeddingService;
 import com.security.security.service.tika.DocumentProfiler;
 import com.security.security.service.tika.SemanticMarkdownChunker;
 import com.security.security.service.MrpPipelineService;
+import com.security.security.service.PostProcessingCoordinator;
 import com.security.security.event.NatsEventPublisher;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -43,6 +44,7 @@ class DocumentProcessingListenerTest {
     @Mock private DocumentProfiler documentProfiler;
     @Mock private NatsEventPublisher natsEventPublisher;
     @Mock private MrpPipelineService mrpPipelineService;
+    @Mock private PostProcessingCoordinator postProcessingCoordinator;
     @Mock private SourceImageRepository sourceImageRepository;
     @Mock private StringRedisTemplate redisTemplate;
     @Mock private ValueOperations<String, String> valueOperations;
@@ -126,8 +128,8 @@ class DocumentProcessingListenerTest {
         assertThat(finalMarkdown).contains("image://" + clonedImage.getId().toString());
         assertThat(finalMarkdown).doesNotContain("image://" + oldImageId.toString());
 
-        // Verify document is set to COMPLETED and saved
-        assertThat(newDoc.getStatus()).isEqualTo(DocStatus.COMPLETED);
+        // Post-processing is async via coordinator — COMPLETED is set after subtasks finish
+        verify(postProcessingCoordinator).startPostProcessing(eq(newDoc), eq(finalMarkdown), eq(chunkResults));
         assertThat(newDoc.getMarkdownContent()).isEqualTo(finalMarkdown);
         verify(documentRepository, atLeastOnce()).save(newDoc);
     }
