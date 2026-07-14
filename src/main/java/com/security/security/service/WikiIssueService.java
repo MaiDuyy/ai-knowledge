@@ -221,20 +221,21 @@ public class WikiIssueService {
 
                 Identify any of these issue types found in the content:
                 - MIXED_ENTITIES: Page mixes multiple unrelated entities without clear structure
-                - CONTRADICTORY_FACTS: Page contains contradictory statements about the same subject
-                - OUT_OF_DATE: Content appears outdated based on context clues
-                - MISSING_LINKS: Mentions entities that likely have wiki pages but uses no [[slug|link]] syntax
-                - POOR_QUALITY: Content is incomplete, incoherent, or very low quality
-                - HALLUCINATION: Contains fabricated or unsupported claims
+                - CONTRADICTORY_FACTS: Page contains contradictory statements, dates, configurations, or facts about the same subject
+                - OUT_OF_DATE: Content appears outdated or superseded based on context clues
+                - MISSING_LINKS: Mentions important entities or concepts that likely have wiki pages in the system but does not wrap them in [[slug|name]] link syntax
+                - POOR_QUALITY: Content is incomplete, incoherent, badly formatted, or very low quality
+                - HALLUCINATION: Contains fabricated, exaggerated, or unsupported claims not typical of a fact-based document
 
                 Return ONLY a JSON array. If no issues found, return [].
-                Format: [{"type": "ISSUE_TYPE", "description": "clear explanation", "evidence": "specific text excerpt showing the issue", "suggestedFix": "how to fix it"}]
+                Format: [{"type": "ISSUE_TYPE", "description": "clear explanation", "evidence": "exact direct quote", "suggestedFix": "how to fix it"}]
 
                 Rules:
-                - Only report real, clear issues — not stylistic preferences
-                - evidence must be a direct quote from the content
-                - suggestedFix must be actionable
-                - Return [] if no significant issues exist
+                - Only report real, clear issues — not stylistic preferences or minor syntax choices.
+                - **Strict Evidence Matching**: The 'evidence' field MUST contain a literal, exact substring quote from the 'Content' text provided. Do NOT paraphrase, summarize, or alter the evidence text in any way.
+                - suggestedFix must be highly actionable and specific to the problem.
+                - Return [] if no significant issues exist.
+                - **JSON Formatting Rule**: Do NOT use literal newline characters inside JSON string values. Use escaped '\\n' for newlines. Return only valid JSON without markdown wrapping blocks.
                 """.formatted(page.getTitle(), page.getSlug(), content);
     }
 }

@@ -509,6 +509,16 @@ public class WikiDraftService {
 
     @Transactional
     public void refreshLinks(Long fromPageId, String fromSlug, String contentMd, String workspaceId) {
+        refreshLinks(fromPageId, fromSlug, contentMd, workspaceId, true);
+    }
+
+    /**
+     * @param includeImplicitMentions when false, only explicit {@code [[wikilink]]} syntax is resolved
+     *                                (used by GERBIL benchmark scenarios with controlled manifest content)
+     */
+    @Transactional
+    public void refreshLinks(Long fromPageId, String fromSlug, String contentMd, String workspaceId,
+                             boolean includeImplicitMentions) {
         try {
             wikiLinkRepository.deleteByFromPageId(fromPageId);
             wikiLinkRepository.flush(); // Force database deletion immediately to avoid unique key conflicts during re-insert
@@ -545,18 +555,20 @@ public class WikiDraftService {
                 }
             }
 
-            // Pass 2: implicit title-mention links — catches pages compiled without [[...]] syntax
-            // Strips markdown formatting chars first, then does case-insensitive substring match.
-            String contentForMention = contentMd.toLowerCase()
-                    .replaceAll("[*_`#>\\[\\]|]", " ")
-                    .replaceAll("\\s+", " ");
-            for (java.util.Map.Entry<String, String> entry : titleToSlug.entrySet()) {
-                String titleKey = entry.getKey();   // already lowercase
-                String targetSlug = entry.getValue();
-                // Skip very short titles (high false-positive rate) and self-references
-                if (titleKey.length() < 5 || targetSlug.equals(fromSlug)) continue;
-                if (contentForMention.contains(titleKey)) {
-                    uniqueSlugs.add(targetSlug);
+            if (includeImplicitMentions) {
+                // Pass 2: implicit title-mention links — catches pages compiled without [[...]] syntax
+                // Strips markdown formatting chars first, then does case-insensitive substring match.
+                String contentForMention = contentMd.toLowerCase()
+                        .replaceAll("[*_`#>\\[\\]|]", " ")
+                        .replaceAll("\\s+", " ");
+                for (java.util.Map.Entry<String, String> entry : titleToSlug.entrySet()) {
+                    String titleKey = entry.getKey();   // already lowercase
+                    String targetSlug = entry.getValue();
+                    // Skip very short titles (high false-positive rate) and self-references
+                    if (titleKey.length() < 5 || targetSlug.equals(fromSlug)) continue;
+                    if (contentForMention.contains(titleKey)) {
+                        uniqueSlugs.add(targetSlug);
+                    }
                 }
             }
             
@@ -784,10 +796,13 @@ public class WikiDraftService {
         String systemPrompt = """
             You are an AI Co-Editor helping to insert internal wiki links.
             Your task is to analyze the provided markdown content and identify terms, concepts, or exact matches that correspond to the list of allowed slugs.
-            For any identified keyword, wrap it in double brackets with its matching slug, like this: [[slug]].
-            If a term matches a slug but is written differently in the text (e.g. capitalized, plural, or translated), wrap the text and reference the slug, like this: [[slug|original text]].
-            Only link terms that correspond to the provided list of allowed slugs. Do not invent slugs.
-            Do not add extra explanations or commentary, return ONLY the updated markdown content.
+            
+            WIKILINKING RULES:
+            1. For any identified keyword, wrap it in double brackets with its matching slug, like this: [[slug]].
+            2. If a term matches a slug but is written differently in the text (e.g. capitalized, plural, or translated alias), wrap the text and reference the slug, like this: [[slug|original text]]. (For example: if slug is "entity/jwt-auth" and the text is "JWT Authentication", write [[entity/jwt-auth|JWT Authentication]]).
+            3. Only link terms that correspond exactly to the provided list of allowed slugs. Do NOT invent slugs.
+            4. **No Link Spamming**: Only wrap the first significant occurrence of a term in each major section. Do NOT link the same term repeatedly in every sentence.
+            5. Do NOT add extra explanations or commentary, do NOT wrap the output in markdown code blocks (such as ```markdown ... ```). Return ONLY the updated markdown content.
             
             Allowed slugs:
             %s
