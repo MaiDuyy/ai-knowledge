@@ -28,74 +28,8 @@ import java.util.stream.Collectors;
 @Slf4j
 public class MrpPipelineService {
 
-    private static final String MAP_PHASE_SCHEMA = """
-        {
-          "type": "object",
-          "properties": {
-            "entities": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "properties": {
-                  "name": { "type": "string" },
-                  "type": { "type": "string" },
-                  "description": { "type": "string" }
-                },
-                "required": ["name", "type", "description"]
-              }
-            },
-            "concepts": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "properties": {
-                  "name": { "type": "string" },
-                  "description": { "type": "string" }
-                },
-                "required": ["name", "description"]
-              }
-            },
-            "claims": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "properties": {
-                  "subject": { "type": "string" },
-                  "claim": { "type": "string" },
-                  "sourceContext": { "type": "string" }
-                },
-                "required": ["subject", "claim", "sourceContext"]
-              }
-            },
-            "contradictions": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "properties": {
-                  "subject": { "type": "string" },
-                  "claim_a": { "type": "string" },
-                  "claim_b": { "type": "string" },
-                  "resolution": { "type": "string" }
-                },
-                "required": ["subject", "claim_a", "claim_b"]
-              }
-            },
-            "recommendations": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "properties": {
-                  "title": { "type": "string" },
-                  "description": { "type": "string" },
-                  "priority": { "type": "string" }
-                },
-                "required": ["title", "description", "priority"]
-              }
-            }
-          },
-          "required": ["entities", "concepts", "claims", "contradictions", "recommendations"]
-        }
-        """;
+    /** @see MrpProductionPrompts#MAP_PHASE_SCHEMA */
+    private static final String MAP_PHASE_SCHEMA = MrpProductionPrompts.MAP_PHASE_SCHEMA;
 
     private static final String REDUCE_PHASE_SCHEMA = """
         {
@@ -314,42 +248,7 @@ public class MrpPipelineService {
                             }
                         }
 
-                        String mapSystemPrompt = """
-                            You are an expert enterprise knowledge extraction agent.
-                            Your job is to read the provided text chunk and extract key structured details.
-
-                            CRITICAL GROUNDEDNESS DIRECTIVES:
-                            - You must ONLY extract entities, concepts, and claims that are explicitly mentioned in the provided text chunk.
-                            - Do NOT use any external background knowledge, prior assumptions, or web search facts to write descriptions or definitions.
-                            - The description/definition of each entity or concept MUST be constructed solely from the facts provided in the text. If the text does not describe the entity, use a minimal description derived strictly from the text context, or leave it brief.
-                            - Every claim's 'claim' and 'sourceContext' fields MUST correspond to the exact facts and sentences in the text chunk. Do NOT extrapolate or assume anything.
-
-                            You must extract:
-                            1. Entities: Organizations, products, technologies, tools, platforms, or people. Give each a clear description.
-                            2. Concepts: Core paradigms, frameworks, architectural designs, procedures, rules, policies. Define each precisely.
-                            3. Claims: Facts, guidelines, configurations, assertions, metrics, or requirements. Detail each claim and link it to the subject.
-                            4. Contradictions: Cases where the text contains conflicting claims about the same subject. Note both sides and any resolution if the text provides one. If none found, return empty array.
-                            5. Recommendations: Actionable suggestions, improvement proposals, or best practices found in text. Classify priority as HIGH, MEDIUM, or LOW. If none found, return empty array.
-
-                            You must return ONLY a valid JSON object. Do NOT wrap the response in markdown blocks (such as ```json). Do NOT add any conversational text before or after the JSON.
-                            {
-                              "entities": [
-                                {"name": "Entity Name", "type": "organization/technology/etc", "description": "Concise description of the entity"}
-                              ],
-                              "concepts": [
-                                {"name": "Concept Name", "description": "Precise definition of this concept"}
-                              ],
-                              "claims": [
-                                {"subject": "Entity/Concept name", "claim": "Fact, metric, assertion, or config", "sourceContext": "Exact text sentence or clear context"}
-                              ],
-                              "contradictions": [
-                                {"subject": "Topic", "claim_a": "First conflicting claim", "claim_b": "Second conflicting claim", "resolution": "Resolution if any"}
-                              ],
-                              "recommendations": [
-                                {"title": "Action title", "description": "What should be done", "priority": "HIGH/MEDIUM/LOW"}
-                              ]
-                            }
-                            """;
+                        String mapSystemPrompt = MrpProductionPrompts.MAP_SYSTEM_PROMPT;
 
                         log.info("[MRP Pipeline] [Map Phase] Đang gửi yêu cầu LLM trích xuất cho chunk {}...", index);
                         String response = callChatWithRetry(provider, mapSystemPrompt, chunkText, MAP_PHASE_SCHEMA, "mrp-map-" + documentId + "-" + index);
@@ -585,9 +484,25 @@ public class MrpPipelineService {
 
                     CRITICAL DEDUPLICATION DIRECTIVES:
                     - Compare the newly extracted topics in the input list with the existing pages in the <existing_pages> block.
-                    - If a newly extracted topic is semantically the same as (or highly related/synonymous with) an existing page (e.g. "JWT" vs "JSON Web Token", or "Docker Containers" vs "Docker"), you MUST deduplicate them:
-                      * Reuse the existing page's title and slug.
-                      * Set "action" to "UPDATE".
+                    - If a newly extracted topic is semantically the same as (or highly related/synonymous with) an existing page, you MUST deduplicate them:
+                      * Merge criteria (ALL must be true):
+                        1. The new item and existing page refer to the exact same real-world entity/concept.
+                        2. The match is a name variation (e.g. abbreviation "JWT" ↔ "JSON Web Token", translation "苹果" ↔ "Apple", or minor spelling difference).
+                        3. The types are compatible (Never merge an entity into a concept or vice versa).
+                      * Examples of CORRECT merges:
+                        - "Acme Corp" ↔ "Acme Corporation" (abbreviation)
+                        - "RAG" ↔ "Retrieval-Augmented Generation" (acronym)
+                        - "苹果公司" ↔ "Apple Inc." (translation)
+                      * Examples of INCORRECT merges (DO NOT MERGE):
+                        - Competing products/models (e.g. "Hunyuan Model" ↔ "Qwen Model" — competing products are DIFFERENT entities).
+                        - Different products of same type (e.g. "iPhone 15" ↔ "Huawei Mate 60").
+                        - Version differences (e.g. "GPT-4" ↔ "GPT-3.5" — different versions are distinct entities).
+                        - Related but distinct concepts (e.g. "AI Safety" ↔ "Content Review Mechanism", or "Machine Learning" ↔ "Neural Networks").
+                        - Different tasks/processes in same domain (e.g. "Athlete Registration" ↔ "Degree Verification").
+                        - Related aspects of a topic (e.g. "Competition Categories" ↔ "Age Groups", or "Performance Standard" ↔ "Competition Rounds").
+                        - Different documents/certificates (e.g. "居民身份证 / Resident ID Card" ↔ "工作居住证 / Work Residence Permit", or "驾驶证 / Driver's License" ↔ "行驶证 / Vehicle Registration", or "学位证 / Degree Certificate" ↔ "毕业证 / Graduation Certificate").
+                      * Key principle: "related ≠ same". Sharing a few characters in their name, or belonging to the same domain / document family / industry, is NOT a reason to merge. When in doubt, do NOT merge. It is far better to have two separate pages than to wrongly merge two different things.
+                      * Reuse the existing page's title and slug. Set "action" to "UPDATE".
                       * Set "wikiPageId" to the database ID of the existing page (which you can find by checking the existing page's list in <existing_pages>).
                     - If the newly extracted topic is NOT in the existing pages, set "action" to "CREATE" and "wikiPageId" to null.
 
@@ -595,7 +510,7 @@ public class MrpPipelineService {
                     - Assign folder categories ("tags") to each plan item so the pages are organized into a navigation directory.
                     - Try to REUSE the existing folder labels from <existing_folders> character-for-character if they fit.
                     - If no existing folder fits, you can CREATE new, broad, durable folders (e.g. "Security", "Configuration", "Infrastructure", "General"). Group items of the same kind under the same folder.
-                    - Each plan item can have 1 to 3 tags (hierarchical categories from broad to narrow, e.g. "Security" or "Security, Authentication").
+                    - Each plan item can have 1 to 3 tags (hierarchical categories from broad to narrow, e.g. "Security" or "Security, Authentication"). Prefer at most 2 levels of folder path depth.
 
                     Other guidelines:
                     1. Consolidate topics that are highly related to avoid a cluttered Wiki.
@@ -794,7 +709,7 @@ public class MrpPipelineService {
                     }
                 }
 
-                // ── DIRECTION 3: SOURCE page = full document markdown + injected wiki links ──
+                // ── DIRECTION 3: SOURCE page = compiled summary from raw document markdown ──
                 if ("source".equals(normalizedPageType)) {
                     String rawMarkdown = (doc != null && doc.getMarkdownContent() != null)
                             ? doc.getMarkdownContent() : "";
@@ -803,13 +718,36 @@ public class MrpPipelineService {
                                 ? keyClaims.stream().map(c -> "- " + c).collect(Collectors.joining("\n"))
                                 : "";
                     }
-                    // Add document title heading if the markdown doesn't already start with #
-                    String docTitle = title;
-                    String finalMarkdown = rawMarkdown.stripLeading().startsWith("#")
-                            ? rawMarkdown
-                            : "# " + docTitle + "\n\n" + rawMarkdown;
-                    generatedContent = injectWikilinks(finalMarkdown, allAvailableTitles);
-                    log.info("[MRP Pipeline] [Refine Phase] SOURCE page '{}': using full document markdown ({} chars)", title, generatedContent.length());
+
+                    String sourceSystemPrompt = String.format("""
+                        You are a professional technical wiki compiler. Given the following document content, create a structured wiki summary page in Markdown format.
+                        
+                        CRITICAL GROUNDEDNESS & CITATION DIRECTIVES:
+                        - Base the summary STRICTLY on the document text provided below — do not extrapolate or inject any external facts, details, or assumptions.
+                        - Do NOT add rhetorical filler phrases like "nhằm mục đích...", "cam kết mang lại...", "có ý nghĩa quan trọng", "nhằm giúp...", "designed to...", "aims to provide...".
+                        
+                        WIKILINK DIRECTIVES (CRITICAL FOR KNOWLEDGE GRAPH):
+                        - You must scan the generated text to identify all mentions of the topics in this list: [%s].
+                        - When you mention any topic listed, you MUST wrap it in double brackets like [[Topic Title]] on its first significant mention in each section.
+                        - If the topic is written in a different grammatical variation (e.g. plural, lower-cased, possessive suffix, or translated alias), you MUST use the piped syntax: [[Topic Title|grammatical variation]] (for example: [[JWT Authentication|JWT authentications]], [[Docker|Docker's containers]], or [[Thực thể|thực thể]]).
+                        - ONLY link to topics that are exactly in the provided list. Do NOT create links to pages that are not in this list.
+                        
+                        IMAGE DIRECTIVES (CRITICAL FOR INLINE IMAGES):
+                        - You MUST preserve all image markers of the form ![caption](image://<uuid>) exactly as they are written in the text. Place the images where they are contextually relevant to the text. Do NOT invent new UUIDs or change the image:// prefix.
+                        
+                        STRUCTURE REQUIREMENTS:
+                        1. Start with a "# %s" title heading.
+                        2. Write a comprehensive summary of the document in Markdown format. Include the key facts, arguments, and conclusions.
+                        3. Use proper heading hierarchy (## for sections, ### for subsections).
+                        4. At the end, include a "## Key Takeaways" section with bullet points.
+                        5. Output ONLY the completed markdown content.
+                        """, availableTitlesList, title);
+
+                    log.info("[MRP Pipeline] [Refine Phase] SOURCE page '{}': compiling structured summary via LLM", title);
+                    generatedContent = provider.streamChat(sourceSystemPrompt, rawMarkdown, null, "mrp-source-" + slug)
+                            .collectList()
+                            .map(list -> String.join("", list))
+                            .block();
 
                     if ("UPDATE".equals(action) && wikiPageId != null) {
                         WikiPage page = wikiPageRepository.findById(wikiPageId).orElse(null);
@@ -824,7 +762,7 @@ public class MrpPipelineService {
 
                     // --- PROMPT MERGE ---
                     String mergeSystemPrompt = String.format("""
-                        You are an expert technical wiki compiler. Your task is to merge new facts/content into an existing wiki page.
+                        You are an expert technical wiki compiler. Your task is to merge new facts/content into an existing wiki page (Title: %s).
                         
                         CRITICAL GROUNDEDNESS & CITATION DIRECTIVES:
                         - You are strictly prohibited from generating any information, claims, assertions, details, metrics, or instructions that are not explicitly present in the "NEW CLAIMS TO MERGE" (check the "[Source Context: ...]" sections).
@@ -834,6 +772,9 @@ public class MrpPipelineService {
                         - **Close to Source Wording**: Stay close to the source wording. Reuse the source's own sentences; you may lightly reorder, deduplicate, and join related sentences, but do NOT rephrase for style, do NOT expand short statements into longer ones, and do NOT invent transitional sentences.
                         - **Do NOT Over-Structure**: Only introduce a section heading (##, ###) if the source itself uses that heading OR the page already has one from existing content. Avoid inventing a hierarchy of empty subsections.
                         - **Do NOT add rhetorical filler**: Phrases like "nhằm mục đích...", "cam kết mang lại...", "có ý nghĩa quan trọng", "nhằm giúp...", "designed to...", "aims to provide..." MUST NOT appear unless they are literally present in the source chunks.
+                        
+                        SCOPE & CONFLICT CHECK:
+                        - Verify that the "NEW CLAIMS TO MERGE" are actually about **%s**. If a piece of new info clearly belongs to a DIFFERENT but related topic (e.g. this page is about "Resident ID Card" but new info is about "Work Residence Permit"), you MUST REJECT that part of the new information and DO NOT add it.
                         
                         CONTRADICTIONS DIRECTIVES:
                         - If a new claim directly contradicts existing content, check if the newer info clearly supersedes it. If so, update the text to reflect the newer cited information AND add a brief "Contradictions / Updates" section at the bottom summarizing the change with citations.
@@ -854,7 +795,7 @@ public class MrpPipelineService {
                         2. Maintain the structured, professional markdown style (titles, tables, bold text).
                         3. DO NOT delete, truncate, or lose any valuable context or sections from the original article.
                         4. Output ONLY the completed, fully updated markdown content.
-                        """, availableTitlesList, availableTitlesList);
+                        """, title, title, availableTitlesList);
 
                     String imageSection = "";
                     List<String> imageMarkers = collectRelevantImageMarkers(keyClaims, fullText, normalizedPageType);
@@ -904,8 +845,11 @@ public class MrpPipelineService {
                         - Do NOT extrapolate. If the context is very brief, write a very short, concise, but accurate wiki entry rather than adding hallucinated details or external knowledge.
                         - **Mandatory Tracing**: Any factual claim, entity, or numerical data MUST be followed by its inline citation to the appropriate source chunk (e.g. [Source Context: ...]).
                         - **Close to Source Wording**: Stay close to the source wording. Reuse the source's own sentences; you may lightly reorder, deduplicate, and join related sentences, but do NOT rephrase for style, do NOT expand short statements into longer ones, and do NOT invent transitional sentences.
-                        - **Do NOT Over-Structure**: Only introduce a section heading (##, ###) if the source itself uses that heading. For flat source text, a single "# {Topic}" heading plus 1-2 short paragraphs and a flat list of facts is preferred over inventing a hierarchy of empty subsections.
+                        - **Do NOT Over-Structure**: Only introduce a section heading (##, ###) if the source itself uses that heading. For flat source text, a single "# %s" heading plus 1-2 short paragraphs and a flat list of facts is preferred over inventing a hierarchy of empty subsections.
                         - **Do NOT add rhetorical filler**: Phrases like "nhằm mục đích...", "cam kết mang lại...", "có ý nghĩa quan trọng", "nhằm giúp...", "designed to...", "aims to provide..." MUST NOT appear unless they are literally present in the source chunks.
+                        
+                        SCOPE DISCIPLINE:
+                        - Ensure that the generated page is strictly and solely about **%s**. If any claims provided belong to a different topic, DO NOT write them on this page.
                         
                         WIKILINK DIRECTIVES (CRITICAL FOR KNOWLEDGE GRAPH):
                         - You must scan the generated text to identify all mentions of the topics in this list: [%s].
@@ -923,7 +867,7 @@ public class MrpPipelineService {
                         3. Thoroughly structure the key claims/facts into clean markdown paragraphs or lists, citing the details.
                         4. Use markdown formatting like bold text, lists, and tables where suitable to maximize readability.
                         5. Output ONLY the raw markdown content.
-                        """, availableTitlesList, availableTitlesList);
+                        """, title, title, availableTitlesList);
 
                     String imageSection = "";
                     List<String> imageMarkers = collectRelevantImageMarkers(keyClaims, fullText, normalizedPageType);

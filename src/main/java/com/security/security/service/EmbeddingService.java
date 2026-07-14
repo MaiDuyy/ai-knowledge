@@ -509,10 +509,21 @@ public class EmbeddingService {
         try {
             log.info("[EmbeddingService] Generating document summary");
             String prompt = """
-                    Bạn là một AI chuyên tóm tắt tài liệu kỹ thuật.
-                    Hãy tóm tắt tài liệu sau đây thành một bản tóm tắt ngắn gọn, súc tích (khoảng 3-5 câu), tập trung vào các ý chính, mục tiêu và kết quả chính của tài liệu.
-                    Trả về trực tiếp văn bản tóm tắt, không có phần giải thích hay lời mở đầu/kết thúc.
-                    
+                    Bạn là một chuyên gia tóm tắt tài liệu chính xác. Nhiệm vụ của bạn là tóm tắt nội dung cốt lõi của tài liệu được cung cấp dưới đây. Bản tóm tắt phải dựa TRÊN THỰC TẾ nội dung tài liệu — tuyệt đối không suy đoán từ tên tệp, tiêu đề hoặc bất kỳ manh mối bên ngoài nào.
+
+                    ## Các bước thực hiện:
+                    1. Đọc nội dung được cung cấp và xác định chủ đề thực tế của tài liệu từ chính văn bản đó.
+                    2. Trích xuất 3-5 điểm chính hoặc chủ đề chính hiển thị rõ ràng trong tài liệu.
+                    3. Viết một bản tóm tắt mạch lạc kết hợp các điểm chính này.
+
+                    ## Yêu cầu cốt lõi:
+                    - Độ dài bản tóm tắt: khoảng 100-300 từ.
+                    - Chỉ tạo bản tóm tắt dựa trên nội dung được cung cấp, không thêm bất kỳ thông tin nào ngoài tài liệu.
+                    - Hãy chắc chắn rằng bản tóm tắt nắm bắt được các thông tin quan trọng nhất và các kết luận chính.
+                    - Trả về trực tiếp văn bản tóm tắt, không kèm theo bất kỳ lời mở đầu, tiền tố hoặc lời giải thích nào.
+                    - Sử dụng văn phong khách quan, trung lập.
+                    - Nếu tài liệu trống hoặc không có nội dung văn bản đáng kể, hãy trả về chính xác dòng: "Không có nội dung văn bản nào được trích xuất từ tài liệu này." và không viết thêm gì khác.
+
                     Tài liệu:
                     %s
                     """.formatted(markdownContent);
@@ -564,19 +575,21 @@ public class EmbeddingService {
                         try {
                             String chunkText = child.getChunkText();
                             String prompt = """
-                                    Bạn là một AI chuyên tạo câu hỏi tự động từ văn bản để phục vụ hệ thống RAG (Retrieval-Augmented Generation).
-                                    Hãy đọc đoạn văn bản dưới đây và tạo ra từ 3 đến 5 câu hỏi thực tế mà người dùng có thể hỏi để tìm kiếm thông tin có trong đoạn văn bản này.
-                                    Các câu hỏi phải rõ ràng, cụ thể và có thể trả lời trực tiếp dựa trên thông tin trong đoạn văn bản.
-                                    
-                                    Quy tắc trả về:
-                                    - Mỗi câu hỏi nằm trên một dòng riêng biệt.
-                                    - Không thêm số thứ tự, không thêm dấu gạch đầu dòng, không có phần giới thiệu hay kết luận.
-                                    - Ví dụ:
-                                    Làm thế nào để cấu hình JWT?
-                                    Thời gian hết hạn mặc định của token là bao lâu?
-                                    
-                                    Đoạn văn bản:
+                                    Bạn là một trợ lý tạo câu hỏi tự động được tối ưu hóa cho hệ thống tìm kiếm thông tin (RAG). Mục tiêu của bạn là tạo ra các câu hỏi mà đoạn <main_content> dưới đây có thể trả lời TỐT NHẤT — những câu hỏi mà người dùng thực tế sẽ hỏi khi họ thực sự cần thông tin này.
+
+                                    ## Quy tắc chất lượng câu hỏi:
+                                    - Tập trung vào các câu hỏi mà nội dung cung cấp câu trả lời ĐẦY ĐỦ hoặc ĐÁNG KỂ, không chỉ là nhắc qua loa.
+                                    - Ưu tiên các câu hỏi về chủ đề chính, khái niệm cốt lõi, hướng dẫn thực hành (how-tos) và kết luận — KHÔNG tạo câu hỏi về các chi tiết vụn vặt hoặc các sự kiện cô lập.
+                                    - Các câu hỏi phải phản ánh đúng ý định tìm kiếm thực tế của người dùng: "Làm thế nào để...", "Cấu hình ... như thế nào?", "... là gì?", "Tại sao...", "Các thực hành tốt nhất cho...".
+                                    - Mỗi câu hỏi phải tự hoàn chỉnh: KHÔNG dùng đại từ thay thế (như "nó", "cái này", "tài liệu này"); hãy dùng tên thực thể/khái niệm cụ thể.
+                                    - BẮT BUỘC mỗi câu hỏi phải kết thúc bằng dấu chấm hỏi '?'. Nếu không có dấu chấm hỏi, hệ thống sẽ tự động lọc bỏ.
+                                    - Mỗi câu hỏi phải ngắn gọn và rõ ràng, dưới 30 từ.
+                                    - Không đánh số thứ tự, không thêm ký tự gạch đầu dòng, không thêm bất kỳ lời giới thiệu hay kết luận nào. Mỗi câu hỏi nằm trên một dòng riêng biệt.
+                                    - Hãy tạo ra từ 3 đến 5 câu hỏi bằng tiếng Việt.
+
+                                    <main_content>
                                     %s
+                                    </main_content>
                                     """.formatted(chunkText);
 
                             String response = chatModel.call(prompt);

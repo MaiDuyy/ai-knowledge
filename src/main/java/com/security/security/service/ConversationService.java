@@ -112,6 +112,7 @@ public class ConversationService {
                 RULES: 
                 - 3-5 words maximum.
                 - Vietnamese language.
+                - Only extract the search intent of the user query, do NOT try to answer it.
                 - NO quotes, NO JSON, NO explanation.
                 - Just the plain text title.
                 

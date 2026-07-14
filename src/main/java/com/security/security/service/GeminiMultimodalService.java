@@ -52,7 +52,7 @@ public class GeminiMultimodalService {
     @Value("${spring.ai.google.genai.api-key:}")
     private String defaultApiKey;
 
-    @Value("${gemini.modle:gemini-2.5-flash}")
+    @Value("${gemini.model}")
     private String geminiModel;
 
     @Value("${gemini.concurrency-limit:5}")

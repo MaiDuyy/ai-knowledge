@@ -86,7 +86,7 @@ public class MessagingServiceClient {
             return result;
         } catch (Exception e) {
             log.error("[Agent Tool] getRecentMessages error for chatId={}: {}", chatId, e.getMessage());
-            return List.of();
+            return List.of();   
         }
     }
 
