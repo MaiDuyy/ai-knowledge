@@ -6,6 +6,7 @@ target/
 src/test
 uploads/
 src/main/resources/application-dev.properties
+src/main/test/resources/application-test.properties
 docs/
 ### STS ###
 .apt_generated
@@ -15,6 +16,7 @@ docs/
 .settings
 .springBeans
 .sts4-cache
+
 
 ### IntelliJ IDEA ###
 .idea
@@ -34,7 +36,21 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### Hybrid Ragas evaluation (Python) ###
+.venv-bench/
+benchmark-eval/.cache/
+__pycache__/
+*.pyc
+.pytest_cache/
 # .github
 Jenkinsfile
 openapi.json
 openapi.utf8.json
+
+# Benchmark
+benchmark/
+benchmark-eval/
+scripts/
+benchmark_results_evaluation.md
+benchmark_results_mrp_wiki.md

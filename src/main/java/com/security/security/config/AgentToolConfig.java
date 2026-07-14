@@ -13,6 +13,8 @@ import com.security.security.entity.WikiPage;
 import com.security.security.entity.enumeration.WikiPageType;
 import com.security.security.entity.enumeration.WikiPageDraftStatus;
 import com.security.security.service.RAGService;
+import com.security.security.service.WikiIssueService;
+import com.security.security.dto.WikiIssueDTO;
 import com.security.security.dtorequest.RAGQueryPayload;
 
 import java.util.List;
@@ -31,6 +33,7 @@ public class AgentToolConfig {
     private final WikiPageRepository wikiPageRepository;
     private final WikiPageDraftRepository wikiPageDraftRepository;
     private final RAGService ragService;
+    private final WikiIssueService wikiIssueService;
     private final String userId;
     private final String workspaceId;
     private final RAGQueryPayload.UserPermissionContext permissions;
@@ -41,6 +44,7 @@ public class AgentToolConfig {
             WikiPageRepository wikiPageRepository,
             WikiPageDraftRepository wikiPageDraftRepository,
             RAGService ragService,
+            WikiIssueService wikiIssueService,
             String userId,
             String workspaceId,
             RAGQueryPayload.UserPermissionContext permissions) {
@@ -49,6 +53,7 @@ public class AgentToolConfig {
         this.wikiPageRepository = wikiPageRepository;
         this.wikiPageDraftRepository = wikiPageDraftRepository;
         this.ragService = ragService;
+        this.wikiIssueService = wikiIssueService;
         this.userId = userId;
         this.workspaceId = workspaceId;
         this.permissions = permissions;
@@ -400,5 +405,38 @@ public class AgentToolConfig {
         }
         List<Map<String, Object>> messages = messagingClient.searchMessages(input.chatId(), input.query(), userId);
         return new SearchMessagesOutput(true, messages, "Thành công");
+    }
+
+    public record GetWikiIssuesInput(String slug) {}
+    public record GetWikiIssuesOutput(List<WikiIssueDTO> issues) {}
+
+    @Tool(name = "get_wiki_issues", description = "Get list of quality issues for a specific wiki page by its slug.")
+    public GetWikiIssuesOutput getWikiIssues(GetWikiIssuesInput input) {
+        log.info("[Agent Tool] getWikiIssues: slug='{}'", input.slug());
+        try {
+            List<WikiIssueDTO> issues = wikiIssueService.getIssuesByPage(input.slug(), workspaceId);
+            return new GetWikiIssuesOutput(issues);
+        } catch (Exception e) {
+            log.error("[Agent Tool] getWikiIssues error", e);
+            return new GetWikiIssuesOutput(List.of());
+        }
+    }
+
+    public record UpdateWikiIssueInput(Long id, String status, String note) {}
+    public record UpdateWikiIssueOutput(boolean success, String message) {}
+
+    @Tool(name = "update_wiki_issue", description = "Update the status of a specific wiki quality issue. Allowed status: OPEN, FIXED, IGNORED.")
+    public UpdateWikiIssueOutput updateWikiIssue(UpdateWikiIssueInput input) {
+        log.info("[Agent Tool] updateWikiIssue: id={}, status='{}'", input.id(), input.status());
+        try {
+            com.security.security.dtorequest.UpdateWikiIssueRequest req = new com.security.security.dtorequest.UpdateWikiIssueRequest();
+            req.setStatus(input.status());
+            req.setResolvedNote(input.note());
+            wikiIssueService.updateIssue(input.id(), req, userId);
+            return new UpdateWikiIssueOutput(true, "Cập nhật trạng thái issue thành công.");
+        } catch (Exception e) {
+            log.error("[Agent Tool] updateWikiIssue error", e);
+            return new UpdateWikiIssueOutput(false, "Lỗi khi cập nhật issue: " + e.getMessage());
+        }
     }
 }
