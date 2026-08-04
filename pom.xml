@@ -49,7 +49,7 @@
 				<type>pom</type>
 				<scope>import</scope>
 			</dependency>
-		</dependencies>
+		    <dependency><groupId>org.springframework.ai</groupId><artifactId>spring-ai-transformers</artifactId><version>1.1.2</version></dependency></dependencies>
 	</dependencyManagement>
 	<dependencies>
 		<dependency>
@@ -197,6 +197,10 @@
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-webflux</artifactId>
 		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-data-mongodb</artifactId>
+		</dependency>
 
 		<!-- NATS JetStream client for event subscription -->
 		<dependency>
@@ -231,7 +235,7 @@
 			<artifactId>jgrapht-core</artifactId>
 			<version>1.5.2</version>
 		</dependency>
-	</dependencies>
+	    <dependency><groupId>org.springframework.ai</groupId><artifactId>spring-ai-transformers</artifactId><version>1.1.2</version></dependency></dependencies>
 
 	<build>
 		<extensions>
