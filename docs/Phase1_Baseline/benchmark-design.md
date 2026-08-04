@@ -30,8 +30,16 @@ Tài liệu này liệt kê 20 câu hỏi kỹ thuật dùng để chạy bài t
 19. "Có bao nhiêu bộ sưu tập (collections) được khởi tạo trong MongoDB?"
 20. "Nếu server NATS bị sập, pipeline ingest file có tiếp tục hoạt động được không?"
 
+## Nhóm 5: Truy vấn Liên kết đa tài liệu (Multi-hop Reasoning) - Dành riêng cho GraphRAG
+21. "Ai là người bắt buộc phải ký duyệt chi phí hạ tầng cho dự án KTMP Nexus?" *(Gợi ý: Cần tra chéo từ Thiết kế hệ thống -> Chi phí -> Quy định tài chính -> Cây nhân sự)*
+22. "Trần Thị B quản lý bộ phận nào và bộ phận đó chịu trách nhiệm về công nghệ gì trong dự án KTMP Nexus?"
+23. "Với tư cách là người thiết kế hệ thống, Nguyễn Văn A có quyền tự phê duyệt chi phí hạ tầng cho dự án của mình không?"
+24. "Dự án KTMP Nexus có làm vượt tổng ngân sách Q3 của phòng ban thiết kế ra nó không?"
+
 ---
 **Tiêu chí đánh giá (Metrics):**
 - **Context Precision:** 80%+ (Top-K trả về phải chứa đáp án đúng).
 - **Faithfulness:** 95%+ (Câu trả lời của LLM không tự bịa thông tin ngoài Context).
 - **Security Isolation:** 100% (Phải chặn tuyệt đối nếu User không có Role).
+- **Multi-hop Traceability (Mới):** Hệ thống có khả năng truy xuất được đầy đủ các "mắt xích" trung gian để tạo nên câu trả lời cuối cùng hay không.
+
