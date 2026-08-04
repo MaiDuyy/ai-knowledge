@@ -11,23 +11,23 @@
 ### 🗓️ Ngày 1 (Thứ 2) — Review & Document Pipeline ETL Hiện Tại
 
 **Dev 1 (Quỳnh Gia):**
-- [ ] Vẽ lại sơ đồ luồng dữ liệu **HIỆN TẠI** từ đầu đến cuối:
+- [x] Vẽ lại sơ đồ luồng dữ liệu **HIỆN TẠI** từ đầu đến cuối:
   ```
   PDF/DOCX Upload → Docling Parser → Chunking Strategy → 
   multilingual-e5-base Embedding → pgvector Store → 
   RBAC Filter (workspace + roles) → LLM Generate Answer
   ```
-- [ ] Ghi lại các thông số kỹ thuật thực tế:
+- [x] Ghi lại các thông số kỹ thuật thực tế:
   - Chunk size hiện tại là bao nhiêu token?
   - Overlap size?
   - Dimension của vector embedding (768?)
   - Index type trên pgvector (IVFFlat hay HNSW?)
-- [ ] **Dùng AI:** Paste code `PgVectorIngestPipeline.java` vào Claude → hỏi *"Phân tích chunking strategy đang dùng và đề xuất cải thiện"*
+- [x] **Dùng AI:** Paste code `PgVectorIngestPipeline.java` vào Claude → hỏi *"Phân tích chunking strategy đang dùng và đề xuất cải thiện"*
 
 **Dev 2:**
-- [ ] Đọc paper: **Lewis et al. (2020) RAG** → [arxiv.org/abs/2005.11401](https://arxiv.org/abs/2005.11401)
+- [x] Đọc paper: **Lewis et al. (2020) RAG** → [arxiv.org/abs/2005.11401](https://arxiv.org/abs/2005.11401)
   - Ghi chú 5 điểm chính ra file `notes/rag-paper-notes.md`
-- [ ] Đọc abstract + introduction: **Gao et al. (2024) RAG Survey** → [arxiv.org/abs/2312.10997](https://arxiv.org/abs/2312.10997)
+- [x] Đọc abstract + introduction: **Gao et al. (2024) RAG Survey** → [arxiv.org/abs/2312.10997](https://arxiv.org/abs/2312.10997)
 
 **Output Ngày 1:** File `docs/architecture/current-etl-pipeline.md` có sơ đồ + thông số kỹ thuật
 
@@ -36,7 +36,7 @@
 ### 🗓️ Ngày 2 (Thứ 3) — Thiết Kế MongoDB Schema
 
 **Dev 1 (Quỳnh Gia):**
-- [ ] Thiết kế **Document Model** cho MongoDB theo cấu trúc phân cấp 3 mức:
+- [x] Thiết kế **Document Model** cho MongoDB theo cấu trúc phân cấp 3 mức:
 
 ```json
 // Collection: wiki_documents
@@ -90,11 +90,11 @@
 }
 ```
 
-- [ ] Viết file `docs/mongodb-schema-design.md` đầy đủ
-- [ ] **Dùng AI:** Hỏi Claude: *"So sánh Embedding vs Referencing strategy cho cấu trúc Document → chunks trong MongoDB, use case phân quyền RBAC"*
+- [x] Viết file `docs/mongodb-schema-design.md` đầy đủ
+- [x] **Dùng AI:** Hỏi Claude: *"So sánh Embedding vs Referencing strategy cho cấu trúc Document → chunks trong MongoDB, use case phân quyền RBAC"*
 
 **Dev 2:**
-- [ ] Update `kltn-srs.md` thêm 3 Use Cases mới:
+- [x] Update `kltn-srs.md` thêm 3 Use Cases mới:
   - **UC-MONGO-001:** Ingest document vào MongoDB
   - **UC-MONGO-002:** Query RAG từ MongoDB Vector Search
   - **UC-GRAPH-001:** GraphRAG Query với $graphLookup
@@ -106,7 +106,7 @@
 ### 🗓️ Ngày 3 (Thứ 4) — Setup MongoDB Local + Docker
 
 **Dev 1 (Quỳnh Gia):**
-- [ ] Thêm MongoDB vào `docker-compose.yml` của `ai-knowledge`:
+- [x] Thêm MongoDB vào `docker-compose.yml` của `ai-knowledge`:
 
 ```yaml
 # Thêm vào docker-compose.yml
@@ -130,7 +130,7 @@ volumes:
   mongodb_data:
 ```
 
-- [ ] Thêm dependency vào `pom.xml` của `ai-knowledge`:
+- [x] Thêm dependency vào `pom.xml` của `ai-knowledge`:
 
 ```xml
 <!-- MongoDB Spring Data -->
@@ -146,7 +146,7 @@ volumes:
 </dependency>
 ```
 
-- [ ] Cấu hình `application.yml`:
+- [x] Cấu hình `application.yml`:
 
 ```yaml
 spring:
@@ -156,12 +156,12 @@ spring:
       database: ktmp_knowledge
 ```
 
-- [ ] Verify: `docker-compose up -d mongodb` → chạy được
-- [ ] Test kết nối Spring Boot → MongoDB thành công
+- [x] Verify: `docker-compose up -d mongodb` → chạy được
+- [x] Test kết nối Spring Boot → MongoDB thành công
 
 **Dev 2:**
-- [ ] Đọc tài liệu: **MongoDB Multi-Tenant Vector Search** (từ HuongDi_KLTN.md)
-- [ ] Viết lý thuyết chương 2: *Tổng quan về MongoDB Document Model và Vector Search*
+- [x] Đọc tài liệu: **MongoDB Multi-Tenant Vector Search** (từ HuongDi_KLTN.md)
+- [x] Viết lý thuyết chương 2: *Tổng quan về MongoDB Document Model và Vector Search*
 
 **Output Ngày 3:** MongoDB chạy local, Spring Boot kết nối thành công
 
@@ -170,7 +170,7 @@ spring:
 ### 🗓️ Ngày 4 (Thứ 5) — Thiết Kế Benchmark Framework
 
 **Dev 1 (Quỳnh Gia):**
-- [ ] Viết file `docs/benchmark-design.md` với nội dung sau:
+- [x] Viết file `docs/benchmark-design.md` với nội dung sau:
 
 **Điều kiện thực nghiệm (phải ghi rõ vào báo cáo):**
 - Hardware: CPU [của máy nhóm], RAM [dung lượng], SSD/HDD
@@ -205,7 +205,7 @@ spring:
 | Q20 | Type S (RBAC Security) | [User GUEST hỏi] Kiến trúc bảo mật chi tiết là gì? | Cả 3 phải từ chối |
 
 **Dev 2:**
-- [ ] Chuẩn bị nội dung tài liệu để ingest:
+- [x] Chuẩn bị nội dung tài liệu để ingest:
   - File `benchmark-docs/doc-gateway.md` — mô tả API Gateway
   - File `benchmark-docs/doc-identity.md` — mô tả identity-service
   - File `benchmark-docs/doc-architecture.md` — sơ đồ kiến trúc tổng thể
@@ -217,9 +217,9 @@ spring:
 ### 🗓️ Ngày 5 (Thứ 6) — Verify Baseline pgvector + Tạo Entity Test
 
 **Dev 1 (Quỳnh Gia):**
-- [ ] Ingest bộ tài liệu benchmark vào pgvector (đây sẽ là baseline)
-- [ ] Chạy thử 5 câu hỏi Type A → ghi lại latency và kết quả
-- [ ] Viết class `BenchmarkLogger.java` để log tự động:
+- [x] Ingest bộ tài liệu benchmark vào pgvector (đây sẽ là baseline)
+- [x] Chạy thử 5 câu hỏi Type A → ghi lại latency và kết quả
+- [x] Viết class `BenchmarkLogger.java` để log tự động:
 
 ```java
 public record BenchmarkResult(
@@ -235,7 +235,7 @@ public record BenchmarkResult(
 ```
 
 **Dev 2:**
-- [ ] Hoàn thiện phần lý thuyết chương 2 (2-3 trang):
+- [x] Hoàn thiện phần lý thuyết chương 2 (2-3 trang):
   - Document Model vs Relational Model
   - Vector Search: Dense vs Sparse vs Hybrid
   - Knowledge Graph và Graph Traversal cơ bản
@@ -246,9 +246,9 @@ public record BenchmarkResult(
 
 ### 🗓️ Ngày 6-7 (Cuối Tuần) — Buffer + Review + Checkpoint
 
-- [ ] **Dev 1:** Hoàn thiện tất cả output còn thiếu từ ngày 1-5
-- [ ] **Dev 2:** Review và chỉnh sửa nội dung lý thuyết
-- [ ] **Cả nhóm:** Tự trả lời Checkpoint Questions bên dưới
+- [x] **Dev 1:** Hoàn thiện tất cả output còn thiếu từ ngày 1-5
+- [x] **Dev 2:** Review và chỉnh sửa nội dung lý thuyết
+- [x] **Cả nhóm:** Tự trả lời Checkpoint Questions bên dưới
 
 ---
 

@@ -4,6 +4,8 @@ import com.security.security.dtorequest.DocumentSyncPayload;
 import com.security.security.entity.Embedding;
 import com.security.security.entity.enumeration.ChunkType;
 import com.security.security.repository.EmbeddingRepository;
+import com.security.security.repository.mongo.DocumentChunkRepository;
+import com.security.security.model.mongo.DocumentChunk;
 import com.security.security.service.tika.SemanticMarkdownChunker;
 import com.security.security.client.WorkspaceServiceClient;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -39,6 +41,7 @@ public class EmbeddingService {
     private final DataSource dataSource;
     private final ObjectMapper objectMapper;
     private final ChatModel chatModel;
+    private final DocumentChunkRepository documentChunkRepository;
 
     /**
      * Store document chunks in VectorStore
@@ -205,6 +208,11 @@ public class EmbeddingService {
             log.warn("Could not delete from VectorStore: {}", e.getMessage());
         }
         embeddingRepository.deleteByDocumentId(documentId);
+        try {
+            documentChunkRepository.deleteByDocumentId(documentId.toString());
+        } catch (Exception e) {
+            log.warn("Could not delete from MongoDocumentChunkRepository: {}", e.getMessage());
+        }
     }
 
     /**
@@ -241,6 +249,11 @@ public class EmbeddingService {
 
         // Purge old database chunks
         embeddingRepository.deleteByDocumentId(document.getId());
+        try {
+            documentChunkRepository.deleteByDocumentId(document.getId().toString());
+        } catch (Exception e) {
+            log.warn("[EmbeddingService] Could not delete old chunks from MongoDocumentChunkRepository for document id={}: {}", document.getId(), e.getMessage());
+        }
 
         // Separate parents and children
         List<SemanticMarkdownChunker.ChunkResult> parentChunks = chunkResults.stream()
@@ -377,6 +390,35 @@ public class EmbeddingService {
             if (vBatch.size() >= batchSize) {
                 vectorStore.add(new ArrayList<>(vBatch));
                 embeddingRepository.saveAll(new ArrayList<>(eBatch));
+                
+                // Save to MongoDB
+                List<DocumentChunk> mongoBatch = eBatch.stream().map(e -> {
+                    DocumentChunk mc = new DocumentChunk();
+                    mc.setDocumentId(e.getDocumentId().toString());
+                    mc.setWorkspaceId(e.getWorkspaceId());
+                    mc.setChunkIndex(e.getChunkIndex());
+                    mc.setChunkType(e.getChunkType().name());
+                    mc.setContentSummary(e.getChunkTitle());
+                    mc.setCreatedAt(java.time.Instant.now());
+                    
+                    List<String> rolesList = new ArrayList<>();
+                    String rolesStr = document.getAllowedRoles();
+                    if (rolesStr != null && !rolesStr.isBlank()) {
+                        for (String role : rolesStr.split(",")) {
+                            rolesList.add(role.trim());
+                        }
+                    } else {
+                        rolesList.add("ALL");
+                    }
+                    mc.setAllowedRoles(rolesList);
+                    return mc;
+                }).collect(Collectors.toList());
+                try {
+                    documentChunkRepository.saveAll(mongoBatch);
+                } catch (Exception ex) {
+                    log.warn("Failed to save DocumentChunk batch to MongoDB: {}", ex.getMessage());
+                }
+                
                 vBatch.clear();
                 eBatch.clear();
             }
@@ -384,6 +426,34 @@ public class EmbeddingService {
         if (!vBatch.isEmpty()) {
             vectorStore.add(vBatch);
             embeddingRepository.saveAll(eBatch);
+            
+            // Save final batch to MongoDB
+            List<DocumentChunk> mongoBatch = eBatch.stream().map(e -> {
+                DocumentChunk mc = new DocumentChunk();
+                mc.setDocumentId(e.getDocumentId().toString());
+                mc.setWorkspaceId(e.getWorkspaceId());
+                mc.setChunkIndex(e.getChunkIndex());
+                mc.setChunkType(e.getChunkType().name());
+                mc.setContentSummary(e.getChunkTitle());
+                mc.setCreatedAt(java.time.Instant.now());
+                
+                List<String> rolesList = new ArrayList<>();
+                String rolesStr = document.getAllowedRoles();
+                if (rolesStr != null && !rolesStr.isBlank()) {
+                    for (String role : rolesStr.split(",")) {
+                        rolesList.add(role.trim());
+                    }
+                } else {
+                    rolesList.add("ALL");
+                }
+                mc.setAllowedRoles(rolesList);
+                return mc;
+            }).collect(Collectors.toList());
+            try {
+                documentChunkRepository.saveAll(mongoBatch);
+            } catch (Exception ex) {
+                log.warn("Failed to save DocumentChunk batch to MongoDB: {}", ex.getMessage());
+            }
         }
 
         log.info("[EmbeddingService] Successfully ingested {} chunks ({} parents, {} children) for document id={}",

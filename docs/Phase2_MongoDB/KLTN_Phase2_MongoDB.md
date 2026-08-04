@@ -159,16 +159,14 @@ public class MongoIngestPipeline {
                     .build();
             })
             .toList();
-    }
-}
-```
+## Tiến độ hiện tại
 
-- [ ] Tích hợp `MongoIngestPipeline` vào `WikiService.java` để gọi song song với `PgVectorIngestPipeline`
-- [ ] Test ingest 1 document thủ công → kiểm tra trong MongoDB Compass hoặc mongosh
-
-**Dev 2:**
-- [ ] Frontend: thêm badge "Đang ingest MongoDB..." trong UI khi upload tài liệu
-- [ ] Logging: thêm log tracking thời gian ingest MongoDB vs pgvector (so sánh)
+- [x] Tạo `Workspace`, `Document`, `DocumentChunk` entity class (Java).
+- [x] Áp dụng các Annotation `@Document` và `@CompoundIndex`.
+- [x] Viết `MongoRepository` interface cho từng collection.
+- [x] Bơm dữ liệu (Data Seeding) dựa trên tập mock-data.
+- [x] Chỉnh sửa logic Ingest (Bơm dữ liệu từ PDF) để ghi thông tin phân quyền vào MongoDB (đã hoàn thành, ghi dữ liệu song song Dual-DB).
+- [ ] Viết API `/search` có tích hợp Filter Context từ MongoDB (Sẽ làm ở Phase 3).
 
 **Output Ngày 2:** Ingest pipeline chạy được, document xuất hiện trong MongoDB
 

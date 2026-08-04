@@ -11,4 +11,6 @@ public interface DocumentChunkRepository extends MongoRepository<DocumentChunk, 
     
     // Core function: Find all chunks in a workspace that the user has permission to read based on their roles
     List<DocumentChunk> findByWorkspaceIdAndAllowedRolesIn(String workspaceId, List<String> roles);
+    
+    void deleteByDocumentId(String documentId);
 }
