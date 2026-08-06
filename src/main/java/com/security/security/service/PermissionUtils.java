@@ -3,9 +3,12 @@ package com.security.security.service;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.security.security.dto.UserPermissionContext;
+import com.security.security.dtorequest.RAGQueryPayload;
+import com.security.security.entity.enumeration.SecurityClassification;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -20,6 +23,118 @@ public final class PermissionUtils {
         return "HEAD".equals(r) || "MANAGER".equals(r) 
             || "DEPUTY_HEAD".equals(r) || "VICE_HEAD".equals(r)
             || "DEPUTY_MANAGER".equals(r) || "VICE_MANAGER".equals(r);
+    }
+
+    /**
+     * Defense-in-depth post-query access check for wiki/document metadata
+     * (shared by PostgreSQL RAG path and experimental Mongo engines).
+     * Logic aligned with {@link RAGService#isPageAccessible}.
+     */
+    public static boolean isResourceAccessible(
+            String resourceWorkspaceId,
+            String resourceDepartmentId,
+            String allowedRoles,
+            SecurityClassification securityClassification,
+            RAGQueryPayload.UserPermissionContext context) {
+        if (context == null) {
+            return false;
+        }
+
+        String resolvedWorkspaceId = ScopeNormalizer.normalizeWorkspace(context.getWorkspaceId());
+        String pageWsId = ScopeNormalizer.normalizeWorkspace(resourceWorkspaceId);
+
+        if (!"ALL".equals(pageWsId) && !"GLOBAL".equals(pageWsId) && !pageWsId.equals(resolvedWorkspaceId)) {
+            return false;
+        }
+
+        List<String> roles = context.getRoles();
+        Integer roleLevel = context.getRoleLevel();
+        boolean isAdmin = false;
+        if (roles != null) {
+            if (roles.contains("SUPER_ADMIN") || roles.contains("ADMIN") || roles.contains("ORG_ADMIN")) {
+                isAdmin = true;
+            }
+        }
+        if (roleLevel != null && roleLevel <= 1) {
+            isAdmin = true;
+        }
+        if (isAdmin) {
+            return true;
+        }
+
+        boolean isGuest = false;
+        if (roles != null && roles.contains("EXTERNAL_GUEST")) {
+            isGuest = true;
+        }
+        if (roleLevel != null && roleLevel >= 6) {
+            isGuest = true;
+        }
+        if (isGuest) {
+            return SecurityClassification.PUBLIC == securityClassification;
+        }
+
+        if (SecurityClassification.PUBLIC == securityClassification) {
+            return true;
+        }
+
+        List<String> deptIdsWhereHead = new ArrayList<>();
+        List<String> deptIdsWhereMember = new ArrayList<>();
+        List<RAGQueryPayload.DepartmentRole> userDepts = context.getUserDepartments();
+        if (userDepts != null) {
+            for (RAGQueryPayload.DepartmentRole dept : userDepts) {
+                String deptId = dept.getDepartmentId();
+                String role = dept.getRole();
+                if (deptId != null && !deptId.trim().isEmpty()) {
+                    if (isHeadOrDeputy(role)) {
+                        deptIdsWhereHead.add(deptId);
+                        deptIdsWhereMember.add(deptId);
+                    } else {
+                        deptIdsWhereMember.add(deptId);
+                    }
+                }
+            }
+        }
+
+        boolean hasHeadRole = !deptIdsWhereHead.isEmpty();
+        if ("HEAD".equalsIgnoreCase(allowedRoles) && !hasHeadRole) {
+            return false;
+        }
+
+        String pageDeptId = ScopeNormalizer.normalizeDepartment(resourceDepartmentId);
+        if (!"ALL".equals(pageDeptId) && !"GLOBAL".equals(pageDeptId)) {
+            if (deptIdsWhereHead.contains(pageDeptId)) {
+                return true;
+            }
+            if (deptIdsWhereMember.contains(pageDeptId) && !"HEAD".equalsIgnoreCase(allowedRoles)) {
+                return true;
+            }
+            return false;
+        }
+
+        if (SecurityClassification.INTERNAL == securityClassification) {
+            return true;
+        }
+
+        if (!"ALL".equals(pageWsId) && !"GLOBAL".equals(pageWsId)) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /** Convenience overload for {@link com.security.security.entity.WikiPage}. */
+    public static boolean isPageAccessible(
+            com.security.security.entity.WikiPage page,
+            RAGQueryPayload.UserPermissionContext context) {
+        if (page == null) {
+            return false;
+        }
+        return isResourceAccessible(
+                page.getWorkspaceId(),
+                page.getDepartmentId(),
+                page.getAllowedRoles(),
+                page.getSecurityClassification(),
+                context);
     }
 
     public static UserPermissionContext parse(

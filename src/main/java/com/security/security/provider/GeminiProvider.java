@@ -30,10 +30,10 @@ public class GeminiProvider implements LlmProvider {
     private final ChatMemory chatMemory;
     private final AppConfigService configService;
 
-    @Value("${spring.ai.google.genai.api-key:}")
+    @Value( "${spring.ai.google.genai.api-key}")
     private String defaultApiKey;
 
-    @Value("${spring.ai.google.genai.chat.options.model:gemini-2.0-flash}")
+    @Value( "${spring.ai.google.genai.chat.options.model:gemini-2.0-flash}")
     private String defaultModel;
 
     public GeminiProvider(ChatClient chatClient,

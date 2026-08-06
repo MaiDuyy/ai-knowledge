@@ -28,6 +28,9 @@ import org.springframework.stereotype.Component;
 import org.springframework.util.MimeTypeUtils;
 
 import java.util.List;
+import java.util.Optional;
+
+import org.springframework.data.redis.core.StringRedisTemplate;
 
 @Component
 @Slf4j
@@ -43,7 +46,8 @@ public class DocumentProcessingListener {
     private final MrpPipelineService      mrpPipelineService;
     private final PostProcessingCoordinator postProcessingCoordinator;
     private final SourceImageRepository   sourceImageRepository;
-    private final org.springframework.data.redis.core.StringRedisTemplate redisTemplate;
+    /** Optional: absent when Redis auto-config is excluded (e.g. mongodb-benchmark). */
+    private final Optional<StringRedisTemplate> redisTemplate;
     private final ChatModel               chatModel;
     private final GeminiMultimodalService geminiMultimodalService;
 
@@ -61,10 +65,10 @@ public class DocumentProcessingListener {
             Document duplicateDoc = null;
             String fileHash = document.getFileHash();
             if (fileHash != null && !fileHash.isEmpty()) {
-                // 1. Check Redis cache
-                if (redisTemplate != null) {
+                // 1. Check Redis cache (skip when Redis is not configured)
+                if (redisTemplate.isPresent()) {
                     try {
-                        String cachedIdStr = redisTemplate.opsForValue().get("doc:hash:" + fileHash);
+                        String cachedIdStr = redisTemplate.get().opsForValue().get("doc:hash:" + fileHash);
                         if (cachedIdStr != null) {
                             Long cachedId = Long.valueOf(cachedIdStr);
                             duplicateDoc = documentRepository.findById(cachedId).orElse(null);
@@ -184,10 +188,10 @@ public class DocumentProcessingListener {
             document.setErrorMessage(null);
             documentRepository.save(document);
 
-            // Cache file hash for duplicate detection
-            if (document.getFileHash() != null && !document.getFileHash().isEmpty() && redisTemplate != null) {
+            // Cache file hash for duplicate detection (skip when Redis is not configured)
+            if (document.getFileHash() != null && !document.getFileHash().isEmpty() && redisTemplate.isPresent()) {
                 try {
-                    redisTemplate.opsForValue().set("doc:hash:" + document.getFileHash(), String.valueOf(document.getId()));
+                    redisTemplate.get().opsForValue().set("doc:hash:" + document.getFileHash(), String.valueOf(document.getId()));
                     log.info("[Redis] Cached completed file hash mapping: doc:hash:{} -> {}", document.getFileHash(), document.getId());
                 } catch (Exception re) {
                     log.error("[Redis] Failed to cache file hash in Redis: {}", re.getMessage());

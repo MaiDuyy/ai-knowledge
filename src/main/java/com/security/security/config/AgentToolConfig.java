@@ -71,8 +71,8 @@ public class AgentToolConfig {
                     SearchRequest.builder()
                             .query(input.query())
                             .topK(5)
-                            .similarityThreshold(0.2)
-                            .filterExpression(filterExprStr)
+                            .similarityThreshold(0.0)
+//                            .filterExpression(filterExprStr)
                             .build()
             );
             List<String> texts = docs.stream()
@@ -202,7 +202,8 @@ public class AgentToolConfig {
                     SearchRequest.builder()
                             .query(input.query())
                             .topK(5)
-                            .filterExpression(finalExprStr)
+                            .similarityThreshold(0.0)
+//                            .filterExpression(finalExprStr)
                             .build()
             );
             List<String> texts = docs.stream()

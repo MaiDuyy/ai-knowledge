@@ -41,10 +41,11 @@ public class FilterChainConfiguration {
                                 .toStaticResources().atCommonLocations())
                         .permitAll()
                         .requestMatchers(
+                                "/api/benchmark/database-tradeoff/**",
                                 "/favicon.ico",
                                 "/healthz",
-                                "/error","/api/ocr/extract")
-
+                                "/error",
+                                "/api/ocr/extract")
                         .permitAll()
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                         .anyRequest().authenticated()

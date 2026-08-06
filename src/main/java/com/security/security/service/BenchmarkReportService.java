@@ -34,15 +34,104 @@ public class BenchmarkReportService {
 
     private String lastMrpWikiRunDir;
     private String lastEvaluationRunDir;
+    private String lastDatabaseTradeOffRunDir;
     private String pendingEvaluationRunId;
 
     private final Map<String, Object> report = new ConcurrentHashMap<>();
     private final Map<String, Object> evaluationReport = new ConcurrentHashMap<>();
+    private final Map<String, Object> databaseTradeOffReport = new ConcurrentHashMap<>();
 
     public void record(String suite, String metric, Object value) {
         @SuppressWarnings("unchecked")
         Map<String, Object> suiteMap = (Map<String, Object>) report.computeIfAbsent(suite, k -> new ConcurrentHashMap<>());
         suiteMap.put(metric, value);
+    }
+
+    public void recordDatabaseTradeOff(String suite, String metric, Object value) {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> suiteMap = (Map<String, Object>) databaseTradeOffReport.computeIfAbsent(suite, k -> new ConcurrentHashMap<>());
+        suiteMap.put(metric, value);
+    }
+
+    public void resetDatabaseTradeOff() {
+        databaseTradeOffReport.clear();
+    }
+
+    public String getLastDatabaseTradeOffRunDir() {
+        return lastDatabaseTradeOffRunDir;
+    }
+
+    public void writeDatabaseTradeOffReport() throws Exception {
+        writeDatabaseTradeOffReport(BENCHMARK_ROOT);
+    }
+
+    public void writeDatabaseTradeOffReport(String benchmarkRoot) throws Exception {
+        String runId = currentRunId();
+        String runDir = benchmarkRoot + "/database-tradeoff/" + runId;
+        lastDatabaseTradeOffRunDir = runDir;
+
+        Map<String, Object> fullReport = new LinkedHashMap<>();
+        fullReport.put("benchmarkVersion", "1.0-database-tradeoff");
+        fullReport.put("runId", runId);
+        fullReport.put("tier", "database-tradeoff");
+        fullReport.put("timestamp", Instant.now().toString());
+        fullReport.put("methodology", List.of(
+                "PostgreSQL JPA + embeddings cosine (baseline)",
+                "MongoDB nested/flat document model",
+                "RBAC metadata pre-filter + post-check",
+                "JGraphT in-memory BFS vs MongoDB $graphLookup"
+        ));
+        fullReport.put("suites", new LinkedHashMap<>(databaseTradeOffReport));
+
+        String artifactBase = "database-tradeoff-report";
+        String markdown = renderDatabaseTradeOffMarkdown(fullReport, runDir + "/" + artifactBase);
+        publishTierReport(benchmarkRoot, "database-tradeoff", runId, runDir, artifactBase, fullReport, markdown);
+    }
+
+    @SuppressWarnings("unchecked")
+    private String renderDatabaseTradeOffMarkdown(Map<String, Object> fullReport, String artifactBasePath) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("# Database Trade-Off Benchmark Report\n\n");
+        sb.append("**Tier:** PostgreSQL vs MongoDB experimental storage\n\n");
+        sb.append("**Generated:** ").append(fullReport.get("timestamp")).append("\n\n");
+        sb.append("**Methodology:** ").append(fullReport.get("methodology")).append("\n\n");
+        sb.append("---\n\n");
+
+        Map<String, Object> suites = (Map<String, Object>) fullReport.get("suites");
+        if (suites == null || suites.isEmpty()) {
+            sb.append("_No database trade-off data recorded._\n");
+            return sb.toString();
+        }
+
+        for (Map.Entry<String, Object> entry : suites.entrySet()) {
+            sb.append("## Suite: `").append(entry.getKey()).append("`\n\n");
+            if (!(entry.getValue() instanceof Map<?, ?> raw)) {
+                sb.append(entry.getValue()).append("\n\n");
+                continue;
+            }
+            Map<String, Object> suite = (Map<String, Object>) raw;
+            sb.append("| Metric | Value |\n|--------|-------|\n");
+            for (Map.Entry<String, Object> m : suite.entrySet()) {
+                if ("details".equals(m.getKey())) {
+                    continue;
+                }
+                sb.append("| `").append(m.getKey()).append("` | ").append(formatValue(m.getValue())).append(" |\n");
+            }
+            if (suite.containsKey("details")) {
+                sb.append("\n**Details:**\n\n```json\n");
+                try {
+                    sb.append(MAPPER.writeValueAsString(suite.get("details")));
+                } catch (Exception ex) {
+                    sb.append(suite.get("details"));
+                }
+                sb.append("\n```\n");
+            }
+            sb.append("\n");
+        }
+
+        sb.append("---\n\n*Artifacts: `").append(artifactBasePath).append(".json`, `")
+                .append(artifactBasePath).append(".md`, `benchmark/database-tradeoff/latest/manifest.json`*\n");
+        return sb.toString();
     }
 
     public void recordEvaluation(String metric, Object value) {
@@ -100,27 +189,37 @@ public class BenchmarkReportService {
     }
 
     public void writeEvaluationReport(String judgeModel) throws Exception {
-        writeEvaluationReport(BENCHMARK_ROOT, judgeModel);
+        writeEvaluationReport(BENCHMARK_ROOT, "evaluation", judgeModel);
     }
 
     public void writeEvaluationReport(String benchmarkRoot, String judgeModel) throws Exception {
+        writeEvaluationReport(benchmarkRoot, "evaluation", judgeModel);
+    }
+
+    /**
+     * Writes evaluation artifacts under {@code benchmarkRoot/tierFolder/runId}.
+     * Use {@code tierFolder=evaluation-mongodb} for Mongo-backed golden evaluation.
+     */
+    public void writeEvaluationReport(String benchmarkRoot, String tierFolder, String judgeModel) throws Exception {
+        String tier = (tierFolder == null || tierFolder.isBlank()) ? "evaluation" : tierFolder;
         String runId = pendingEvaluationRunId != null && !pendingEvaluationRunId.isBlank()
                 ? pendingEvaluationRunId
                 : currentRunId();
-        String runDir = benchmarkRoot + "/evaluation/" + runId;
+        String runDir = benchmarkRoot + "/" + tier + "/" + runId;
         lastEvaluationRunDir = runDir;
 
         Map<String, Object> fullReport = new LinkedHashMap<>();
         fullReport.put("benchmarkVersion", "2.1-evaluation");
         fullReport.put("runId", runId);
-        fullReport.put("tier", "evaluation");
+        fullReport.put("tier", tier);
         fullReport.put("timestamp", Instant.now().toString());
         fullReport.put("judgeModel", judgeModel);
         fullReport.put("methodology", List.of(
                 "Java Ragas-aligned heuristics",
                 "Official Ragas export (Python optional)",
                 "GERBIL-style linking",
-                "Cross-Model Judge"));
+                "Cross-Model Judge",
+                "MongoDB storage/retrieval track"));
 
         Map<String, Object> metrics = new LinkedHashMap<>(evaluationReport);
         fillCorpusMetricsFromPerDocument(metrics);
@@ -128,7 +227,7 @@ public class BenchmarkReportService {
 
         String artifactBase = "evaluation-benchmark-report";
         String markdown = renderEvaluationMarkdownReport(fullReport, runDir + "/" + artifactBase);
-        publishTierReport(benchmarkRoot, "evaluation", runId, runDir, artifactBase, fullReport, markdown);
+        publishTierReport(benchmarkRoot, tier, runId, runDir, artifactBase, fullReport, markdown);
     }
 
     /** Pin evaluation run id so export and report share the same directory. */
@@ -336,9 +435,12 @@ public class BenchmarkReportService {
     }
 
     private void writeWorkspaceSummary(String tier, String markdown) throws Exception {
-        String workspaceFile = "evaluation".equals(tier)
-                ? "benchmark_results_evaluation.md"
-                : "benchmark_results_mrp_wiki.md";
+        String workspaceFile = switch (tier) {
+            case "evaluation" -> "benchmark_results_evaluation.md";
+            case "evaluation-mongodb" -> "benchmark_results_evaluation_mongodb.md";
+            case "database-tradeoff" -> "benchmark_results_database_tradeoff.md";
+            default -> "benchmark_results_mrp_wiki.md";
+        };
         try (FileWriter w = new FileWriter(new File(workspaceFile), StandardCharsets.UTF_8)) {
             w.write(markdown);
         }
