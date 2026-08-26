@@ -22,8 +22,6 @@ import com.security.security.service.ImageProcessingService;
 import com.security.security.service.EmbeddingService;
 import com.security.security.service.tika.DocumentProfiler;
 import com.security.security.service.tika.SemanticMarkdownChunker;
-import com.security.security.repository.mongo.DocumentMetaRepository;
-import com.security.security.model.mongo.DocumentMeta;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -73,7 +71,6 @@ public class DocumentService {
     private final WikiLinkRepository wikiLinkRepository;
     private final org.springframework.data.redis.core.StringRedisTemplate redisTemplate;
     private final PostProcessingCoordinator postProcessingCoordinator;
-    private final DocumentMetaRepository documentMetaRepository;
 
     @Value("${app.upload.dir:uploads}")
     private String uploadDir;
@@ -315,34 +312,6 @@ public class DocumentService {
                 .build();
 
         Document saved = documentRepository.save(document);
-
-        // --- MONGODB INTEGRATION ---
-        DocumentMeta mongoMeta = new DocumentMeta();
-        mongoMeta.setId(saved.getId().toString());
-        mongoMeta.setWorkspaceId(saved.getWorkspaceId());
-        mongoMeta.setTitle(saved.getFileName());
-        mongoMeta.setFilePath(saved.getFilePath());
-        mongoMeta.setOwnerId(saved.getUserId());
-        mongoMeta.setStatus(saved.getStatus().name());
-        mongoMeta.setCreatedAt(java.time.Instant.now());
-        
-        List<String> rolesList = new ArrayList<>();
-        if (saved.getAllowedRoles() != null && !saved.getAllowedRoles().isBlank()) {
-            for (String role : saved.getAllowedRoles().split(",")) {
-                rolesList.add(role.trim());
-            }
-        } else {
-            rolesList.add("ALL");
-        }
-        mongoMeta.setAllowedRoles(rolesList);
-        
-        try {
-            documentMetaRepository.save(mongoMeta);
-            log.info("Saved DocumentMeta to MongoDB for document ID: {}", saved.getId());
-        } catch (Exception e) {
-            log.warn("Failed to save DocumentMeta to MongoDB: {}", e.getMessage());
-        }
-        // ---------------------------
 
         if (isPreview) {
             // Parse immediately to extract raw Markdown for preview
@@ -688,13 +657,6 @@ public class DocumentService {
 
         // 8. Delete document entity from database
         documentRepository.delete(doc);
-        
-        try {
-            documentMetaRepository.deleteById(documentId.toString());
-            log.info("Deleted DocumentMeta from MongoDB for document ID: {}", documentId);
-        } catch (Exception e) {
-            log.warn("Failed to delete DocumentMeta from MongoDB: {}", e.getMessage());
-        }
 
         // 9. Publish event to NATS
         natsEventPublisher.publishDocumentStatus(doc.getId(), doc.getUserId(), doc.getWorkspaceId(), "DELETED");

@@ -53,11 +53,4 @@ benchmark/
 benchmark-eval/
 scripts/
 benchmark_results_evaluation.md
-benchmark_results_mrp_wiki.md 
-# Ignore ONNX models
-**/*.onnx
-**/*.bin
- 
-# Ignore ONNX models
-**/*.onnx
-**/*.bin
+benchmark_results_mrp_wiki.md
