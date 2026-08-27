@@ -159,6 +159,11 @@ public class JwtAuthorizationFilter extends OncePerRequestFilter {
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
         String path = request.getRequestURI();
+        if (InternalMeetingAiAuthenticationFilter.PATH.equals(path)
+                || path.startsWith(InternalMeetingAiAuthenticationFilter.PATH + "/")) {
+            // This route is authenticated exclusively by InternalMeetingAiAuthenticationFilter.
+            return true;
+        }
         List<String> publicPaths = List.of(
                 "/user/register",
                 "/user/verify/account",

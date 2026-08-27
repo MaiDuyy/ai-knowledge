@@ -206,6 +206,26 @@ class RAGServiceTest {
     }
 
     @Test
+    @DisplayName("Meeting shared scope only searches public unrestricted workspace content")
+    void buildFilterExpression_MeetingShared_IgnoresSpeakerPrivileges() throws Exception {
+        RAGQueryPayload.UserPermissionContext context = RAGQueryPayload.UserPermissionContext.builder()
+                .roles(Arrays.asList("ADMIN", "SUPER_ADMIN"))
+                .workspaceId("workspace-abc")
+                .ragScope("MEETING_SHARED")
+                .build();
+
+        boolean[] partialResults = new boolean[]{false};
+        String filter = invokeBuildFilter(context, "user-123", partialResults);
+
+        assertThat(filter).contains("workspaceId == 'workspace-abc'");
+        assertThat(filter).contains("departmentId == 'ALL'");
+        assertThat(filter).contains("classification == 'PUBLIC'");
+        assertThat(filter).contains("allowedRoles == 'ALL'");
+        assertThat(partialResults[0]).isFalse();
+        Mockito.verifyNoInteractions(workspaceServiceClient);
+    }
+
+    @Test
     @DisplayName("Should blend results from Vector Store and SQL Keyword Search using RRF")
     void executeHybridSearchAndExpansion_BlendsResultsUsingRRF() {
         // Arrange
