@@ -6,6 +6,7 @@ import com.security.security.service.JwtService;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import org.springframework.boot.autoconfigure.security.reactive.PathRequest;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
@@ -28,6 +29,7 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 public class FilterChainConfiguration {
     private final JwtService jwtService;
     private final JwtAuthorizationFilter jwtAuthorizationFilter;
+    private final InternalMeetingAiAuthenticationFilter internalMeetingAiAuthenticationFilter;
 
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
@@ -58,7 +60,23 @@ public class FilterChainConfiguration {
                                     "{\"error\":\"Unauthorized access\",\"message\":\"Full authentication is required to access this resource.\"}");
                         }))
                 .addFilterBefore(jwtAuthorizationFilter, UsernamePasswordAuthenticationFilter.class)
+                .addFilterBefore(internalMeetingAiAuthenticationFilter, JwtAuthorizationFilter.class)
                 .build();
+    }
+
+    /**
+     * The filter is manually inserted into springSecurityFilterChain above. Do
+     * not let Spring Boot register the same Filter bean a second time at the
+     * servlet-container layer.
+     */
+    @Bean
+    public FilterRegistrationBean<InternalMeetingAiAuthenticationFilter> internalMeetingAiFilterRegistration(
+            InternalMeetingAiAuthenticationFilter filter
+    ) {
+        FilterRegistrationBean<InternalMeetingAiAuthenticationFilter> registration =
+                new FilterRegistrationBean<>(filter);
+        registration.setEnabled(false);
+        return registration;
     }
 
     @Bean

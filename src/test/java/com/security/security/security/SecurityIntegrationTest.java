@@ -80,6 +80,16 @@ class SecurityIntegrationTest {
     }
 
     @Test
+    @DisplayName("Should reject meeting AI calls that only provide legacy gateway user headers")
+    void meetingAiRejectsLegacyGatewayHeaders() throws Exception {
+        mockMvc.perform(post("/internal/meeting-ai")
+                        .header("x-internal-gateway-key", "test-gateway-key")
+                        .header("x-user-id", "admin")
+                        .header("x-user-role", "ADMIN"))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
     @DisplayName("Should authenticate and allow access when valid gateway key and user headers are provided")
     void whenProvidingValidGatewayKeyAndUserId_shouldAuthenticate() throws Exception {
         mockMvc.perform(get("/documents")

@@ -44,6 +44,8 @@ import com.security.security.entity.enumeration.SecurityClassification;
 @RequiredArgsConstructor
 public class RAGService {
 
+    private static final String MEETING_SHARED_RAG_SCOPE = "MEETING_SHARED";
+
     private static final String RAG_RESPONSE_SCHEMA = """
             {
               "type": "object",
@@ -483,8 +485,15 @@ public class RAGService {
     private String rewriteQueryWithContext(String originalQuery, Long conversationId) {
         if (conversationId == null) return originalQuery;
 
-        List<com.security.security.entity.Message> history =
-                conversationService.getRecentMessages(conversationId, 6);
+        List<com.security.security.entity.Message> history = new ArrayList<>(
+                conversationService.getRecentMessages(conversationId, 6));
+        // Meeting voice persists the final transcript before RAG. Do not rewrite a
+        // question using the same current-turn transcript as prior context.
+        if (!history.isEmpty()
+                && "user".equals(history.getFirst().getRole())
+                && originalQuery.equals(history.getFirst().getContent())) {
+            history.removeFirst();
+        }
         // Need at least one prior exchange (user + assistant) before rewriting makes sense
         if (history.size() < 2) return originalQuery;
 
@@ -610,6 +619,10 @@ public class RAGService {
 
         // 1. Resolve workspaceId
         String resolvedWorkspaceId = ScopeNormalizer.normalizeWorkspace(context.getWorkspaceId());
+
+        if (isMeetingSharedScope(context)) {
+            return buildMeetingSharedFilter(b, resolvedWorkspaceId);
+        }
 
         // 2. Fetch workspace departmentId using WorkspaceServiceClient
         boolean isServiceFailure = false;
@@ -986,6 +999,10 @@ public class RAGService {
                     permissions.getRoles(), permissions.getUserDepartments());
         }
 
+        if (isMeetingSharedScope(permissions)) {
+            return executeMeetingSharedVectorSearch(query, permissions, userId, maxResults, minScore);
+        }
+
         // 1. Vector Search
         SearchRequest.Builder searchRequestBuiler = SearchRequest.builder()
                 .query(query)
@@ -1185,6 +1202,60 @@ public class RAGService {
 
         // 6. LLM Reranking — score and select top-N most relevant documents
         return rerankService.rerank(query, graphExpandedDocs);
+    }
+
+    /**
+     * Meeting answers are broadcast to all call participants. Keep this search to
+     * explicitly public workspace embeddings and do not merge unrestricted keyword
+     * or graph results, which have user-specific access paths today.
+     */
+    private List<org.springframework.ai.document.Document> executeMeetingSharedVectorSearch(
+            String query,
+            RAGQueryPayload.UserPermissionContext permissions,
+            String userId,
+            int maxResults,
+            double minScore
+    ) {
+        org.springframework.ai.vectorstore.filter.Filter.Expression filter =
+                buildFilterExpressionAST(permissions, userId, new boolean[]{false});
+        SearchRequest request = SearchRequest.builder()
+                .query(query)
+                .topK(maxResults)
+                .similarityThreshold(minScore)
+                .filterExpression(formatExpression(filter))
+                .build();
+        try {
+            return vectorStore.similaritySearch(request);
+        } catch (Exception e) {
+            log.error("Meeting shared vector search failed", e);
+            return Collections.emptyList();
+        }
+    }
+
+    private boolean isMeetingSharedScope(RAGQueryPayload.UserPermissionContext context) {
+        return context != null && MEETING_SHARED_RAG_SCOPE.equals(context.getRagScope());
+    }
+
+    private org.springframework.ai.vectorstore.filter.Filter.Expression buildMeetingSharedFilter(
+            org.springframework.ai.vectorstore.filter.FilterExpressionBuilder b,
+            String workspaceId
+    ) {
+        if ("ALL".equals(workspaceId) || "GLOBAL".equals(workspaceId)) {
+            return b.eq("collectionId", "none").build();
+        }
+
+        org.springframework.ai.vectorstore.filter.FilterExpressionBuilder.Op workspaceAndDepartment = b.and(
+                b.eq("workspaceId", workspaceId),
+                b.or(b.eq("departmentId", "ALL"), b.eq("departmentId", "GLOBAL"))
+        );
+        org.springframework.ai.vectorstore.filter.FilterExpressionBuilder.Op publicClassification = b.or(
+                b.eq("classification", "PUBLIC"),
+                b.eq("securityClassification", "PUBLIC")
+        );
+        return b.and(
+                b.and(workspaceAndDepartment, publicClassification),
+                b.eq("allowedRoles", "ALL")
+        ).build();
     }
 
     private List<org.springframework.ai.document.Document> expandParentChildContext(List<org.springframework.ai.document.Document> docs) {
