@@ -12,7 +12,6 @@ import com.security.security.entity.enumeration.MessageInputMode;
 import com.security.security.entity.enumeration.MessageStatus;
 import com.security.security.repository.MessageRepository;
 import lombok.RequiredArgsConstructor;
-import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -30,6 +29,7 @@ public class MeetingAiService {
     private final RAGService ragService;
     private final LlmRateLimiterService llmRateLimiterService;
     private final ObjectMapper objectMapper;
+    private final MeetingAiTurnPersistenceService turnPersistenceService;
 
     public MeetingAiBufferedResponse answer(MeetingAiRequest request) {
         validateRequest(request);
@@ -48,7 +48,9 @@ public class MeetingAiService {
         }
 
         // Persist the final transcript before invoking RAG. A retry reuses this row by turnId.
-        saveMessageIdempotently(userMessage(conversation.getId(), request));
+        turnPersistenceService.saveUserIfMeetingActive(
+                request.getMeetingSessionId(),
+                userMessage(conversation.getId(), request));
 
         RAGResponseDTO ragResponse;
         llmRateLimiterService.acquireRagQuery();
@@ -69,8 +71,9 @@ public class MeetingAiService {
         }
 
         AnswerText answerText = extractAnswerText(ragResponse.getAnswer());
-        Message assistant = saveMessageIdempotently(assistantMessage(
-                conversation.getId(), request.getTurnId(), ragResponse.getAnswer(), answerText));
+        Message assistant = turnPersistenceService.saveAssistantIfMeetingActive(
+                request.getMeetingSessionId(),
+                assistantMessage(conversation.getId(), request.getTurnId(), ragResponse.getAnswer(), answerText));
 
         return new MeetingAiBufferedResponse(
                 conversation.getId(),
@@ -105,16 +108,6 @@ public class MeetingAiService {
         }
         return new MeetingAiBufferedResponse(
                 conversation.getId(), request.getMeetingSessionId(), request.getTurnId(), display, speech, true);
-    }
-
-    private Message saveMessageIdempotently(Message message) {
-        try {
-            return messageRepository.saveAndFlush(message);
-        } catch (DataIntegrityViolationException duplicate) {
-            return messageRepository.findByConversationIdAndTurnIdAndRole(
-                            message.getConversationId(), message.getTurnId(), message.getRole())
-                    .orElseThrow(() -> duplicate);
-        }
     }
 
     private Message userMessage(Long conversationId, MeetingAiRequest request) {

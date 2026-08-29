@@ -43,4 +43,28 @@ class MeetingAiControllerSecurityTest {
                         .content("{}"))
                 .andExpect(status().isBadRequest());
     }
+
+    @Test
+    void meetingCleanupRequiresDedicatedCredentialAndIsIdempotentWhenConversationIsMissing() throws Exception {
+        String path = InternalMeetingAiAuthenticationFilter.PATH + "/meetings/missing-meeting/cleanup";
+        mockMvc.perform(post(path)).andExpect(status().isUnauthorized());
+        mockMvc.perform(post(path)
+                        .header(InternalMeetingAiAuthenticationFilter.SERVICE_KEY_HEADER,
+                                "meeting-ai-test-service-key")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    void meetingEndingRequiresDedicatedCredentialAndIsIdempotentWhenConversationIsMissing() throws Exception {
+        String path = InternalMeetingAiAuthenticationFilter.PATH + "/meetings/missing-meeting/ending";
+        mockMvc.perform(post(path)).andExpect(status().isUnauthorized());
+        mockMvc.perform(post(path)
+                        .header(InternalMeetingAiAuthenticationFilter.SERVICE_KEY_HEADER,
+                                "meeting-ai-test-service-key")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isOk());
+    }
 }
