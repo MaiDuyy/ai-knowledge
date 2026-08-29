@@ -39,6 +39,8 @@ class MeetingAiServiceTest {
     private RAGService ragService;
     @Mock
     private LlmRateLimiterService llmRateLimiterService;
+    @Mock
+    private MeetingAiTurnPersistenceService turnPersistenceService;
 
     private MeetingAiService meetingAiService;
 
@@ -49,7 +51,8 @@ class MeetingAiServiceTest {
                 messageRepository,
                 ragService,
                 llmRateLimiterService,
-                new ObjectMapper()
+                new ObjectMapper(),
+                turnPersistenceService
         );
     }
 
@@ -63,15 +66,21 @@ class MeetingAiServiceTest {
         when(ragService.performRAGQuery(any(RAGQueryPayload.class))).thenReturn(RAGResponseDTO.builder()
                 .answer("{\"summary\":\"Short answer\",\"details\":[\"First detail\",\"Second detail\"]}")
                 .build());
-        when(messageRepository.saveAndFlush(any(Message.class)))
-                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(turnPersistenceService.saveUserIfMeetingActive(any(), any(Message.class)))
+                .thenAnswer(invocation -> invocation.getArgument(1));
+        when(turnPersistenceService.saveAssistantIfMeetingActive(any(), any(Message.class)))
+                .thenAnswer(invocation -> invocation.getArgument(1));
 
         MeetingAiBufferedResponse response = meetingAiService.answer(request());
 
         ArgumentCaptor<Message> messages = ArgumentCaptor.forClass(Message.class);
-        verify(messageRepository, times(2)).saveAndFlush(messages.capture());
-        Message transcript = messages.getAllValues().getFirst();
-        Message answer = messages.getAllValues().get(1);
+        verify(turnPersistenceService).saveUserIfMeetingActive(
+                org.mockito.ArgumentMatchers.eq("meeting-1"), messages.capture());
+        Message transcript = messages.getValue();
+        ArgumentCaptor<Message> answerCaptor = ArgumentCaptor.forClass(Message.class);
+        verify(turnPersistenceService).saveAssistantIfMeetingActive(
+                org.mockito.ArgumentMatchers.eq("meeting-1"), answerCaptor.capture());
+        Message answer = answerCaptor.getValue();
         assertThat(transcript.getRole()).isEqualTo("user");
         assertThat(transcript.getInputMode()).isEqualTo(MessageInputMode.VOICE);
         assertThat(transcript.getSpeakerUserId()).isEqualTo("user-1");
@@ -107,6 +116,8 @@ class MeetingAiServiceTest {
         assertThat(response.displayText()).isEqualTo("Stored display");
         verify(ragService, never()).performRAGQuery(any());
         verify(messageRepository, never()).saveAndFlush(any());
+        verify(turnPersistenceService, never()).saveUserIfMeetingActive(any(), any());
+        verify(turnPersistenceService, never()).saveAssistantIfMeetingActive(any(), any());
         verify(llmRateLimiterService, never()).acquireRagQuery();
     }
 

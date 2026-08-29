@@ -41,7 +41,7 @@ class MeetingConversationCleanupServiceTest {
     @Test
     void endMeetingConversationMovesActiveConversationToEnding() {
         Conversation conversation = meetingConversation(10L, ConversationStatus.ACTIVE);
-        when(conversationRepository.findByMeetingSessionId("meeting-1"))
+        when(conversationRepository.findByMeetingSessionIdForUpdate("meeting-1"))
                 .thenReturn(Optional.of(conversation));
 
         boolean found = cleanupService.endMeetingConversation("meeting-1");
@@ -55,7 +55,7 @@ class MeetingConversationCleanupServiceTest {
     @Test
     void purgeMeetingConversationDeletesMessagesBeforeConversation() {
         Conversation conversation = meetingConversation(10L, ConversationStatus.ENDED);
-        when(conversationRepository.findByMeetingSessionId("meeting-1"))
+        when(conversationRepository.findByMeetingSessionIdForUpdate("meeting-1"))
                 .thenReturn(Optional.of(conversation));
 
         boolean purged = cleanupService.purgeMeetingConversation("meeting-1");
@@ -70,7 +70,7 @@ class MeetingConversationCleanupServiceTest {
     void cleanupRejectsNonMeetingConversation() {
         Conversation conversation = meetingConversation(10L, ConversationStatus.ACTIVE);
         conversation.setScope(ConversationScope.PERSONAL);
-        when(conversationRepository.findByMeetingSessionId("meeting-1"))
+        when(conversationRepository.findByMeetingSessionIdForUpdate("meeting-1"))
                 .thenReturn(Optional.of(conversation));
 
         assertThatThrownBy(() -> cleanupService.purgeMeetingConversation("meeting-1"))
@@ -81,13 +81,29 @@ class MeetingConversationCleanupServiceTest {
 
     @Test
     void missingMeetingCleanupIsIdempotent() {
-        when(conversationRepository.findByMeetingSessionId("meeting-1"))
+        when(conversationRepository.findByMeetingSessionIdForUpdate("meeting-1"))
                 .thenReturn(Optional.empty());
 
         boolean purged = cleanupService.purgeMeetingConversation("meeting-1");
 
         assertThat(purged).isFalse();
         verify(messageRepository, never()).deleteByConversationId(10L);
+    }
+
+    @Test
+    void completeCleanupDeletesMessagesAndLeavesEndedTombstone() {
+        Conversation conversation = meetingConversation(10L, ConversationStatus.ENDING);
+        when(conversationRepository.findByMeetingSessionIdForUpdate("meeting-1"))
+                .thenReturn(Optional.of(conversation));
+
+        boolean completed = cleanupService.completeMeetingConversationCleanup("meeting-1");
+
+        assertThat(completed).isTrue();
+        InOrder order = inOrder(messageRepository, conversationRepository);
+        order.verify(messageRepository).deleteByConversationId(10L);
+        order.verify(conversationRepository).save(conversation);
+        assertThat(conversation.getStatus()).isEqualTo(ConversationStatus.ENDED);
+        assertThat(conversation.getExpiresAt()).isNotNull();
     }
 
     private Conversation meetingConversation(Long id, ConversationStatus status) {
