@@ -17,11 +17,13 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import reactor.core.publisher.Flux;
 
 import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -119,6 +121,78 @@ class MeetingAiServiceTest {
         verify(turnPersistenceService, never()).saveUserIfMeetingActive(any(), any());
         verify(turnPersistenceService, never()).saveAssistantIfMeetingActive(any(), any());
         verify(llmRateLimiterService, never()).acquireRagQuery();
+    }
+
+    @Test
+    void streamsOnlySpeechSafeSummaryAndDetailsThenCompletesAssistantOnce() {
+        Conversation conversation = activeConversation();
+        Message streaming = Message.builder()
+                .id(21L)
+                .conversationId(10L)
+                .role("assistant")
+                .turnId("turn-1")
+                .content("")
+                .displayContent("")
+                .speechContent("")
+                .status(com.security.security.entity.enumeration.MessageStatus.STREAMING)
+                .build();
+        when(meetingConversationService.findOrCreate("meeting-1", "chat-1", "workspace-1", "user-1"))
+                .thenReturn(conversation);
+        when(messageRepository.findByConversationIdAndTurnIdAndRole(10L, "turn-1", "assistant"))
+                .thenReturn(Optional.empty());
+        when(turnPersistenceService.saveUserIfMeetingActive(any(), any(Message.class)))
+                .thenAnswer(invocation -> invocation.getArgument(1));
+        when(turnPersistenceService.claimAssistantStreaming(any(), any(Message.class)))
+                .thenReturn(new MeetingAiTurnPersistenceService.AssistantTurnClaim(streaming, true));
+        when(ragService.generateMeetingAnswerStream(any(), any(), any(), any()))
+                .thenReturn(new RAGService.MeetingAnswerStream(Flux.just(
+                        "{\"summary\":\"Tóm tắt\",\"details\":[\"[1] Chi tiết\",",
+                        "\"Nội dung [tài liệu](https://example.test)\"],\"sources\":[]}"),
+                        List.of(new RAGService.MeetingSource("document-1", "Policy", "chunk-1"))));
+        when(turnPersistenceService.completeAssistantIfMeetingActive(any(), any(), any(), any()))
+                .thenAnswer(invocation -> streaming);
+
+        var events = meetingAiService.answerStream(request()).collectList().block();
+
+        assertThat(events).extracting(event -> event.type())
+                .containsExactly("source", "speech.delta", "display.delta", "speech.delta", "display.delta", "speech.delta", "display.delta", "done");
+        assertThat(events.get(0)).isInstanceOf(com.security.security.dto.MeetingAiStreamEvent.Source.class);
+        assertThat(events.get(1)).isInstanceOf(com.security.security.dto.MeetingAiStreamEvent.SpeechDelta.class);
+        var speech = (com.security.security.dto.MeetingAiStreamEvent.SpeechDelta) events.get(3);
+        assertThat(speech.text()).doesNotContain("[1]", "https://", "[");
+        verify(turnPersistenceService).completeAssistantIfMeetingActive(
+                org.mockito.ArgumentMatchers.eq("meeting-1"), org.mockito.ArgumentMatchers.eq(21L),
+                org.mockito.ArgumentMatchers.eq("Tóm tắt\n[1] Chi tiết\nNội dung [tài liệu](https://example.test)"),
+                org.mockito.ArgumentMatchers.eq("Tóm tắt Chi tiết Nội dung"));
+        verify(llmRateLimiterService).acquireRagQuery();
+        verify(llmRateLimiterService).releaseRagQuery();
+    }
+
+    @Test
+    void marksStreamingAssistantFailedWhenProviderErrorsBeforeDone() {
+        Conversation conversation = activeConversation();
+        Message streaming = Message.builder()
+                .id(21L).conversationId(10L).role("assistant").turnId("turn-1")
+                .content("").displayContent("").speechContent("")
+                .status(com.security.security.entity.enumeration.MessageStatus.STREAMING).build();
+        when(meetingConversationService.findOrCreate("meeting-1", "chat-1", "workspace-1", "user-1"))
+                .thenReturn(conversation);
+        when(messageRepository.findByConversationIdAndTurnIdAndRole(10L, "turn-1", "assistant"))
+                .thenReturn(Optional.empty());
+        when(turnPersistenceService.saveUserIfMeetingActive(any(), any(Message.class)))
+                .thenAnswer(invocation -> invocation.getArgument(1));
+        when(turnPersistenceService.claimAssistantStreaming(any(), any(Message.class)))
+                .thenReturn(new MeetingAiTurnPersistenceService.AssistantTurnClaim(streaming, true));
+        when(ragService.generateMeetingAnswerStream(any(), any(), any(), any()))
+                .thenReturn(new RAGService.MeetingAnswerStream(
+                        Flux.error(new IllegalStateException("provider failed")), List.of()));
+
+        assertThatThrownBy(() -> meetingAiService.answerStream(request()).blockLast())
+                .hasMessage("provider failed");
+
+        verify(turnPersistenceService, times(1)).failAssistantIfMeetingActive("meeting-1", 21L);
+        verify(turnPersistenceService, never()).completeAssistantIfMeetingActive(any(), any(), any(), any());
+        verify(llmRateLimiterService).releaseRagQuery();
     }
 
     private MeetingAiRequest request() {
