@@ -181,14 +181,31 @@ public class RAGService {
      * Generate answer using RAG + Chat Memory + Streaming
      */
     public Flux<String> generateAnswerStream(Long conversationId, String question, String userId, RAGQueryPayload.UserPermissionContext permissions) {
-        log.info("Generating RAG answer (with memory) for: {}", question);
+        return generateAnswerStream(conversationId, question, userId, permissions, true).tokens();
+    }
+
+    /**
+     * Meeting voice owns its message persistence and terminal status. This
+     * stream therefore preserves provider errors/cancellation for its caller
+     * instead of converting them into an empty successful response.
+     */
+    public MeetingAnswerStream generateMeetingAnswerStream(Long conversationId, String question, String userId,
+                                                            RAGQueryPayload.UserPermissionContext permissions) {
+        return generateAnswerStream(conversationId, question, userId, permissions, false);
+    }
+
+    private MeetingAnswerStream generateAnswerStream(Long conversationId, String question, String userId,
+                                                     RAGQueryPayload.UserPermissionContext permissions,
+                                                     boolean persistConversation) {
+        log.info("Generating RAG answer with memory");
         long startTime = System.currentTimeMillis();
 
         try {
             // 1. Check documents
             List<Document> documents = documentService.getCompletedDocuments(userId);
             if (documents.isEmpty()) {
-                return Flux.just("Hệ thống chưa có tài liệu nội bộ nào được upload.");
+                return new MeetingAnswerStream(
+                        Flux.just("Hệ thống chưa có tài liệu nội bộ nào được upload."), List.of());
             }
 
             // 2. Rewrite follow-up questions into standalone queries using conversation history
@@ -203,6 +220,7 @@ public class RAGService {
                     topK,
                     similarityThreshold
             );
+            List<MeetingSource> meetingSources = toMeetingSources(relevantDocs);
 
             boolean[] partialResults = new boolean[]{false};
             buildFilterExpression(permissions, userId, partialResults);
@@ -214,7 +232,7 @@ public class RAGService {
             if (conf.level().equals("NONE") || conf.score() < CONFIDENCE_LOW_GUARD) {
                 log.info("[RAG stream] Guard triggered — returning no-context JSON");
                 String fallback = iDontKnowResponse(partialResults[0]).getAnswer();
-                return Flux.just(fallback);
+                return new MeetingAnswerStream(Flux.just(fallback), meetingSources);
             }
             // ─────────────────────────────────────────────────────────────────
 
@@ -225,8 +243,11 @@ public class RAGService {
             String systemPrompt = buildSystemPrompt(conf.level(), conf.score());
             String userPrompt = buildUserPrompt(effectiveQuestion, context);
 
-            // 6. Save original user question to DB (not the rewritten one — user sees what they typed)
-            conversationService.saveMessage(conversationId, "user", question, null, null);
+            // 6. The standard chat path owns its persistence. Meeting voice
+            // persists user/assistant messages transactionally by turnId.
+            if (persistConversation) {
+                conversationService.saveMessage(conversationId, "user", question, null, null);
+            }
 
             StringBuilder fullResponse = new StringBuilder();
 
@@ -260,19 +281,23 @@ public class RAGService {
                     })
                     .filter(token -> !token.isEmpty());
 
-            if (partialResults[0]) {
+            if (partialResults[0] && persistConversation) {
                 answerStream = answerStream.concatWith(Flux.just("\n\n*Chú ý: Hệ thống quản lý phòng ban hiện đang bảo trì. Kết quả tìm kiếm chỉ truy xuất dữ liệu trong Workspace này.*"));
             }
 
             // 7. CALL LLM WITH MEMORY
-            return answerStream
-                    .doOnNext(token -> fullResponse.append(token))
+            Flux<String> processedStream = answerStream
+                    .doOnNext(token -> {
+                        if (persistConversation) {
+                            fullResponse.append(token);
+                        }
+                    })
                     .doOnError(e -> log.error("RAG stream error: {}", e.getMessage()))
-                    .onErrorResume(e -> Flux.empty())
+                    .onErrorResume(e -> persistConversation ? Flux.empty() : Flux.error(e))
                     .doFinally(signal -> {
                         long duration = System.currentTimeMillis() - startTime;
 
-                        if (fullResponse.length() > 0) {
+                        if (persistConversation && fullResponse.length() > 0) {
                             conversationService.saveMessage(
                                     conversationId,
                                     "assistant",
@@ -281,18 +306,47 @@ public class RAGService {
                                     (int) duration);
                         }
 
-                        List<com.security.security.entity.Message> msgs = conversationService.getMessages(conversationId);
-                        if (msgs.size() <= 2) {
-                            conversationService.updateConversationTitle(conversationId, question);
+                        if (persistConversation) {
+                            List<com.security.security.entity.Message> msgs = conversationService.getMessages(conversationId);
+                            if (msgs.size() <= 2) {
+                                conversationService.updateConversationTitle(conversationId, question);
+                            }
                         }
 
-                        log.info("RAG finished (signal={}). chars={}, duration={}ms", signal, fullResponse.length(), duration);
+                        log.info("RAG finished (signal={}). chars={}, duration={}ms", signal,
+                                persistConversation ? fullResponse.length() : 0, duration);
                     });
+            return new MeetingAnswerStream(processedStream, meetingSources);
 
         } catch (Exception e) {
             log.error("Error in RAG pipeline", e);
-            return Flux.error(e);
+            return new MeetingAnswerStream(Flux.error(e), List.of());
         }
+    }
+
+    private List<MeetingSource> toMeetingSources(List<org.springframework.ai.document.Document> documents) {
+        java.util.LinkedHashMap<String, MeetingSource> sources = new java.util.LinkedHashMap<>();
+        for (org.springframework.ai.document.Document document : documents) {
+            Map<String, Object> metadata = document.getMetadata();
+            String documentId = getString(metadata, "documentId", "");
+            String chunkId = document.getId();
+            if (documentId.isBlank() || chunkId == null || chunkId.isBlank()) {
+                continue;
+            }
+            String title = getString(metadata, "fileName", "Tài liệu nội bộ");
+            MeetingSource source = new MeetingSource(documentId, title, chunkId);
+            sources.putIfAbsent(documentId + ':' + chunkId, source);
+            if (sources.size() >= 10) {
+                break;
+            }
+        }
+        return List.copyOf(sources.values());
+    }
+
+    public record MeetingAnswerStream(Flux<String> tokens, List<MeetingSource> sources) {
+    }
+
+    public record MeetingSource(String documentId, String title, String chunkId) {
     }
 
     /**

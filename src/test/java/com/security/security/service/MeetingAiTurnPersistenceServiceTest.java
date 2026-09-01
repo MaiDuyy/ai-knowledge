@@ -64,4 +64,36 @@ class MeetingAiTurnPersistenceServiceTest {
                 .hasMessage("Meeting conversation is no longer active");
         verify(messageRepository, never()).saveAndFlush(transcript);
     }
+
+    @Test
+    void claimsAnExistingAssistantTurnWithoutCreatingAnotherModelOwner() {
+        Conversation conversation = Conversation.builder()
+                .id(10L)
+                .meetingSessionId("meeting-1")
+                .scope(ConversationScope.MEETING)
+                .status(ConversationStatus.ACTIVE)
+                .build();
+        Message existing = Message.builder()
+                .id(22L)
+                .conversationId(10L)
+                .turnId("turn-1")
+                .role("assistant")
+                .build();
+        Message candidate = Message.builder()
+                .conversationId(10L)
+                .turnId("turn-1")
+                .role("assistant")
+                .build();
+        when(conversationRepository.findByMeetingSessionIdForUpdate("meeting-1"))
+                .thenReturn(Optional.of(conversation));
+        when(messageRepository.findByConversationIdAndTurnIdAndRole(10L, "turn-1", "assistant"))
+                .thenReturn(Optional.of(existing));
+
+        MeetingAiTurnPersistenceService.AssistantTurnClaim claim =
+                persistenceService.claimAssistantStreaming("meeting-1", candidate);
+
+        org.assertj.core.api.Assertions.assertThat(claim.created()).isFalse();
+        org.assertj.core.api.Assertions.assertThat(claim.message()).isSameAs(existing);
+        verify(messageRepository, never()).saveAndFlush(candidate);
+    }
 }
