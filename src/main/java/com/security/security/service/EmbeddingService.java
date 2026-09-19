@@ -257,26 +257,36 @@ public class EmbeddingService {
         String userId = document.getUserId();
 
         String workspaceName = "System";
-        if (workspaceId != null && !workspaceId.isBlank() && !"workspace-default".equals(workspaceId)) {
+        if ("ALL".equalsIgnoreCase(workspaceId) || "GLOBAL".equalsIgnoreCase(workspaceId)) {
+            workspaceName = "All Workspaces";
+        } else if (workspaceId != null && !workspaceId.isBlank() && !"workspace-default".equals(workspaceId)) {
             try {
                 Map<String, Object> wsMap = workspaceServiceClient.getWorkspace(workspaceId, userId);
-                if (wsMap != null && wsMap.get("name") != null) {
+                if (wsMap != null && wsMap.get("name") != null && !wsMap.get("name").toString().isBlank()) {
                     workspaceName = String.valueOf(wsMap.get("name"));
+                } else {
+                    workspaceName = workspaceId;
                 }
             } catch (Exception e) {
                 log.warn("[EmbeddingService] Failed to resolve workspace for id={}: {}", workspaceId, e.getMessage());
+                workspaceName = workspaceId;
             }
         }
 
         String departmentName = "General";
-        if (departmentId != null && !departmentId.isBlank()) {
+        if ("ALL".equalsIgnoreCase(departmentId) || "GLOBAL".equalsIgnoreCase(departmentId)) {
+            departmentName = "All Departments";
+        } else if (departmentId != null && !departmentId.isBlank()) {
             try {
                 Map<String, Object> deptMap = workspaceServiceClient.getDepartment(departmentId, userId);
-                if (deptMap != null && deptMap.get("name") != null) {
+                if (deptMap != null && deptMap.get("name") != null && !deptMap.get("name").toString().isBlank()) {
                     departmentName = String.valueOf(deptMap.get("name"));
+                } else {
+                    departmentName = departmentId;
                 }
             } catch (Exception e) {
                 log.warn("[EmbeddingService] Failed to resolve department for id={}: {}", departmentId, e.getMessage());
+                departmentName = departmentId;
             }
         }
 

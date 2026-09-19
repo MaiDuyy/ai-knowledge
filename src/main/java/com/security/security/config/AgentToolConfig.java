@@ -17,6 +17,7 @@ import com.security.security.service.WikiIssueService;
 import com.security.security.dto.WikiIssueDTO;
 import com.security.security.dtorequest.RAGQueryPayload;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -67,20 +68,36 @@ public class AgentToolConfig {
         log.info("[Agent Tool] searchKnowledge: query='{}'", input.query());
         try {
             String filterExprStr = ragService.getFilterExpressionStr(permissions, userId);
-            var docs = vectorStore.similaritySearch(
-                    SearchRequest.builder()
-                            .query(input.query())
-                            .topK(5)
-                            .similarityThreshold(0.2)
-                            .filterExpression(filterExprStr)
-                            .build()
-            );
+            SearchRequest.Builder reqBuilder = SearchRequest.builder()
+                    .query(input.query())
+                    .topK(5)
+                    .similarityThreshold(0.0);
+            if (filterExprStr != null && !filterExprStr.isBlank()) {
+                reqBuilder.filterExpression(filterExprStr);
+            }
+            var docs = vectorStore.similaritySearch(reqBuilder.build());
             List<String> texts = docs.stream()
                     .map(doc -> {
                         String fileName = (String) doc.getMetadata().getOrDefault("fileName", "Document");
                         return "[" + fileName + "]\n" + doc.getText();
                     })
                     .collect(Collectors.toList());
+
+            // Fallback: If vectorStore returns empty (e.g. vector index not populated), search Wiki DB by keyword
+            if (texts.isEmpty()) {
+                log.info("[Agent Tool] searchKnowledge: VectorStore empty, falling back to DB keyword search for query='{}'", input.query());
+                String q = input.query().toLowerCase();
+                texts = wikiPageRepository.findAll().stream()
+                        .filter(p -> ragService.isPageAccessible(p, permissions, userId))
+                        .filter(p -> (p.getTitle() != null && p.getTitle().toLowerCase().contains(q)) ||
+                                     (p.getContent() != null && p.getContent().toLowerCase().contains(q)) ||
+                                     (p.getSummary() != null && p.getSummary().toLowerCase().contains(q)) ||
+                                     (p.getTags() != null && p.getTags().toLowerCase().contains(q)))
+                        .limit(5)
+                        .map(p -> String.format("[Wiki: %s]\n%s", p.getTitle(), p.getContent()))
+                        .collect(Collectors.toList());
+            }
+
             return new KnowledgeSearchOutput(texts, texts.size());
         } catch (Exception e) {
             log.error("[Agent Tool] searchKnowledge error", e);
@@ -196,18 +213,35 @@ public class AgentToolConfig {
         log.info("[Agent Tool] searchWiki: query='{}'", input.query());
         try {
             String permExprStr = ragService.getFilterExpressionStr(permissions, userId);
-            String finalExprStr = "type == 'wiki' && (" + permExprStr + ")";
-
-            var docs = vectorStore.similaritySearch(
-                    SearchRequest.builder()
-                            .query(input.query())
-                            .topK(5)
-                            .filterExpression(finalExprStr)
-                            .build()
-            );
+            SearchRequest.Builder reqBuilder = SearchRequest.builder()
+                    .query(input.query())
+                    .topK(5)
+                    .similarityThreshold(0.0);
+            if (permExprStr != null && !permExprStr.isBlank()) {
+                reqBuilder.filterExpression("type == 'wiki' && (" + permExprStr + ")");
+            } else {
+                reqBuilder.filterExpression("type == 'wiki'");
+            }
+            var docs = vectorStore.similaritySearch(reqBuilder.build());
             List<String> texts = docs.stream()
                     .map(doc -> doc.getText())
                     .collect(Collectors.toList());
+
+            // Fallback to database keyword search if vectorStore returned 0 results
+            if (texts.isEmpty()) {
+                log.info("[Agent Tool] searchWiki: VectorStore returned 0 results, falling back to WikiPage DB search for query='{}'", input.query());
+                String q = input.query().toLowerCase();
+                texts = wikiPageRepository.findAll().stream()
+                        .filter(p -> ragService.isPageAccessible(p, permissions, userId))
+                        .filter(p -> (p.getTitle() != null && p.getTitle().toLowerCase().contains(q)) ||
+                                     (p.getContent() != null && p.getContent().toLowerCase().contains(q)) ||
+                                     (p.getSummary() != null && p.getSummary().toLowerCase().contains(q)) ||
+                                     (p.getTags() != null && p.getTags().toLowerCase().contains(q)))
+                        .limit(5)
+                        .map(p -> String.format("[Wiki: %s]\n%s", p.getTitle(), p.getContent()))
+                        .collect(Collectors.toList());
+            }
+
             return new SearchWikiOutput(texts);
         } catch (Exception e) {
             log.error("[Agent Tool] searchWiki error", e);
@@ -242,8 +276,25 @@ public class AgentToolConfig {
         String wsId = input.workspaceId() != null && !input.workspaceId().isBlank()
                 ? input.workspaceId()
                 : (this.workspaceId != null && !this.workspaceId.isBlank() ? this.workspaceId : "default-workspace");
+
+        List<WikiPage> rawPages;
+        if ("ALL".equalsIgnoreCase(wsId) || "GLOBAL".equalsIgnoreCase(wsId) || "all".equalsIgnoreCase(wsId)) {
+            rawPages = wikiPageRepository.findAll();
+        } else {
+            rawPages = new ArrayList<>(wikiPageRepository.findByWorkspaceId(wsId));
+            // Also include global / default workspace pages
+            List<WikiPage> globalPages = wikiPageRepository.findByWorkspaceId("ALL");
+            globalPages.addAll(wikiPageRepository.findByWorkspaceId("GLOBAL"));
+            globalPages.addAll(wikiPageRepository.findByWorkspaceId("default-workspace"));
+            for (WikiPage gp : globalPages) {
+                if (rawPages.stream().noneMatch(p -> p.getId().equals(gp.getId()))) {
+                    rawPages.add(gp);
+                }
+            }
+        }
+
         // RBAC: filter pages the current user is allowed to see
-        List<String> pages = wikiPageRepository.findByWorkspaceId(wsId).stream()
+        List<String> pages = rawPages.stream()
                 .filter(p -> ragService.isPageAccessible(p, permissions, userId))
                 .map(p -> String.format("ID: %d | Title: %s", p.getId(), p.getTitle()))
                 .collect(Collectors.toList());
