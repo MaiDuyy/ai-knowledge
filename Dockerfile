@@ -14,12 +14,14 @@ COPY src ./src
 RUN mvn package -DskipTests
 
 # --- Stage Production ---
-FROM eclipse-temurin:21-jre-alpine AS production
+FROM eclipse-temurin:21-jre-jammy AS production
 
 WORKDIR /app
 
 # Create a non-root user for security
-RUN addgroup -S spring && adduser -S spring -G spring
+RUN apt-get update && apt-get install -y --no-install-recommends wget && \
+    rm -rf /var/lib/apt/lists/* && \
+    groupadd --system spring && useradd --system --gid spring --create-home spring
 
 # Create uploads directory and change ownership of /app to spring
 RUN mkdir -p /app/uploads && chown -R spring:spring /app

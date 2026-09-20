@@ -2,6 +2,10 @@ package com.security.security.service;
 
 import com.security.security.entity.Conversation;
 import com.security.security.entity.Message;
+import com.security.security.entity.enumeration.ConversationScope;
+import com.security.security.entity.enumeration.ConversationStatus;
+import com.security.security.entity.enumeration.MessageInputMode;
+import com.security.security.entity.enumeration.MessageStatus;
 import com.security.security.repository.ConversationRepository;
 import com.security.security.repository.MessageRepository;
 import lombok.RequiredArgsConstructor;
@@ -31,6 +35,9 @@ public class ConversationService {
                 .userId(userId)
                 .chatId(chatId)
                 .title(title != null ? title : "New Conversation")
+                .createdBy(userId)
+                .scope(ConversationScope.PERSONAL)
+                .status(ConversationStatus.ACTIVE)
                 .build();
 
         return conversationRepository.save(conversation);
@@ -79,6 +86,9 @@ public class ConversationService {
                 .conversationId(conversationId)
                 .role(role)
                 .content(content)
+                .displayContent(content)
+                .inputMode(MessageInputMode.TEXT)
+                .status(MessageStatus.COMPLETED)
                 .tokensUsed(tokensUsed)
                 .responseTimeMs(responseTimeMs)
                 .build();
@@ -89,13 +99,10 @@ public class ConversationService {
     /**
      * Delete conversation and its messages
      */
-    /**
-     * Delete conversation and its messages
-     */
     @Transactional
     public void deleteConversation(Long conversationId, String userId) {
         Conversation conversation = getConversation(conversationId, userId);
-        // Messages will be deleted by cascade if configured, or manually
+        messageRepository.deleteByConversationId(conversationId);
         conversationRepository.delete(conversation);
         log.info("Conversation deleted: {}", conversationId);
     }

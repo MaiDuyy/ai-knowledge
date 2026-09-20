@@ -41,10 +41,12 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.Collections;
+import java.util.Optional;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.security.security.client.WorkspaceServiceClient;
 import com.security.security.dto.UserPermissionContext;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.security.access.AccessDeniedException;
 
 
@@ -69,7 +71,8 @@ public class DocumentService {
     private final WikiPageRepository wikiPageRepository;
     private final WikiPageDraftRepository wikiPageDraftRepository;
     private final WikiLinkRepository wikiLinkRepository;
-    private final org.springframework.data.redis.core.StringRedisTemplate redisTemplate;
+    /** Optional: absent when Redis auto-config is excluded (e.g. mongodb-benchmark). */
+    private final Optional<StringRedisTemplate> redisTemplate;
     private final PostProcessingCoordinator postProcessingCoordinator;
 
     @Value("${app.upload.dir:uploads}")
@@ -274,9 +277,9 @@ public class DocumentService {
 
         // Check Redis/DB cache for duplicate completed document
         String cachedDocId = null;
-        if (redisTemplate != null) {
+        if (redisTemplate.isPresent()) {
             try {
-                cachedDocId = redisTemplate.opsForValue().get("doc:hash:" + fileHash);
+                cachedDocId = redisTemplate.get().opsForValue().get("doc:hash:" + fileHash);
                 if (cachedDocId != null) {
                     log.info("Duplicate document detected in Redis cache: hash={}, cachedDocId={}", fileHash, cachedDocId);
                 }

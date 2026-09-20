@@ -4,7 +4,7 @@ import com.security.security.dto.WikiGraphCommunityDto;
 import com.security.security.dto.WikiHealthDto;
 import com.security.security.entity.WikiLink;
 import com.security.security.entity.WikiPage;
-import com.security.security.entity.enumeration.WikiPageType;
+import com.security.security.entity.mongo.MongoWikiPage;
 import com.security.security.repository.WikiLinkRepository;
 import com.security.security.repository.WikiPageRepository;
 import lombok.RequiredArgsConstructor;
@@ -13,6 +13,11 @@ import org.jgrapht.Graph;
 import org.jgrapht.alg.clustering.LabelPropagationClustering;
 import org.jgrapht.graph.DefaultEdge;
 import org.jgrapht.graph.DefaultUndirectedGraph;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.aggregation.Aggregation;
+import org.springframework.data.mongodb.core.aggregation.GraphLookupOperation;
+import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
@@ -25,6 +30,8 @@ public class WikiGraphService {
 
     private final WikiPageRepository wikiPageRepository;
     private final WikiLinkRepository wikiLinkRepository;
+    /** Present only under mongodb / mongodb-benchmark profiles. */
+    private final ObjectProvider<MongoTemplate> mongoTemplateProvider;
 
     public WikiGraphCommunityDto detectCommunities(String workspaceId) {
         List<WikiPage> pages = new ArrayList<>(wikiPageRepository.findByWorkspaceId(workspaceId));
@@ -178,5 +185,109 @@ public class WikiGraphService {
             }
         }
         return score;
+    }
+
+    /**
+     * Multi-hop wiki reachability via MongoDB {@code $graphLookup} on embedded {@code outboundSlugs}.
+     * Requires MongoTemplate (profiles mongodb / mongodb-benchmark).
+     *
+     * @return reachable page slugs (excluding start), empty if Mongo unavailable or start missing
+     */
+    public List<String> graphLookupReachable(String startSlug, int maxDepth) {
+        MongoTemplate mongoTemplate = mongoTemplateProvider.getIfAvailable();
+        if (mongoTemplate == null) {
+            log.warn("[WikiGraphService] MongoTemplate not available — graphLookupReachable skipped");
+            return List.of();
+        }
+        if (startSlug == null || startSlug.isBlank()) {
+            return List.of();
+        }
+
+        int depth = Math.max(0, maxDepth - 1);
+        GraphLookupOperation graphLookup = GraphLookupOperation.builder()
+                .from("wiki_pages")
+                .startWith("outboundSlugs")
+                .connectFrom("outboundSlugs")
+                .connectTo("slug")
+                .maxDepth(depth)
+                .depthField("hopCount")
+                .as("reachablePages");
+
+        Aggregation aggregation = Aggregation.newAggregation(
+                Aggregation.match(Criteria.where("slug").is(startSlug)),
+                graphLookup
+        );
+
+        List<org.bson.Document> results = mongoTemplate.aggregate(
+                aggregation, "wiki_pages", org.bson.Document.class).getMappedResults();
+
+        LinkedHashSet<String> slugs = new LinkedHashSet<>();
+        for (org.bson.Document doc : results) {
+            Object reachable = doc.get("reachablePages");
+            if (!(reachable instanceof List<?> list)) {
+                continue;
+            }
+            for (Object item : list) {
+                if (item instanceof org.bson.Document pageDoc) {
+                    String slug = pageDoc.getString("slug");
+                    if (slug != null && !slug.equals(startSlug)) {
+                        slugs.add(slug);
+                    }
+                } else if (item instanceof MongoWikiPage mwp && mwp.getSlug() != null
+                        && !mwp.getSlug().equals(startSlug)) {
+                    slugs.add(mwp.getSlug());
+                }
+            }
+        }
+        log.debug("[WikiGraphService] $graphLookup start={} depth={} reachable={}",
+                startSlug, maxDepth, slugs.size());
+        return new ArrayList<>(slugs);
+    }
+
+    /**
+     * In-memory multi-hop reachability using JPA wiki_pages + wiki_links (PostgreSQL baseline).
+     */
+    public List<String> jgraphtReachable(String startSlug, int maxDepth) {
+        List<WikiPage> pages = wikiPageRepository.findAll();
+        Map<String, Long> slugToId = new HashMap<>();
+        Map<Long, String> idToSlug = new HashMap<>();
+        for (WikiPage p : pages) {
+            slugToId.put(p.getSlug(), p.getId());
+            idToSlug.put(p.getId(), p.getSlug());
+        }
+        Long startId = slugToId.get(startSlug);
+        if (startId == null) {
+            return List.of();
+        }
+
+        Map<Long, List<Long>> adj = new HashMap<>();
+        for (WikiLink link : wikiLinkRepository.findAll()) {
+            Long toId = slugToId.get(link.getToSlug());
+            if (toId != null) {
+                adj.computeIfAbsent(link.getFromPageId(), k -> new ArrayList<>()).add(toId);
+            }
+        }
+
+        Set<String> reachable = new LinkedHashSet<>();
+        List<Long> frontier = new ArrayList<>();
+        frontier.add(startId);
+        Set<Long> visited = new HashSet<>();
+        visited.add(startId);
+        for (int d = 0; d < maxDepth && !frontier.isEmpty(); d++) {
+            List<Long> next = new ArrayList<>();
+            for (Long node : frontier) {
+                for (Long neigh : adj.getOrDefault(node, List.of())) {
+                    if (visited.add(neigh)) {
+                        String slug = idToSlug.get(neigh);
+                        if (slug != null) {
+                            reachable.add(slug);
+                        }
+                        next.add(neigh);
+                    }
+                }
+            }
+            frontier = next;
+        }
+        return new ArrayList<>(reachable);
     }
 }

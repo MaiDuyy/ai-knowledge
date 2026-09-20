@@ -3,10 +3,13 @@ target/
 .mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
 !**/src/test/**/target/
-src/test
+# src/test  # Unignored so tests can be committed
 uploads/
 src/main/resources/application-dev.properties
-src/main/test/resources/application-test.properties
+src/main/resources/application-mongodb.properties
+src/main/resources/application-mongodb-benchmark.properties
+src/test/resources/application-test.properties
+
 docs/
 ### STS ###
 .apt_generated
@@ -48,9 +51,9 @@ Jenkinsfile
 openapi.json
 openapi.utf8.json
 
-# Benchmark
+# Benchmark (Unignored so benchmark files and results can be tracked)
 benchmark/
-benchmark-eval/
-scripts/
-benchmark_results_evaluation.md
-benchmark_results_mrp_wiki.md
+# benchmark-eval/
+# scripts/
+# benchmark_results_evaluation.md
+# benchmark_results_mrp_wiki.md

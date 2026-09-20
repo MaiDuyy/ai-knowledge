@@ -3,11 +3,17 @@ package com.security.security.service;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 @Component
+@ConditionalOnProperty(
+    name = "database-migration-bootstrap.enabled",
+    havingValue = "true",
+    matchIfMissing = true
+)
 @Slf4j
 @RequiredArgsConstructor
 public class DatabaseMigrationBootstrapper implements CommandLineRunner {

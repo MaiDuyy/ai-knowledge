@@ -38,6 +38,7 @@ public class WikiDraftService {
     private final NatsEventPublisher natsEventPublisher;
     private final ChatClient chatClient;
     private final WikiIssueService wikiIssueService;
+    private final Optional<com.security.security.repository.mongo.MongoWikiPageRepository> mongoWikiPageRepository;
 
     @org.springframework.beans.factory.annotation.Autowired
     @org.springframework.context.annotation.Lazy
@@ -571,7 +572,7 @@ public class WikiDraftService {
                     }
                 }
             }
-            
+
             List<com.security.security.entity.WikiLink> linksToSave = new java.util.ArrayList<>();
             for (String tSlug : uniqueSlugs) {
                 linksToSave.add(com.security.security.entity.WikiLink.builder()
@@ -579,22 +580,42 @@ public class WikiDraftService {
                         .toSlug(tSlug)
                         .build());
             }
-            
+
             if (!linksToSave.isEmpty()) {
                 wikiLinkRepository.saveAll(linksToSave);
                 wikiLinkRepository.flush(); // Flush saves immediately to keep the persistence context clean
             }
+
+            if (mongoWikiPageRepository != null && mongoWikiPageRepository.isPresent()) {
+                try {
+                    var mongoRepo = mongoWikiPageRepository.get();
+                    wikiPageRepository.findById(fromPageId).ifPresent(page -> {
+                        var existingMongoPage = mongoRepo.findByPostgresWikiPageId(fromPageId)
+                                .or(() -> mongoRepo.findBySlug(page.getSlug()))
+                                .orElseGet(() -> com.security.security.entity.mongo.MongoWikiPage.builder()
+                                        .postgresWikiPageId(page.getId())
+                                        .title(page.getTitle())
+                                        .slug(page.getSlug())
+                                        .workspaceId(ScopeNormalizer.normalizeWorkspace(page.getWorkspaceId()))
+                                        .departmentId(ScopeNormalizer.normalizeDepartment(page.getDepartmentId()))
+                                        .build());
+
+                        existingMongoPage.setOutboundSlugs(new java.util.ArrayList<>(uniqueSlugs));
+                        existingMongoPage.setContent(page.getContent());
+                        existingMongoPage.setTitle(page.getTitle());
+                        mongoRepo.save(existingMongoPage);
+                    });
+                } catch (Exception ex) {
+                    log.warn("[WikiDraftService] Non-blocking MongoWikiPage sync skipped: {}", ex.getMessage());
+                }
+            }
+
             log.info("[WikiDraftService] Refreshed {} graph links for page ID {}", uniqueSlugs.size(), fromPageId);
         } catch (Exception e) {
             log.error("[WikiDraftService] Error refreshing graph links for page ID {}: {}", fromPageId, e.getMessage(), e);
             throw e;
         }
     }
-
-    /**
-     * Rebuild wiki graph links for ALL approved pages in a workspace, then refresh the index page.
-     * Call this after MRP pipeline completes or via admin "Rebuild Index" button.
-     */
     public Map<String, Object> rebuildAllLinksAndIndex(String workspaceId, String departmentId) {
         String normalizedWorkspaceId = ScopeNormalizer.normalizeWorkspace(workspaceId);
         String normalizedDeptId = ScopeNormalizer.normalizeDepartment(departmentId);

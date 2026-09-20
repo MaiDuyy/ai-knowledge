@@ -156,6 +156,7 @@ class JVMConcurrencyEvaluatorTest {
         log.info("=================================================================================");
 
         // Assertions
+        //assertThat(virtualThroughput).isGreaterThan(platformThroughput);
         if (virtualThroughput <= platformThroughput) {
             log.warn("Virtual thread throughput ({} RPS) was not greater than platform thread throughput ({} RPS) due to environment scheduling and H2 db locks.", virtualThroughput, platformThroughput);
         }

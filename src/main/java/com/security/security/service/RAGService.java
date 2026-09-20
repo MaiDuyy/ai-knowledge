@@ -44,6 +44,8 @@ import com.security.security.entity.enumeration.SecurityClassification;
 @RequiredArgsConstructor
 public class RAGService {
 
+    private static final String MEETING_SHARED_RAG_SCOPE = "MEETING_SHARED";
+
     private static final String RAG_RESPONSE_SCHEMA = """
             {
               "type": "object",
@@ -179,14 +181,31 @@ public class RAGService {
      * Generate answer using RAG + Chat Memory + Streaming
      */
     public Flux<String> generateAnswerStream(Long conversationId, String question, String userId, RAGQueryPayload.UserPermissionContext permissions) {
-        log.info("Generating RAG answer (with memory) for: {}", question);
+        return generateAnswerStream(conversationId, question, userId, permissions, true).tokens();
+    }
+
+    /**
+     * Meeting voice owns its message persistence and terminal status. This
+     * stream therefore preserves provider errors/cancellation for its caller
+     * instead of converting them into an empty successful response.
+     */
+    public MeetingAnswerStream generateMeetingAnswerStream(Long conversationId, String question, String userId,
+                                                            RAGQueryPayload.UserPermissionContext permissions) {
+        return generateAnswerStream(conversationId, question, userId, permissions, false);
+    }
+
+    private MeetingAnswerStream generateAnswerStream(Long conversationId, String question, String userId,
+                                                     RAGQueryPayload.UserPermissionContext permissions,
+                                                     boolean persistConversation) {
+        log.info("Generating RAG answer with memory");
         long startTime = System.currentTimeMillis();
 
         try {
             // 1. Check documents
             List<Document> documents = documentService.getCompletedDocuments(userId);
             if (documents.isEmpty()) {
-                return Flux.just("Hệ thống chưa có tài liệu nội bộ nào được upload.");
+                return new MeetingAnswerStream(
+                        Flux.just("Hệ thống chưa có tài liệu nội bộ nào được upload."), List.of());
             }
 
             // 2. Rewrite follow-up questions into standalone queries using conversation history
@@ -201,6 +220,7 @@ public class RAGService {
                     topK,
                     similarityThreshold
             );
+            List<MeetingSource> meetingSources = toMeetingSources(relevantDocs);
 
             boolean[] partialResults = new boolean[]{false};
             buildFilterExpression(permissions, userId, partialResults);
@@ -212,7 +232,7 @@ public class RAGService {
             if (conf.level().equals("NONE") || conf.score() < CONFIDENCE_LOW_GUARD) {
                 log.info("[RAG stream] Guard triggered — returning no-context JSON");
                 String fallback = iDontKnowResponse(partialResults[0]).getAnswer();
-                return Flux.just(fallback);
+                return new MeetingAnswerStream(Flux.just(fallback), meetingSources);
             }
             // ─────────────────────────────────────────────────────────────────
 
@@ -223,8 +243,11 @@ public class RAGService {
             String systemPrompt = buildSystemPrompt(conf.level(), conf.score());
             String userPrompt = buildUserPrompt(effectiveQuestion, context);
 
-            // 6. Save original user question to DB (not the rewritten one — user sees what they typed)
-            conversationService.saveMessage(conversationId, "user", question, null, null);
+            // 6. The standard chat path owns its persistence. Meeting voice
+            // persists user/assistant messages transactionally by turnId.
+            if (persistConversation) {
+                conversationService.saveMessage(conversationId, "user", question, null, null);
+            }
 
             StringBuilder fullResponse = new StringBuilder();
 
@@ -258,19 +281,23 @@ public class RAGService {
                     })
                     .filter(token -> !token.isEmpty());
 
-            if (partialResults[0]) {
+            if (partialResults[0] && persistConversation) {
                 answerStream = answerStream.concatWith(Flux.just("\n\n*Chú ý: Hệ thống quản lý phòng ban hiện đang bảo trì. Kết quả tìm kiếm chỉ truy xuất dữ liệu trong Workspace này.*"));
             }
 
             // 7. CALL LLM WITH MEMORY
-            return answerStream
-                    .doOnNext(token -> fullResponse.append(token))
+            Flux<String> processedStream = answerStream
+                    .doOnNext(token -> {
+                        if (persistConversation) {
+                            fullResponse.append(token);
+                        }
+                    })
                     .doOnError(e -> log.error("RAG stream error: {}", e.getMessage()))
-                    .onErrorResume(e -> Flux.empty())
+                    .onErrorResume(e -> persistConversation ? Flux.empty() : Flux.error(e))
                     .doFinally(signal -> {
                         long duration = System.currentTimeMillis() - startTime;
 
-                        if (fullResponse.length() > 0) {
+                        if (persistConversation && fullResponse.length() > 0) {
                             conversationService.saveMessage(
                                     conversationId,
                                     "assistant",
@@ -279,18 +306,47 @@ public class RAGService {
                                     (int) duration);
                         }
 
-                        List<com.security.security.entity.Message> msgs = conversationService.getMessages(conversationId);
-                        if (msgs.size() <= 2) {
-                            conversationService.updateConversationTitle(conversationId, question);
+                        if (persistConversation) {
+                            List<com.security.security.entity.Message> msgs = conversationService.getMessages(conversationId);
+                            if (msgs.size() <= 2) {
+                                conversationService.updateConversationTitle(conversationId, question);
+                            }
                         }
 
-                        log.info("RAG finished (signal={}). chars={}, duration={}ms", signal, fullResponse.length(), duration);
+                        log.info("RAG finished (signal={}). chars={}, duration={}ms", signal,
+                                persistConversation ? fullResponse.length() : 0, duration);
                     });
+            return new MeetingAnswerStream(processedStream, meetingSources);
 
         } catch (Exception e) {
             log.error("Error in RAG pipeline", e);
-            return Flux.error(e);
+            return new MeetingAnswerStream(Flux.error(e), List.of());
         }
+    }
+
+    private List<MeetingSource> toMeetingSources(List<org.springframework.ai.document.Document> documents) {
+        java.util.LinkedHashMap<String, MeetingSource> sources = new java.util.LinkedHashMap<>();
+        for (org.springframework.ai.document.Document document : documents) {
+            Map<String, Object> metadata = document.getMetadata();
+            String documentId = getString(metadata, "documentId", "");
+            String chunkId = document.getId();
+            if (documentId.isBlank() || chunkId == null || chunkId.isBlank()) {
+                continue;
+            }
+            String title = getString(metadata, "fileName", "Tài liệu nội bộ");
+            MeetingSource source = new MeetingSource(documentId, title, chunkId);
+            sources.putIfAbsent(documentId + ':' + chunkId, source);
+            if (sources.size() >= 10) {
+                break;
+            }
+        }
+        return List.copyOf(sources.values());
+    }
+
+    public record MeetingAnswerStream(Flux<String> tokens, List<MeetingSource> sources) {
+    }
+
+    public record MeetingSource(String documentId, String title, String chunkId) {
     }
 
     /**
@@ -483,8 +539,15 @@ public class RAGService {
     private String rewriteQueryWithContext(String originalQuery, Long conversationId) {
         if (conversationId == null) return originalQuery;
 
-        List<com.security.security.entity.Message> history =
-                conversationService.getRecentMessages(conversationId, 6);
+        List<com.security.security.entity.Message> history = new ArrayList<>(
+                conversationService.getRecentMessages(conversationId, 6));
+        // Meeting voice persists the final transcript before RAG. Do not rewrite a
+        // question using the same current-turn transcript as prior context.
+        if (!history.isEmpty()
+                && "user".equals(history.getFirst().getRole())
+                && originalQuery.equals(history.getFirst().getContent())) {
+            history.removeFirst();
+        }
         // Need at least one prior exchange (user + assistant) before rewriting makes sense
         if (history.size() < 2) return originalQuery;
 
@@ -610,6 +673,10 @@ public class RAGService {
 
         // 1. Resolve workspaceId
         String resolvedWorkspaceId = ScopeNormalizer.normalizeWorkspace(context.getWorkspaceId());
+
+        if (isMeetingSharedScope(context)) {
+            return buildMeetingSharedFilter(b, resolvedWorkspaceId);
+        }
 
         // 2. Fetch workspace departmentId using WorkspaceServiceClient
         boolean isServiceFailure = false;
@@ -846,97 +913,8 @@ public class RAGService {
     }
 
     public boolean isPageAccessible(WikiPage page, RAGQueryPayload.UserPermissionContext context, String userId) {
-        // 1. Check workspace access
-        String resolvedWorkspaceId = ScopeNormalizer.normalizeWorkspace(context.getWorkspaceId());
-        String pageWsId = ScopeNormalizer.normalizeWorkspace(page.getWorkspaceId());
-        
-        // If page is not in the same workspace (and workspace is not ALL/GLOBAL)
-        if (!"ALL".equals(pageWsId) && !"GLOBAL".equals(pageWsId) && !pageWsId.equals(resolvedWorkspaceId)) {
-            return false;
-        }
-        
-        // 2. Resolve roles and admin status
-        List<String> roles = context.getRoles();
-        Integer roleLevel = context.getRoleLevel();
-        boolean isAdmin = false;
-        if (roles != null) {
-            if (roles.contains("SUPER_ADMIN") || roles.contains("ADMIN") || roles.contains("ORG_ADMIN")) {
-                isAdmin = true;
-            }
-        }
-        if (roleLevel != null && roleLevel <= 1) {
-            isAdmin = true;
-        }
-        
-        if (isAdmin) {
-            return true;
-        }
-        
-        // 3. Guest check
-        boolean isGuest = false;
-        if (roles != null && roles.contains("EXTERNAL_GUEST")) {
-            isGuest = true;
-        }
-        if (roleLevel != null && roleLevel >= 6) {
-            isGuest = true;
-        }
-        
-        if (isGuest) {
-            return SecurityClassification.PUBLIC == page.getSecurityClassification();
-        }
-        
-        // 4. PUBLIC pages are visible to all internal users
-        if (SecurityClassification.PUBLIC == page.getSecurityClassification()) {
-            return true;
-        }
-
-        // Parse user departments
-        List<String> deptIdsWhereHead = new ArrayList<>();
-        List<String> deptIdsWhereMember = new ArrayList<>();
-        List<RAGQueryPayload.DepartmentRole> userDepts = context.getUserDepartments();
-        if (userDepts != null) {
-            for (RAGQueryPayload.DepartmentRole dept : userDepts) {
-                String deptId = dept.getDepartmentId();
-                String role = dept.getRole();
-                if (deptId != null && !deptId.trim().isEmpty()) {
-                    if (PermissionUtils.isHeadOrDeputy(role)) {
-                        deptIdsWhereHead.add(deptId);
-                        deptIdsWhereMember.add(deptId);
-                    } else {
-                        deptIdsWhereMember.add(deptId);
-                    }
-                }
-            }
-        }
-
-        boolean hasHeadRole = !deptIdsWhereHead.isEmpty();
-        if ("HEAD".equalsIgnoreCase(page.getAllowedRoles()) && !hasHeadRole) {
-            return false;
-        }
-
-        // 5. Department-scoped pages: user must belong to that department
-        String pageDeptId = ScopeNormalizer.normalizeDepartment(page.getDepartmentId());
-        if (!"ALL".equals(pageDeptId) && !"GLOBAL".equals(pageDeptId)) {
-            if (deptIdsWhereHead.contains(pageDeptId)) {
-                return true;
-            }
-            if (deptIdsWhereMember.contains(pageDeptId) && !"HEAD".equalsIgnoreCase(page.getAllowedRoles())) {
-                return true;
-            }
-            return false;
-        }
-
-        // 6. No department restriction — workspace-only or INTERNAL company-wide
-        if (SecurityClassification.INTERNAL == page.getSecurityClassification()) {
-            return true;
-        }
-
-        // Workspace-specific pages without department: accessible to workspace members
-        if (!"ALL".equals(pageWsId) && !"GLOBAL".equals(pageWsId)) {
-            return true;
-        }
-
-        return false;
+        // Shared defense-in-depth helper (also used by experimental Mongo storage engine)
+        return PermissionUtils.isPageAccessible(page, context);
     }
 
     public List<org.springframework.ai.document.Document> expandContextWithWikiGraph(
@@ -1073,6 +1051,10 @@ public class RAGService {
         if (permissions != null) {
             log.info("[RAGService] User permissions: roles={}, userDepartments={}", 
                     permissions.getRoles(), permissions.getUserDepartments());
+        }
+
+        if (isMeetingSharedScope(permissions)) {
+            return executeMeetingSharedVectorSearch(query, permissions, userId, maxResults, minScore);
         }
 
         // 1. Vector Search
@@ -1274,6 +1256,60 @@ public class RAGService {
 
         // 6. LLM Reranking — score and select top-N most relevant documents
         return rerankService.rerank(query, graphExpandedDocs);
+    }
+
+    /**
+     * Meeting answers are broadcast to all call participants. Keep this search to
+     * explicitly public workspace embeddings and do not merge unrestricted keyword
+     * or graph results, which have user-specific access paths today.
+     */
+    private List<org.springframework.ai.document.Document> executeMeetingSharedVectorSearch(
+            String query,
+            RAGQueryPayload.UserPermissionContext permissions,
+            String userId,
+            int maxResults,
+            double minScore
+    ) {
+        org.springframework.ai.vectorstore.filter.Filter.Expression filter =
+                buildFilterExpressionAST(permissions, userId, new boolean[]{false});
+        SearchRequest request = SearchRequest.builder()
+                .query(query)
+                .topK(maxResults)
+                .similarityThreshold(minScore)
+                .filterExpression(formatExpression(filter))
+                .build();
+        try {
+            return vectorStore.similaritySearch(request);
+        } catch (Exception e) {
+            log.error("Meeting shared vector search failed", e);
+            return Collections.emptyList();
+        }
+    }
+
+    private boolean isMeetingSharedScope(RAGQueryPayload.UserPermissionContext context) {
+        return context != null && MEETING_SHARED_RAG_SCOPE.equals(context.getRagScope());
+    }
+
+    private org.springframework.ai.vectorstore.filter.Filter.Expression buildMeetingSharedFilter(
+            org.springframework.ai.vectorstore.filter.FilterExpressionBuilder b,
+            String workspaceId
+    ) {
+        if ("ALL".equals(workspaceId) || "GLOBAL".equals(workspaceId)) {
+            return b.eq("collectionId", "none").build();
+        }
+
+        org.springframework.ai.vectorstore.filter.FilterExpressionBuilder.Op workspaceAndDepartment = b.and(
+                b.eq("workspaceId", workspaceId),
+                b.or(b.eq("departmentId", "ALL"), b.eq("departmentId", "GLOBAL"))
+        );
+        org.springframework.ai.vectorstore.filter.FilterExpressionBuilder.Op publicClassification = b.or(
+                b.eq("classification", "PUBLIC"),
+                b.eq("securityClassification", "PUBLIC")
+        );
+        return b.and(
+                b.and(workspaceAndDepartment, publicClassification),
+                b.eq("allowedRoles", "ALL")
+        ).build();
     }
 
     private List<org.springframework.ai.document.Document> expandParentChildContext(List<org.springframework.ai.document.Document> docs) {

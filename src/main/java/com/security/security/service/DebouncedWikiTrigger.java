@@ -1,12 +1,13 @@
 package com.security.security.service;
 
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executors;
@@ -19,12 +20,14 @@ import java.util.concurrent.TimeUnit;
  * When multiple documents are ingested rapidly, this service:
  *   1. Collects document IDs per workspace in a queue
  *   2. Waits 30 seconds (debounce) after the last enqueue
- *   3. Acquires a Redis lock to prevent concurrent compilation
+ *   3. Acquires a Redis (or in-memory) lock to prevent concurrent compilation
  *   4. Triggers MRP pipeline for up to MAX_BATCH_SIZE documents at once
+ *
+ * Redis is optional: when StringRedisTemplate is unavailable (e.g. mongodb-benchmark
+ * profile excludes Redis auto-config), falls back to a process-local lock map.
  */
 @Service
 @Slf4j
-@RequiredArgsConstructor
 public class DebouncedWikiTrigger {
 
     private final StringRedisTemplate redisTemplate;
@@ -37,11 +40,23 @@ public class DebouncedWikiTrigger {
 
     private final ConcurrentHashMap<String, ConcurrentLinkedQueue<PendingDoc>> pendingByWorkspace = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> lastEnqueueTime = new ConcurrentHashMap<>();
+    /** Process-local lock fallback when Redis is not configured. */
+    private final ConcurrentHashMap<String, Long> localLocks = new ConcurrentHashMap<>();
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = Thread.ofVirtual().unstarted(r);
         t.setName("wiki-debounce-scheduler");
         return t;
     });
+
+    public DebouncedWikiTrigger(
+            Optional<StringRedisTemplate> redisTemplate,
+            MrpPipelineService mrpPipelineService) {
+        this.redisTemplate = redisTemplate.orElse(null);
+        this.mrpPipelineService = mrpPipelineService;
+        if (this.redisTemplate == null) {
+            log.warn("[WikiTrigger] StringRedisTemplate unavailable — using in-memory locks (single-instance only)");
+        }
+    }
 
     public void enqueue(Long documentId, String workspaceId, String userId) {
         String wsKey = workspaceId != null ? workspaceId : "default";
@@ -70,9 +85,7 @@ public class DebouncedWikiTrigger {
         if (queue == null || queue.isEmpty()) return;
 
         String lockKey = LOCK_PREFIX + workspaceId;
-        Boolean acquired = redisTemplate.opsForValue().setIfAbsent(lockKey, "locked", LOCK_TTL);
-
-        if (!Boolean.TRUE.equals(acquired)) {
+        if (!tryAcquireLock(lockKey)) {
             log.info("[WikiTrigger] Lock held for workspace={}, rescheduling", workspaceId);
             scheduler.schedule(() -> tryFlush(workspaceId), DEBOUNCE_SECONDS, TimeUnit.SECONDS);
             return;
@@ -102,12 +115,41 @@ public class DebouncedWikiTrigger {
                 scheduler.schedule(() -> tryFlush(workspaceId), DEBOUNCE_SECONDS, TimeUnit.SECONDS);
             }
         } finally {
+            releaseLock(lockKey, workspaceId);
+        }
+    }
+
+    private boolean tryAcquireLock(String lockKey) {
+        if (redisTemplate != null) {
             try {
-                redisTemplate.delete(lockKey);
+                Boolean acquired = redisTemplate.opsForValue().setIfAbsent(lockKey, "locked", LOCK_TTL);
+                return Boolean.TRUE.equals(acquired);
             } catch (Exception e) {
-                log.warn("[WikiTrigger] Failed to release lock for workspace={}: {}", workspaceId, e.getMessage());
+                log.warn("[WikiTrigger] Redis lock failed, falling back to local lock: {}", e.getMessage());
             }
         }
+        long now = System.currentTimeMillis();
+        long expiry = now + LOCK_TTL.toMillis();
+        Long existing = localLocks.putIfAbsent(lockKey, expiry);
+        if (existing == null) {
+            return true;
+        }
+        if (existing < now) {
+            return localLocks.replace(lockKey, existing, expiry);
+        }
+        return false;
+    }
+
+    private void releaseLock(String lockKey, String workspaceId) {
+        if (redisTemplate != null) {
+            try {
+                redisTemplate.delete(lockKey);
+                return;
+            } catch (Exception e) {
+                log.warn("[WikiTrigger] Failed to release Redis lock for workspace={}: {}", workspaceId, e.getMessage());
+            }
+        }
+        localLocks.remove(lockKey);
     }
 
     private record PendingDoc(Long documentId, String userId) {}
